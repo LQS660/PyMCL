@@ -4,8 +4,10 @@ import os
 import re
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from urllib.parse import urljoin
 
 import requests
 from urllib3.util.retry import Retry
@@ -14,6 +16,7 @@ from . import APP_NAME, APP_VERSION
 from . import utils
 from .download_status import DownloadTracker, StatusHTTPAdapter
 from .mirrors import expand_download_urls
+from .source import is_github_url
 
 
 class DownloadError(Exception):
@@ -40,12 +43,44 @@ def _looks_complete(path) -> bool:
     return not stripped.startswith((b"<html", b"<!doctype", b"error"))
 
 
+def _is_redirect(resp) -> bool:
+    return bool(getattr(resp, "is_redirect", False)) or resp.status_code in (301, 302, 303, 307, 308)
+
+
+def _transport_dead(err) -> bool:
+    """TLS/代理/握手挂了，换源比在同一条死链上重试有用。"""
+    msg = str(err).lower()
+    return any(token in msg for token in (
+        "sslcertverificationerror",
+        "certificate_verify_failed",
+        "unable to get local issuer",
+        "sslerror",
+        "ssleoferror",
+        "proxyerror",
+        "newconnectionerror",
+        "connecttimeouterror",
+        "connection refused",
+        "max retries exceeded",
+    ))
+
+
 def _should_switch_source(err) -> bool:
     """这类错误换下一个镜像，不要在死链上反复重试。"""
     msg = str(err)
     if "用户取消" in msg:
         return True
-    return bool(re.search(r"HTTP (403|404|408|409|410|429|5\d{2})\b", msg))
+    if re.search(r"HTTP (403|404|408|409|410|429|5\d{2})\b", msg):
+        return True
+    return _transport_dead(err)
+
+
+def _enqueue_redirect(pending: deque, tried: set, location: str, depth: int):
+    """Adoptium 等会 302 到 GitHub：这里展开国内镜像，避免直连 github.com 被本地代理证书拦死。"""
+    nxt = expand_download_urls(location) if is_github_url(location) else [location]
+    for item in reversed(nxt):
+        if item and item not in tried:
+            pending.appendleft((item, depth + 1))
+    return nxt
 
 
 # 全局“目标文件 -> 锁”注册表：任何 DownloadManager 下载同一文件时串行化，
@@ -236,17 +271,40 @@ class DownloadManager:
 
         part = dest.with_name(dest.name + ".part")
         last_err = None
-        for url in urls:
+        pending = deque((u, 0) for u in urls if u)
+        tried = set()
+        while pending:
             if self.cancel():
                 raise DownloadError("用户取消")
+            url, depth = pending.popleft()
+            if url in tried:
+                continue
+            if depth > 8:
+                last_err = DownloadError(f"重定向过多: {url}")
+                continue
+            tried.add(url)
             fatal = False
+            redirected = False
             for attempt in range(2):
                 if self.cancel():
                     raise DownloadError("用户取消")
                 try:
                     self.tracker.reset_connect()
                     headers = self._extra_headers(url)
-                    with self.session.get(url, stream=True, timeout=timeout, headers=headers) as resp:
+                    with self.session.get(
+                        url, stream=True, timeout=timeout, headers=headers,
+                        allow_redirects=False,
+                    ) as resp:
+                        if _is_redirect(resp):
+                            loc = urljoin(url, resp.headers.get("Location") or "")
+                            if not loc:
+                                raise DownloadError(f"重定向无 Location: {url}")
+                            nxt = _enqueue_redirect(pending, tried, loc, depth)
+                            utils.log.info(
+                                "下载重定向 %s -> %s（候选 %d）", url, loc, len(nxt),
+                            )
+                            redirected = True
+                            break
                         if not self.tracker.did_connect():
                             self.tracker.reuse()
                         code = resp.status_code
@@ -292,7 +350,12 @@ class DownloadManager:
                 except Exception as e:
                     last_err = e
                     _safe_unlink(part)
+                    if _transport_dead(e):
+                        fatal = True
+                        break
                     time.sleep(1.0 * (attempt + 1))
+            if redirected:
+                continue
             if fatal and last_err and "用户取消" in str(last_err):
                 raise last_err
             if last_err:

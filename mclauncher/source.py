@@ -174,6 +174,11 @@ def modrinth_file_urls(urls) -> list[str]:
     return _order(official, mirror, community_mirror_first(), community_mode())
 
 
+def is_github_url(url: str) -> bool:
+    low = (url or "").lower()
+    return "github.com" in low or "githubusercontent.com" in low
+
+
 def expand_download_urls(url):
     """按当前下载源策略展开候选。自动模式：官方慢则镜像在前。"""
     if not url:
@@ -191,7 +196,7 @@ def expand_download_urls(url):
     if "api.modrinth.com" in url or MODRINTH_CDN in url:
         return modrinth_file_urls(url)
 
-    if "github.com" in url.lower() or "githubusercontent.com" in url.lower():
+    if is_github_url(url):
         from .mirrors import github_candidates
         if download_mode() == "official":
             return [url]
