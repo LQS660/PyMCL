@@ -440,7 +440,7 @@ _CF_SLUG_RE = re.compile(r"curseforge\.com/minecraft/(mc-mods|modpacks)/([^/?#]+
 # ================================================================
 CF_OFFICIAL_API = "https://api.curseforge.com/v1"
 CF_WEB_API = "https://www.curseforge.com/api/v1/mods"   # 官网内部 API（无需 key，伪装浏览器兜底）
-# 官方不可达时的国内镜像（MCIM 已实测可返回 /files；BMCLAPI 对部分项目 404）
+# 官方不可达时走 MCIM。BMCLAPI /curseforge/v1 实测 404，不再列入。
 def cf_api_bases():
     from . import source
     return source.cf_api_bases()
@@ -484,11 +484,15 @@ def cf_mod_download_urls(addon_id, file_id, filename=None, download_url=None):
     if download_url:
         urls.append(download_url)
     if filename:
+        from . import source
         for host in ("mediafilez.forgecdn.net", "edge.forgecdn.net"):
-            urls.append(_cf_file_cdn_url(file_id, filename, host=host))
+            cdn = _cf_file_cdn_url(file_id, filename, host=host)
+            urls.append(cdn)
+            mirrored = source.rewrite_to_mcim(cdn)
+            if mirrored:
+                urls.append(mirrored)
     urls.append(f"{CF_OFFICIAL_API}/mods/{addon_id}/files/{file_id}/download")
     urls.append(f"https://mod.mcimirror.top/curseforge/v1/mods/{addon_id}/files/{file_id}/download")
-    urls.append(f"https://bmclapi2.bangbang93.com/curseforge/v1/mods/{addon_id}/files/{file_id}/download")
     urls.append(f"{CF_WEB_API}/{addon_id}/files/{file_id}/download")
     seen, out = set(), []
     for u in urls:

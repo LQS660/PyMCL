@@ -40,14 +40,19 @@ MOD_ALIASES = {
     "世界地图": {"slug": "xaeros-world-map", "title": "Xaero's World Map"},
     "xaeros世界地图": {"slug": "xaeros-world-map", "title": "Xaero's World Map"},
 
-    "高清修复": {"slug": "optifine", "cf": 225608, "title": "OptiFine"},
-    "optifine": {"slug": "optifine", "cf": 225608, "title": "OptiFine"},
-    "光影": {"slug": "optifine", "cf": 225608, "title": "OptiFine"},
+    "高清修复": {"slug": "iris", "title": "Iris Shaders"},
+    "optifine": {"slug": "iris", "title": "Iris Shaders"},
+    "光影": {"slug": "iris", "title": "Iris Shaders"},
 
     "fabric api": {"slug": "fabric-api", "title": "Fabric API"},
     "fabric接口": {"slug": "fabric-api", "title": "Fabric API"},
 
-    "forge api": {"slug": "forge", "title": "Minecraft Forge"},
+    "群峦传说": {"slug": "terrafirmacraft", "cf": 302973, "title": "TerraFirmaCraft"},
+    "terrafirmacraft": {"slug": "terrafirmacraft", "cf": 302973, "title": "TerraFirmaCraft"},
+    "群峦": {"slug": "terrafirmacraft", "cf": 302973, "title": "TerraFirmaCraft"},
+    "tfc": {"slug": "terrafirmacraft", "cf": 302973, "title": "TerraFirmaCraft"},
+    "HBM核科技": {"cf": 235439, "title": "Hbm's Nuclear Tech Mod"},
+    "hbm nuclear tech": {"cf": 235439, "title": "Hbm's Nuclear Tech Mod"},
 
     "旅行地图": {"slug": "journeymap", "cf": 32274, "title": "JourneyMap"},
     "journeymap": {"slug": "journeymap", "cf": 32274, "title": "JourneyMap"},
@@ -64,9 +69,9 @@ MOD_ALIASES = {
     "twilight forest": {"slug": "twilight-forest", "cf": 227639, "title": "Twilight Forest"},
     "twilight": {"slug": "twilight-forest", "cf": 227639, "title": "Twilight Forest"},
 
-    "应用能源2": {"slug": "applied-energistics-2", "cf": 223794, "title": "Applied Energistics 2"},
-    "ae2": {"slug": "applied-energistics-2", "cf": 223794, "title": "Applied Energistics 2"},
-    "applied energistics 2": {"slug": "applied-energistics-2", "cf": 223794, "title": "Applied Energistics 2"},
+    "应用能源2": {"slug": "ae2", "cf": 223794, "title": "Applied Energistics 2"},
+    "ae2": {"slug": "ae2", "cf": 223794, "title": "Applied Energistics 2"},
+    "applied energistics 2": {"slug": "ae2", "cf": 223794, "title": "Applied Energistics 2"},
 
     "神秘时代": {"slug": "thaumcraft", "cf": 223628, "title": "Thaumcraft"},
     "thaumcraft": {"slug": "thaumcraft", "cf": 223628, "title": "Thaumcraft"},
@@ -92,8 +97,8 @@ MOD_ALIASES = {
     "林业": {"slug": "forestry", "cf": 59751, "title": "Forestry"},
     "forestry": {"slug": "forestry", "cf": 59751, "title": "Forestry"},
 
-    "星系": {"slug": "galacticraft", "cf": 224724, "title": "Galacticraft"},
-    "galacticraft": {"slug": "galacticraft", "cf": 224724, "title": "Galacticraft"},
+    "星系": {"cf": 564236, "title": "Galacticraft Legacy"},
+    "galacticraft": {"cf": 564236, "title": "Galacticraft Legacy"},
 
     "储物抽屉": {"slug": "storage-drawers", "cf": 223852, "title": "Storage Drawers"},
     "storage drawers": {"slug": "storage-drawers", "cf": 223852, "title": "Storage Drawers"},
@@ -113,18 +118,18 @@ MOD_ALIASES = {
     "appleskin": {"slug": "appleskin", "title": "AppleSkin"},
     "饥饿值显示": {"slug": "appleskin", "title": "AppleSkin"},
 
-    "伤害显示": {"slug": "torohealth-damage-indicators", "title": "ToroHealth Damage Indicators"},
-    "torohealth": {"slug": "torohealth-damage-indicators", "title": "ToroHealth Damage Indicators"},
+    "伤害显示": {"title": "ToroHealth Damage Indicators"},
+    "torohealth": {"title": "ToroHealth Damage Indicators"},
 
     "方块信息": {"slug": "wthit", "title": "What Is That? (WTHIT)"},
     "wthit": {"slug": "wthit", "title": "What Is That? (WTHIT)"},
     "hud显示": {"slug": "wthit", "title": "What Is That? (WTHIT)"},
 
-    "连锁采集": {"slug": "veinminer", "cf": 240630, "title": "VeinMiner"},
-    "veinminer": {"slug": "veinminer", "cf": 240630, "title": "VeinMiner"},
-    "vein miner": {"slug": "veinminer", "cf": 240630, "title": "VeinMiner"},
+    "连锁采集": {"slug": "veinminer", "cf": 67133, "title": "VeinMiner"},
+    "veinminer": {"slug": "veinminer", "cf": 67133, "title": "VeinMiner"},
+    "vein miner": {"slug": "veinminer", "cf": 67133, "title": "VeinMiner"},
 
-    "一键挖矿": {"slug": "veinminer", "cf": 240630, "title": "VeinMiner"},
+    "一键挖矿": {"slug": "veinminer", "cf": 67133, "title": "VeinMiner"},
 
     "投影": {"slug": "litematica", "title": "Litematica"},
     "litematica": {"slug": "litematica", "title": "Litematica"},
@@ -192,7 +197,7 @@ MOD_ALIASES = {
     "NEI": {"slug": "nei", "title": "Not Enough Items"},
     "not enough items": {"slug": "nei", "title": "Not Enough Items"},
 
-    "伤害指示器": {"slug": "torohealth-damage-indicators", "title": "ToroHealth Damage Indicators"},
+    "伤害指示器": {"title": "ToroHealth Damage Indicators"},
 
     "地牢": {"slug": "dungeons-mod", "title": "Dungeons Mod"},
     "更多结构": {"slug": "yungs-better-dungeons", "title": "YUNG's Better Dungeons"},
@@ -251,7 +256,7 @@ MOD_ALIASES = {
 
     "传送石碑": {"slug": "waystones", "title": "Waystones"},
 
-    "传送门枪": {"slug": "portal-gun", "cf": 224791, "title": "Portal Gun"},
+    "传送门枪": {"slug": "portal-gun", "cf": 229084, "title": "Portal Gun"},
 
     "搬运": {"slug": "carry-on", "title": "Carry On"},
     "carry on": {"slug": "carry-on", "title": "Carry On"},
@@ -332,23 +337,18 @@ MOD_ALIASES = {
     "开放式电脑": {"slug": "opencomputers", "cf": 225658, "title": "OpenComputers"},
     "opencomputers": {"slug": "opencomputers", "cf": 225658, "title": "OpenComputers"},
 
-    "中文输入": {"slug": "cocoa-input-fix", "title": "CocoaInput Fix"},
-    "cocoainput": {"slug": "cocoa-input-fix", "title": "CocoaInput Fix"},
-    "输入修复": {"slug": "cocoa-input-fix", "title": "CocoaInput Fix"},
-    "输入法修复": {"slug": "cocoa-input-fix", "title": "CocoaInput Fix"},
+    "更好的FPS": {"cf": 229876, "title": "BetterFps"},
 
-    "更好的FPS": {"slug": "better-fps", "cf": 228756, "title": "Better FPS"},
-
-    "显示FPS": {"slug": "better-fps", "cf": 228756, "title": "Better FPS"},
+    "显示FPS": {"cf": 229876, "title": "BetterFps"},
 
     "按键显示": {"slug": "keystrokes", "title": "Keystrokes"},
     "keystrokes": {"slug": "keystrokes", "title": "Keystrokes"},
 
     "CPS显示": {"slug": "cps", "title": "CPS"},
 
-    "皮肤显示": {"slug": "skinlayers3d", "title": "3D Skin Layers"},
-    "3d皮肤层": {"slug": "skinlayers3d", "title": "3D Skin Layers"},
-    "3d skin layers": {"slug": "skinlayers3d", "title": "3D Skin Layers"},
+    "皮肤显示": {"slug": "3dskinlayers", "title": "3D Skin Layers"},
+    "3d皮肤层": {"slug": "3dskinlayers", "title": "3D Skin Layers"},
+    "3d skin layers": {"slug": "3dskinlayers", "title": "3D Skin Layers"},
 
     "自定义皮肤": {"slug": "customskinloader", "title": "CustomSkinLoader"},
     "customskinloader": {"slug": "customskinloader", "title": "CustomSkinLoader"},
@@ -530,76 +530,23 @@ def fuzzy_match_mod(query: str):
 # 热门整合包中文别名
 # ----------------------------------------------------------------
 MODPACK_ALIASES = {
-    "悲惨世界": {"slug": "tragic-world", "title": "Tragic World"},
-    "龙之冒险": {"slug": "dragon-adventure", "title": "Dragon Adventure"},
-    "冒险之旅": {"slug": "adventure-trip", "title": "Adventure Trip"},
-    "群峦传说": {"slug": "terrafirmacraft", "cf": 302973, "title": "TerraFirmaCraft"},
-    "terrafirmacraft": {"slug": "terrafirmacraft", "cf": 302973, "title": "TerraFirmaCraft"},
-    "群峦": {"slug": "terrafirmacraft", "cf": 302973, "title": "TerraFirmaCraft"},
-    "tfc": {"slug": "terrafirmacraft", "cf": 302973, "title": "TerraFirmaCraft"},
+    "GTNH": {"cf": 252507, "title": "GregTech: New Horizons"},
+    "格雷科技新视野": {"cf": 252507, "title": "GregTech: New Horizons"},
+    "gregtech new horizons": {"cf": 252507, "title": "GregTech: New Horizons"},
+    "gt new horizons": {"cf": 252507, "title": "GregTech: New Horizons"},
 
-    "GTNH": {"slug": "gt-new-horizons", "cf": 252507, "title": "GregTech: New Horizons"},
-    "格雷科技新视野": {"slug": "gt-new-horizons", "cf": 252507, "title": "GregTech: New Horizons"},
-    "gregtech new horizons": {"slug": "gt-new-horizons", "cf": 252507, "title": "GregTech: New Horizons"},
-    "gt new horizons": {"slug": "gt-new-horizons", "cf": 252507, "title": "GregTech: New Horizons"},
+    "RLCraft": {"cf": 285109, "title": "RLCraft"},
+    "真实生存": {"cf": 285109, "title": "RLCraft"},
 
-    "贪婪整合包": {"slug": "greedy-craft", "title": "GreedyCraft"},
-    "greedycraft": {"slug": "greedy-craft", "title": "GreedyCraft"},
-
-    "航空母舰": {"slug": "aircraft-carrier", "title": "Aircraft Carrier"},
-
-    "魔法金属": {"slug": "magical-metals", "title": "Magical Metals"},
-
-    "蔚蓝天空": {"slug": "blue-skies", "title": "Blue Skies"},
-    "blue skies": {"slug": "blue-skies", "title": "Blue Skies"},
-
-    "冰与火之歌": {"slug": "ice-and-fire-dragons", "cf": 264231, "title": "Ice and Fire: Dragons"},
-    "ice and fire": {"slug": "ice-and-fire-dragons", "cf": 264231, "title": "Ice and Fire: Dragons"},
-    "冰火传说": {"slug": "ice-and-fire-dragons", "cf": 264231, "title": "Ice and Fire: Dragons"},
-
-    "龙骑士": {"slug": "dragon-mounts", "title": "Dragon Mounts"},
-    "dragon mounts": {"slug": "dragon-mounts", "title": "Dragon Mounts"},
-
-    "我的世界原版增强": {"slug": "vanilla-plus", "title": "Vanilla Plus"},
-
-    "RLCraft": {"slug": "rlcraft", "cf": 285109, "title": "RLCraft"},
-    "真实生存": {"slug": "rlcraft", "cf": 285109, "title": "RLCraft"},
-
-    "更好的MC": {"slug": "better-mc-forge-bmc1", "cf": 429793, "title": "Better MC"},
-    "better mc": {"slug": "better-mc-forge-bmc1", "cf": 429793, "title": "Better MC"},
-    "better minecraft": {"slug": "better-mc-forge-bmc1", "cf": 429793, "title": "Better MC"},
-
-    "永恒MC": {"slug": "eternal-mc", "title": "Eternal MC"},
-
-    "原始科技": {"slug": "primal-tech", "title": "Primal Tech"},
-
-    "星界": {"slug": "astralex", "title": "AstralEx"},
-
-    "现代建筑": {"slug": "modern-architecture", "title": "Modern Architecture"},
-
-    "最终黎明": {"slug": "final-dawn", "title": "Final Dawn"},
-
-    "僵尸启示录": {"slug": "zombie-apocalypse", "title": "Zombie Apocalypse"},
+    "更好的MC": {"cf": 429793, "title": "Better MC"},
+    "better mc": {"cf": 429793, "title": "Better MC"},
+    "better minecraft": {"cf": 429793, "title": "Better MC"},
 
     "空岛": {"slug": "simply-skyblock", "title": "Simply Skyblock"},
     "skyblock": {"slug": "simply-skyblock", "title": "Simply Skyblock"},
     "空岛生存": {"slug": "simply-skyblock", "title": "Simply Skyblock"},
 
-    "石头世界": {"slug": "stoneblock", "title": "StoneBlock"},
-    "stoneblock": {"slug": "stoneblock", "title": "StoneBlock"},
-
-    "水世界": {"slug": "aquatic", "title": "Aquatic"},
-
-    "天空工厂": {"slug": "sky-factory", "title": "Sky Factory"},
-    "sky factory": {"slug": "sky-factory", "title": "Sky Factory"},
-    "skyfactory": {"slug": "sky-factory", "title": "Sky Factory"},
-
-    "疯狂科技": {"slug": "crazy-tech", "title": "Crazy Tech"},
-
-    "工业革命": {"slug": "industrial-revolution", "title": "Industrial Revolution"},
-
     # CBC = 黄铜协奏曲（Create The Brass Concerto），Forge 1.20.1。
-    # 这是用户指定的「机械动力整合包」。不要映射到 Create+ 或 CDC。
     "机械动力": {"cf": CBC_CF_ID, "title": "机械动力：黄铜协奏曲"},
     "机械动力整合包": {"cf": CBC_CF_ID, "title": "机械动力：黄铜协奏曲"},
     "机械动力整合": {"cf": CBC_CF_ID, "title": "机械动力：黄铜协奏曲"},
@@ -609,7 +556,6 @@ MODPACK_ALIASES = {
     "create the brass concerto": {"cf": CBC_CF_ID, "title": "机械动力：黄铜协奏曲"},
     "create-the-brass-concerto": {"cf": CBC_CF_ID, "title": "机械动力：黄铜协奏曲"},
 
-    # CDC 仍可按原名搜到，但不再占用「机械动力」关键词。
     "齿轮盛宴": {"cf": CDC_CF_ID, "title": "机械动力：齿轮盛宴"},
     "cdc": {"cf": CDC_CF_ID, "title": "机械动力：齿轮盛宴"},
     "create delight": {"cf": CDC_CF_ID, "title": "机械动力：齿轮盛宴"},
@@ -620,36 +566,6 @@ MODPACK_ALIASES = {
     "create plus": {"slug": "create_plus", "title": "Create+"},
     "createplus": {"slug": "create_plus", "title": "Create+"},
     "机械动力+": {"slug": "create_plus", "title": "Create+"},
-
-    "航海": {"slug": "sail-the-seas", "title": "Sail the Seas"},
-
-    "荒野生存": {"slug": "wilderness-survival", "title": "Wilderness Survival"},
-
-    "地层": {"slug": "strata", "title": "Strata"},
-
-    "维度生存": {"slug": "dimensional-survival", "title": "Dimensional Survival"},
-
-    "魔法世界": {"slug": "magic-world", "title": "Magic World"},
-
-    "专家模式": {"slug": "expert-mode", "title": "Expert Mode"},
-
-    "科技枪": {"slug": "techguns", "title": "Techguns"},
-    "techguns": {"slug": "techguns", "title": "Techguns"},
-
-    "失落的城市": {"slug": "the-lost-cities", "title": "The Lost Cities"},
-    "the lost cities": {"slug": "the-lost-cities", "title": "The Lost Cities"},
-
-    "辐射": {"slug": "radiation", "title": "Radiation"},
-    "辐射世界": {"slug": "radiation", "title": "Radiation"},
-
-    "核科技": {"slug": "nuclear-tech", "title": "Nuclear Tech"},
-    "nuclear tech": {"slug": "nuclear-tech", "title": "Nuclear Tech"},
-
-    "HBM核科技": {"slug": "hbm-nuclear-tech", "cf": 235121, "title": "HBM's Nuclear Tech"},
-    "hbm nuclear tech": {"slug": "hbm-nuclear-tech", "cf": 235121, "title": "HBM's Nuclear Tech"},
-
-    "模特": {"slug": "figura", "title": "Figura"},
-    "figura": {"slug": "figura", "title": "Figura"},
 }
 
 _MODPACK_ALIASES_LOWER = {k.lower(): v for k, v in MODPACK_ALIASES.items()}
@@ -677,7 +593,6 @@ POPULAR_MODS = [
     ("Lithium 锂 (服务器优化)", "modrinth", "lithium", None, "fabric"),
     ("Starlight 星光 (光照优化)", "modrinth", "starlight", None, "fabric"),
     ("Iris 光影加载器", "modrinth", "iris", None, "fabric"),
-    ("OptiFine 高清修复", "curseforge", 225608, None, "forge"),
     ("BetterF3", "modrinth", "betterf3", None, "fabric"),
     # 功能类
     ("JEI 物品管理器", "modrinth", "jei", None, "forge"),
@@ -689,7 +604,7 @@ POPULAR_MODS = [
     ("AppleSkin 饥饿值显示", "modrinth", "appleskin", None, "fabric"),
     ("WTHIT 方块信息", "modrinth", "wthit", None, "fabric"),
     ("Litematica 投影", "modrinth", "litematica", None, "fabric"),
-    ("VeinMiner 连锁采集", "curseforge", 240630, None, "forge"),
+    ("VeinMiner 连锁采集", "curseforge", 67133, None, "forge"),
     ("WorldEdit 创世神", "modrinth", "worldedit", None, "forge"),
     ("Carry On 搬运", "modrinth", "carry-on", None, "fabric"),
     # 内容类
@@ -704,16 +619,14 @@ POPULAR_MODS = [
     ("Farmer's Delight 农夫乐事", "modrinth", "farmers-delight", None, "fabric"),
     ("Quark 夸克", "curseforge", 243121, None, "forge"),
     ("Ice and Fire 冰火传说", "curseforge", 264231, None, "forge"),
-    ("Galacticraft 星系", "curseforge", 224724, None, "forge"),
+    ("Galacticraft Legacy 星系", "curseforge", 564236, None, "forge"),
     ("Biomes O' Plenty 超多群系", "curseforge", 220318, None, "forge"),
     ("Mowzie's Mobs 更多生物", "modrinth", "mowzies-mobs", None, "forge"),
     # 辅助类
-    ("CocoaInput 中文输入修复", "modrinth", "cocoa-input-fix", None, "fabric"),
     ("CustomSkinLoader 皮肤加载", "modrinth", "customskinloader", None, "fabric"),
-    ("3D Skin Layers 皮肤层", "modrinth", "skinlayers3d", None, "fabric"),
+    ("3D Skin Layers 皮肤层", "modrinth", "3dskinlayers", None, "fabric"),
     ("Simple Voice Chat 语音", "modrinth", "simple-voice-chat", None, "fabric"),
     ("Inventory Profiles 物品栏", "modrinth", "inventory-profiles-next", None, "fabric"),
-    ("ToroHealth 伤害显示", "modrinth", "torohealth-damage-indicators", None, "fabric"),
     ("Path of Exile 音效", "modrinth", "presence-footsteps", None, "fabric"),
 ]
 
@@ -726,7 +639,6 @@ POPULAR_MODPACKS = [
     ("Simply Skyblock 空岛", "modrinth", "simply-skyblock", None),
     ("Create+（原版风 1.19.2，不是CBC）", "modrinth", "create_plus", None),
     ("GTNH 格雷科技新视野", "curseforge", 252507, "gt-new-horizons"),
-    ("TerraFirmaCraft 群峦传说", "curseforge", 302973, "terrafirmacraft"),
     ("Fabulously Optimized", "modrinth", "fabulously-optimized", None),
     ("Adrenaline", "modrinth", "adrenaline", None),
     ("All Of Create", "modrinth", "all-of-create-fabric", None),

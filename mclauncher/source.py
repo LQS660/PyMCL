@@ -115,11 +115,10 @@ def warmup_async():
 
 
 def _order(primary: list[str], secondary: list[str], secondary_first: bool, exclusive: str | None):
+    # official = 只要官方。镜像优先/仅 BMCL/MCIM = 镜像在前，官方始终垫底，避免镜像 404 直接失败。
     if exclusive == "official":
-        return [u for u in primary if u]
-    if exclusive in ("bmclapi", "mcim"):
-        return [u for u in secondary if u] or [u for u in primary if u]
-    if secondary_first:
+        seq = primary
+    elif exclusive in ("bmclapi", "mcim") or secondary_first:
         seq = secondary + primary
     else:
         seq = primary + secondary
@@ -154,6 +153,9 @@ def rewrite_to_mcim(url: str) -> str | None:
         return url.replace(MODRINTH_CDN, MCIM)
     if url.startswith("https://api.curseforge.com"):
         return url.replace("https://api.curseforge.com", f"{MCIM}/curseforge")
+    for host in ("https://edge.forgecdn.net", "https://mediafilez.forgecdn.net"):
+        if url.startswith(host):
+            return MCIM + url[len(host):]
     return None
 
 
@@ -165,7 +167,7 @@ def modrinth_api_bases() -> list[str]:
 
 def cf_api_bases() -> list[str]:
     official = [CF_OFFICIAL]
-    mirror = [f"{MCIM}/curseforge/v1", f"{BMCLAPI}/curseforge/v1"]
+    mirror = [f"{MCIM}/curseforge/v1"]
     return _order(official, mirror, community_mirror_first(), community_mode())
 
 
@@ -202,7 +204,12 @@ def expand_download_urls(url):
         return out
     url = str(url)
 
-    if "api.modrinth.com" in url or MODRINTH_CDN in url:
+    if (
+        "api.modrinth.com" in url
+        or MODRINTH_CDN in url
+        or "forgecdn.net" in url
+        or url.startswith(f"{MCIM}/files/")
+    ):
         return modrinth_file_urls(url)
 
     if is_github_url(url):
@@ -223,7 +230,7 @@ def describe() -> str:
     if file_mode == "auto":
         file_txt = "自动·镜像优先" if file_mirror_first() else "自动·官方优先"
     elif file_mode == "bmclapi":
-        file_txt = "仅 BMCLAPI"
+        file_txt = "BMCLAPI优先"
     else:
         file_txt = "仅官方"
     return f"文件:{file_txt} / 社区:{comm}"

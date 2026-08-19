@@ -53,19 +53,16 @@
       "title": "Xaero's World Map"
     },
     "高清修复": {
-      "slug": "optifine",
-      "cf": 225608,
-      "title": "OptiFine"
+      "slug": "iris",
+      "title": "Iris Shaders"
     },
     "optifine": {
-      "slug": "optifine",
-      "cf": 225608,
-      "title": "OptiFine"
+      "slug": "iris",
+      "title": "Iris Shaders"
     },
     "光影": {
-      "slug": "optifine",
-      "cf": 225608,
-      "title": "OptiFine"
+      "slug": "iris",
+      "title": "Iris Shaders"
     },
     "fabric api": {
       "slug": "fabric-api",
@@ -75,9 +72,33 @@
       "slug": "fabric-api",
       "title": "Fabric API"
     },
-    "forge api": {
-      "slug": "forge",
-      "title": "Minecraft Forge"
+    "群峦传说": {
+      "slug": "terrafirmacraft",
+      "cf": 302973,
+      "title": "TerraFirmaCraft"
+    },
+    "terrafirmacraft": {
+      "slug": "terrafirmacraft",
+      "cf": 302973,
+      "title": "TerraFirmaCraft"
+    },
+    "群峦": {
+      "slug": "terrafirmacraft",
+      "cf": 302973,
+      "title": "TerraFirmaCraft"
+    },
+    "tfc": {
+      "slug": "terrafirmacraft",
+      "cf": 302973,
+      "title": "TerraFirmaCraft"
+    },
+    "HBM核科技": {
+      "cf": 235439,
+      "title": "Hbm's Nuclear Tech Mod"
+    },
+    "hbm nuclear tech": {
+      "cf": 235439,
+      "title": "Hbm's Nuclear Tech Mod"
     },
     "旅行地图": {
       "slug": "journeymap",
@@ -130,17 +151,17 @@
       "title": "Twilight Forest"
     },
     "应用能源2": {
-      "slug": "applied-energistics-2",
+      "slug": "ae2",
       "cf": 223794,
       "title": "Applied Energistics 2"
     },
     "ae2": {
-      "slug": "applied-energistics-2",
+      "slug": "ae2",
       "cf": 223794,
       "title": "Applied Energistics 2"
     },
     "applied energistics 2": {
-      "slug": "applied-energistics-2",
+      "slug": "ae2",
       "cf": 223794,
       "title": "Applied Energistics 2"
     },
@@ -229,14 +250,12 @@
       "title": "Forestry"
     },
     "星系": {
-      "slug": "galacticraft",
-      "cf": 224724,
-      "title": "Galacticraft"
+      "cf": 564236,
+      "title": "Galacticraft Legacy"
     },
     "galacticraft": {
-      "slug": "galacticraft",
-      "cf": 224724,
-      "title": "Galacticraft"
+      "cf": 564236,
+      "title": "Galacticraft Legacy"
     },
     "储物抽屉": {
       "slug": "storage-drawers",
@@ -298,11 +317,9 @@
       "title": "AppleSkin"
     },
     "伤害显示": {
-      "slug": "torohealth-damage-indicators",
       "title": "ToroHealth Damage Indicators"
     },
     "torohealth": {
-      "slug": "torohealth-damage-indicators",
       "title": "ToroHealth Damage Indicators"
     },
     "方块信息": {
@@ -319,22 +336,22 @@
     },
     "连锁采集": {
       "slug": "veinminer",
-      "cf": 240630,
+      "cf": 67133,
       "title": "VeinMiner"
     },
     "veinminer": {
       "slug": "veinminer",
-      "cf": 240630,
+      "cf": 67133,
       "title": "VeinMiner"
     },
     "vein miner": {
       "slug": "veinminer",
-      "cf": 240630,
+      "cf": 67133,
       "title": "VeinMiner"
     },
     "一键挖矿": {
       "slug": "veinminer",
-      "cf": 240630,
+      "cf": 67133,
       "title": "VeinMiner"
     },
     "投影": {
@@ -529,7 +546,6 @@
       "title": "Not Enough Items"
     },
     "伤害指示器": {
-      "slug": "torohealth-damage-indicators",
       "title": "ToroHealth Damage Indicators"
     },
     "地牢": {
@@ -683,7 +699,7 @@
     },
     "传送门枪": {
       "slug": "portal-gun",
-      "cf": 224791,
+      "cf": 229084,
       "title": "Portal Gun"
     },
     "搬运": {
@@ -911,31 +927,13 @@
       "cf": 225658,
       "title": "OpenComputers"
     },
-    "中文输入": {
-      "slug": "cocoa-input-fix",
-      "title": "CocoaInput Fix"
-    },
-    "cocoainput": {
-      "slug": "cocoa-input-fix",
-      "title": "CocoaInput Fix"
-    },
-    "输入修复": {
-      "slug": "cocoa-input-fix",
-      "title": "CocoaInput Fix"
-    },
-    "输入法修复": {
-      "slug": "cocoa-input-fix",
-      "title": "CocoaInput Fix"
-    },
     "更好的FPS": {
-      "slug": "better-fps",
-      "cf": 228756,
-      "title": "Better FPS"
+      "cf": 229876,
+      "title": "BetterFps"
     },
     "显示FPS": {
-      "slug": "better-fps",
-      "cf": 228756,
-      "title": "Better FPS"
+      "cf": 229876,
+      "title": "BetterFps"
     },
     "按键显示": {
       "slug": "keystrokes",
@@ -950,15 +948,15 @@
       "title": "CPS"
     },
     "皮肤显示": {
-      "slug": "skinlayers3d",
+      "slug": "3dskinlayers",
       "title": "3D Skin Layers"
     },
     "3d皮肤层": {
-      "slug": "skinlayers3d",
+      "slug": "3dskinlayers",
       "title": "3D Skin Layers"
     },
     "3d skin layers": {
-      "slug": "skinlayers3d",
+      "slug": "3dskinlayers",
       "title": "3D Skin Layers"
     },
     "自定义皮肤": {
@@ -1329,157 +1327,41 @@
     }
   },
   "pack_aliases": {
-    "悲惨世界": {
-      "slug": "tragic-world",
-      "title": "Tragic World"
-    },
-    "龙之冒险": {
-      "slug": "dragon-adventure",
-      "title": "Dragon Adventure"
-    },
-    "冒险之旅": {
-      "slug": "adventure-trip",
-      "title": "Adventure Trip"
-    },
-    "群峦传说": {
-      "slug": "terrafirmacraft",
-      "cf": 302973,
-      "title": "TerraFirmaCraft"
-    },
-    "terrafirmacraft": {
-      "slug": "terrafirmacraft",
-      "cf": 302973,
-      "title": "TerraFirmaCraft"
-    },
-    "群峦": {
-      "slug": "terrafirmacraft",
-      "cf": 302973,
-      "title": "TerraFirmaCraft"
-    },
-    "tfc": {
-      "slug": "terrafirmacraft",
-      "cf": 302973,
-      "title": "TerraFirmaCraft"
-    },
     "GTNH": {
-      "slug": "gt-new-horizons",
       "cf": 252507,
       "title": "GregTech: New Horizons"
     },
     "格雷科技新视野": {
-      "slug": "gt-new-horizons",
       "cf": 252507,
       "title": "GregTech: New Horizons"
     },
     "gregtech new horizons": {
-      "slug": "gt-new-horizons",
       "cf": 252507,
       "title": "GregTech: New Horizons"
     },
     "gt new horizons": {
-      "slug": "gt-new-horizons",
       "cf": 252507,
       "title": "GregTech: New Horizons"
     },
-    "贪婪整合包": {
-      "slug": "greedy-craft",
-      "title": "GreedyCraft"
-    },
-    "greedycraft": {
-      "slug": "greedy-craft",
-      "title": "GreedyCraft"
-    },
-    "航空母舰": {
-      "slug": "aircraft-carrier",
-      "title": "Aircraft Carrier"
-    },
-    "魔法金属": {
-      "slug": "magical-metals",
-      "title": "Magical Metals"
-    },
-    "蔚蓝天空": {
-      "slug": "blue-skies",
-      "title": "Blue Skies"
-    },
-    "blue skies": {
-      "slug": "blue-skies",
-      "title": "Blue Skies"
-    },
-    "冰与火之歌": {
-      "slug": "ice-and-fire-dragons",
-      "cf": 264231,
-      "title": "Ice and Fire: Dragons"
-    },
-    "ice and fire": {
-      "slug": "ice-and-fire-dragons",
-      "cf": 264231,
-      "title": "Ice and Fire: Dragons"
-    },
-    "冰火传说": {
-      "slug": "ice-and-fire-dragons",
-      "cf": 264231,
-      "title": "Ice and Fire: Dragons"
-    },
-    "龙骑士": {
-      "slug": "dragon-mounts",
-      "title": "Dragon Mounts"
-    },
-    "dragon mounts": {
-      "slug": "dragon-mounts",
-      "title": "Dragon Mounts"
-    },
-    "我的世界原版增强": {
-      "slug": "vanilla-plus",
-      "title": "Vanilla Plus"
-    },
     "RLCraft": {
-      "slug": "rlcraft",
       "cf": 285109,
       "title": "RLCraft"
     },
     "真实生存": {
-      "slug": "rlcraft",
       "cf": 285109,
       "title": "RLCraft"
     },
     "更好的MC": {
-      "slug": "better-mc-forge-bmc1",
       "cf": 429793,
       "title": "Better MC"
     },
     "better mc": {
-      "slug": "better-mc-forge-bmc1",
       "cf": 429793,
       "title": "Better MC"
     },
     "better minecraft": {
-      "slug": "better-mc-forge-bmc1",
       "cf": 429793,
       "title": "Better MC"
-    },
-    "永恒MC": {
-      "slug": "eternal-mc",
-      "title": "Eternal MC"
-    },
-    "原始科技": {
-      "slug": "primal-tech",
-      "title": "Primal Tech"
-    },
-    "星界": {
-      "slug": "astralex",
-      "title": "AstralEx"
-    },
-    "现代建筑": {
-      "slug": "modern-architecture",
-      "title": "Modern Architecture"
-    },
-    "最终黎明": {
-      "slug": "final-dawn",
-      "title": "Final Dawn"
-    },
-    "僵尸启示录": {
-      "slug": "zombie-apocalypse",
-      "title": "Zombie Apocalypse"
     },
     "空岛": {
       "slug": "simply-skyblock",
@@ -1492,38 +1374,6 @@
     "空岛生存": {
       "slug": "simply-skyblock",
       "title": "Simply Skyblock"
-    },
-    "石头世界": {
-      "slug": "stoneblock",
-      "title": "StoneBlock"
-    },
-    "stoneblock": {
-      "slug": "stoneblock",
-      "title": "StoneBlock"
-    },
-    "水世界": {
-      "slug": "aquatic",
-      "title": "Aquatic"
-    },
-    "天空工厂": {
-      "slug": "sky-factory",
-      "title": "Sky Factory"
-    },
-    "sky factory": {
-      "slug": "sky-factory",
-      "title": "Sky Factory"
-    },
-    "skyfactory": {
-      "slug": "sky-factory",
-      "title": "Sky Factory"
-    },
-    "疯狂科技": {
-      "slug": "crazy-tech",
-      "title": "Crazy Tech"
-    },
-    "工业革命": {
-      "slug": "industrial-revolution",
-      "title": "Industrial Revolution"
     },
     "机械动力": {
       "cf": 1238396,
@@ -1592,80 +1442,6 @@
     "机械动力+": {
       "slug": "create_plus",
       "title": "Create+"
-    },
-    "航海": {
-      "slug": "sail-the-seas",
-      "title": "Sail the Seas"
-    },
-    "荒野生存": {
-      "slug": "wilderness-survival",
-      "title": "Wilderness Survival"
-    },
-    "地层": {
-      "slug": "strata",
-      "title": "Strata"
-    },
-    "维度生存": {
-      "slug": "dimensional-survival",
-      "title": "Dimensional Survival"
-    },
-    "魔法世界": {
-      "slug": "magic-world",
-      "title": "Magic World"
-    },
-    "专家模式": {
-      "slug": "expert-mode",
-      "title": "Expert Mode"
-    },
-    "科技枪": {
-      "slug": "techguns",
-      "title": "Techguns"
-    },
-    "techguns": {
-      "slug": "techguns",
-      "title": "Techguns"
-    },
-    "失落的城市": {
-      "slug": "the-lost-cities",
-      "title": "The Lost Cities"
-    },
-    "the lost cities": {
-      "slug": "the-lost-cities",
-      "title": "The Lost Cities"
-    },
-    "辐射": {
-      "slug": "radiation",
-      "title": "Radiation"
-    },
-    "辐射世界": {
-      "slug": "radiation",
-      "title": "Radiation"
-    },
-    "核科技": {
-      "slug": "nuclear-tech",
-      "title": "Nuclear Tech"
-    },
-    "nuclear tech": {
-      "slug": "nuclear-tech",
-      "title": "Nuclear Tech"
-    },
-    "HBM核科技": {
-      "slug": "hbm-nuclear-tech",
-      "cf": 235121,
-      "title": "HBM's Nuclear Tech"
-    },
-    "hbm nuclear tech": {
-      "slug": "hbm-nuclear-tech",
-      "cf": 235121,
-      "title": "HBM's Nuclear Tech"
-    },
-    "模特": {
-      "slug": "figura",
-      "title": "Figura"
-    },
-    "figura": {
-      "slug": "figura",
-      "title": "Figura"
     }
   },
   "popular_mods": [
@@ -1696,13 +1472,6 @@
       "key": "iris",
       "mc": null,
       "loader": "fabric"
-    },
-    {
-      "name": "OptiFine 高清修复",
-      "source": "curseforge",
-      "key": 225608,
-      "mc": null,
-      "loader": "forge"
     },
     {
       "name": "BetterF3",
@@ -1777,7 +1546,7 @@
     {
       "name": "VeinMiner 连锁采集",
       "source": "curseforge",
-      "key": 240630,
+      "key": 67133,
       "mc": null,
       "loader": "forge"
     },
@@ -1873,9 +1642,9 @@
       "loader": "forge"
     },
     {
-      "name": "Galacticraft 星系",
+      "name": "Galacticraft Legacy 星系",
       "source": "curseforge",
-      "key": 224724,
+      "key": 564236,
       "mc": null,
       "loader": "forge"
     },
@@ -1894,13 +1663,6 @@
       "loader": "forge"
     },
     {
-      "name": "CocoaInput 中文输入修复",
-      "source": "modrinth",
-      "key": "cocoa-input-fix",
-      "mc": null,
-      "loader": "fabric"
-    },
-    {
       "name": "CustomSkinLoader 皮肤加载",
       "source": "modrinth",
       "key": "customskinloader",
@@ -1910,7 +1672,7 @@
     {
       "name": "3D Skin Layers 皮肤层",
       "source": "modrinth",
-      "key": "skinlayers3d",
+      "key": "3dskinlayers",
       "mc": null,
       "loader": "fabric"
     },
@@ -1925,13 +1687,6 @@
       "name": "Inventory Profiles 物品栏",
       "source": "modrinth",
       "key": "inventory-profiles-next",
-      "mc": null,
-      "loader": "fabric"
-    },
-    {
-      "name": "ToroHealth 伤害显示",
-      "source": "modrinth",
-      "key": "torohealth-damage-indicators",
       "mc": null,
       "loader": "fabric"
     },
@@ -1985,12 +1740,6 @@
       "source": "curseforge",
       "key": 252507,
       "slug": "gt-new-horizons"
-    },
-    {
-      "name": "TerraFirmaCraft 群峦传说",
-      "source": "curseforge",
-      "key": 302973,
-      "slug": "terrafirmacraft"
     },
     {
       "name": "Fabulously Optimized",
