@@ -44,7 +44,7 @@ class JavaDownloadTile(SimpleCardWidget):
         layout.addStretch(1)
         btn = PushButton(FIF.DOWNLOAD, "下载")
         btn.setFixedHeight(30)
-        btn.clicked.connect(lambda: on_download(major))
+        btn.clicked.connect(lambda: on_download(major, self))
         layout.addWidget(btn)
 
 
@@ -115,5 +115,8 @@ class JavaPage(QWidget):
         for j in javas:
             self.env_layout.addWidget(JavaCard(j))
 
-    def _download(self, major: str):
+    def _download(self, major: str, source=None):
+        win = self.window()
+        if source is not None and hasattr(win, "fly_to_tasks"):
+            win.fly_to_tasks(source, "J", "#E8862E")
         self.backend.download_java(major)

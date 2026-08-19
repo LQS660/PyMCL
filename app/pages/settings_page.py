@@ -86,6 +86,15 @@ class SettingsPage(QWidget):
         iso_group.addSettingCard(self.share_assets_card)
         root.addWidget(iso_group)
 
+        ui_group = SettingCardGroup("界面", host)
+        self.fly_card, self.fly_sw = _switch_card(
+            FIF.SYNC,
+            "下载飞入动画",
+            "点击安装时，图标抛物线飞入侧栏「下载任务」",
+            checked=bool(settings.get("ui_fly_animation", True)))
+        ui_group.addSettingCard(self.fly_card)
+        root.addWidget(ui_group)
+
         perf_group = SettingCardGroup("下载与性能", host)
         self.threads_card, self.threads_spin = _spin_card(
             FIF.SYNC, "下载并发线程数", "同时下载的文件数量",
@@ -173,6 +182,23 @@ class SettingsPage(QWidget):
         self.ai_mode.currentTextChanged.connect(self._sync_ai_mode)
         self._sync_ai_mode()
 
+        fb_group = SettingCardGroup("反馈与诊断", host)
+        self.fb_consent_card, self.fb_consent = _switch_card(
+            FIF.VPN, "允许上传诊断数据",
+            "第一次打开会询问。未同意时不会上传反馈和电脑配置",
+            checked=bool(settings.get("feedback_consent")))
+        self.fb_url_card, self.fb_url = _line_card(
+            FIF.CLOUD_DOWNLOAD, "反馈上报地址", "指向上报口，不要填看板端口")
+        self.fb_url.setText(settings.get("feedback_url") or "")
+        self.fb_hb_card, self.fb_hb = _switch_card(
+            FIF.SYNC, "定时上报本机配置",
+            "同意上传后，启动器打开时把电脑配置发到上报口",
+            checked=bool(settings.get("feedback_heartbeat", True)))
+        fb_group.addSettingCard(self.fb_consent_card)
+        fb_group.addSettingCard(self.fb_url_card)
+        fb_group.addSettingCard(self.fb_hb_card)
+        root.addWidget(fb_group)
+
         row = QHBoxLayout()
         self.save_btn = PrimaryPushButton(FIF.SAVE, "保存设置")
         self.save_btn.setFixedHeight(36)
@@ -197,6 +223,13 @@ class SettingsPage(QWidget):
 
     def _save(self):
         self.backend.save_settings(self.collect())
+        from mclauncher import feedback as fb
+        if self.fb_consent.isChecked():
+            fb.set_consent(True)
+            fb.start_heartbeat()
+        else:
+            fb.set_consent(False)
+            fb.stop_heartbeat(send_offline=False)
         InfoBar.success("已保存", "设置已写入 config.json", parent=self,
                         position=InfoBarPosition.TOP, duration=2500)
 
@@ -236,4 +269,8 @@ class SettingsPage(QWidget):
             "ai_base_url": self.ai_base.text().strip(),
             "ai_api_key": self.ai_key.text().strip(),
             "ai_model": self.ai_model.text().strip() or "deepseek-v4-flash",
+            "feedback_url": self.fb_url.text().strip(),
+            "feedback_heartbeat": self.fb_hb.isChecked(),
+            "feedback_consent": self.fb_consent.isChecked(),
+            "ui_fly_animation": self.fly_sw.isChecked(),
         }

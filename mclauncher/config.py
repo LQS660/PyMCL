@@ -53,6 +53,11 @@ DEFAULT_CONFIG = {
     "terracotta_extra_nodes": [
         "https://terracotta.glavo.site/acebc7d8-1208-47fd-b212-d03ac49e36e0",
     ],
+    # 反馈中心：空则用 DEFAULT_FEEDBACK_URL / 环境变量 PYMCL_FEEDBACK_URL
+    "feedback_url": "",
+    "feedback_heartbeat": True,
+    "feedback_consent": None,
+    "device_id": "",
 }
 
 

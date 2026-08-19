@@ -1,0 +1,13 @@
+<resources>
+    <style name="Theme.PyMCL" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@color/pcl_bg</item>
+        <item name="android:navigationBarColor">@color/pcl_bg</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">@color/pcl_bg</item>
+    </style>
+    <style name="Theme.PyMCL.Game" parent="Theme.PyMCL">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

@@ -140,6 +140,7 @@ class BackendAPI(QObject):
         self._launch_task_id = None
         self._pack_cache: list[dict] = []
         self._mod_cache: list[dict] = []
+        self._last_installed: dict = {}
         self._bg_threads: list[QThread] = []
         self._task_results: dict[str, tuple] = {}
         self._crashes: dict[str, dict] = {}
@@ -176,8 +177,20 @@ class BackendAPI(QObject):
         self._titles[task_id] = title
         worker.start()
         self.task_added.emit(task_id, title)
-        self.task_count_changed.emit(len(self._workers))
+        self.task_count_changed.emit(self._download_task_count())
         return task_id
+
+    @staticmethod
+    def is_download_title(title: str) -> bool:
+        t = str(title or "")
+        return not (t.startswith("启动游戏") or t.startswith("微软登录"))
+
+    def _download_task_count(self) -> int:
+        n = 0
+        for tid in self._workers:
+            if self.is_download_title(self._titles.get(tid, "")):
+                n += 1
+        return n
 
     def _on_worker_crash(self, task_id, report):
         self._crashes[task_id] = report or {}
@@ -216,7 +229,7 @@ class BackendAPI(QObject):
             for k in extra:
                 self._task_results.pop(k, None)
         self.finished.emit(task_id, success, message)
-        self.task_count_changed.emit(len(self._workers))
+        self.task_count_changed.emit(self._download_task_count())
         if success:
             self.ui_changed.emit()
 
@@ -558,6 +571,7 @@ class BackendAPI(QObject):
 
     def get_settings(self) -> dict:
         from mclauncher.ai.defaults import DEFAULT_GATEWAY_URL, DEFAULT_MODEL
+        from mclauncher.feedback_defaults import DEFAULT_FEEDBACK_URL
         return {
             "share_libraries": bool(CONFIG.get("shared_libraries", False)),
             "share_assets": bool(CONFIG.get("shared_assets", False)),
@@ -574,6 +588,11 @@ class BackendAPI(QObject):
             "download_source": CONFIG.get("download_source") or "auto",
             "community_source": CONFIG.get("community_source") or "auto",
             "use_system_proxy": bool(CONFIG.get("use_system_proxy", True)),
+            "feedback_url": CONFIG.get("feedback_url") or DEFAULT_FEEDBACK_URL or "",
+            "feedback_heartbeat": bool(CONFIG.get("feedback_heartbeat", True)),
+            "feedback_consent": CONFIG.get("feedback_consent") is True,
+            "ui_fly_animation": bool(CONFIG.get("ui_fly_animation", True)),
+            "ui_fly_duration_ms": int(CONFIG.get("ui_fly_duration_ms", 620)),
             "root": str(utils.ROOT),
         }
 
@@ -598,7 +617,15 @@ class BackendAPI(QObject):
             "download_source": (data.get("download_source") or "auto"),
             "community_source": (data.get("community_source") or "auto"),
             "use_system_proxy": bool(data.get("use_system_proxy", True)),
+            "ui_fly_animation": bool(data.get("ui_fly_animation", True)),
+            "ui_fly_duration_ms": int(data.get("ui_fly_duration_ms") or 620),
         })
+        if "feedback_url" in data:
+            CONFIG.set("feedback_url", (data.get("feedback_url") or "").strip())
+        if "feedback_heartbeat" in data:
+            CONFIG.set("feedback_heartbeat", bool(data.get("feedback_heartbeat")))
+        if "feedback_consent" in data:
+            CONFIG.set("feedback_consent", bool(data.get("feedback_consent")))
         CONFIG.save()
         from mclauncher.source import invalidate_probe, warmup_async
         invalidate_probe()
@@ -609,6 +636,29 @@ class BackendAPI(QObject):
     def test_ai_connection(self) -> str:
         from mclauncher.ai.client import test_connection
         return test_connection(self.get_settings())
+
+    def collect_sysinfo(self, force: bool = False, scan_system_java: bool = False) -> dict:
+        from mclauncher import sysinfo as sysinfo_mod
+        return sysinfo_mod.collect(force=force, scan_system_java=scan_system_java)
+
+    def sysinfo_text(self, info=None) -> str:
+        from mclauncher import sysinfo as sysinfo_mod
+        return sysinfo_mod.format_text(info)
+
+    def submit_feedback(self, category: str, title: str, body: str, contact: str = "",
+                        include_sysinfo: bool = True) -> dict:
+        from mclauncher import feedback as fb
+        return fb.submit(
+            category=category, title=title, body=body, contact=contact,
+            include_sysinfo=include_sysinfo)
+
+    def submit_crash_feedback(self, report: dict, extra: str = "") -> dict:
+        from mclauncher import feedback as fb
+        return fb.submit_crash(report, extra)
+
+    def feedback_history(self) -> list:
+        from mclauncher import feedback as fb
+        return fb.history()
 
     def get_accounts(self) -> list[str]:
         names = ["离线模式"]
@@ -682,6 +732,15 @@ class BackendAPI(QObject):
             })
         return rows
 
+    @staticmethod
+    def _catalog_source(source: str) -> str:
+        s = (source or "").strip().lower()
+        if s in ("", "全部", "all"):
+            return "all"
+        if s.startswith("curse"):
+            return "curseforge"
+        return "modrinth"
+
     def _modpack_row(self, hit: dict, default_source: str = "") -> dict:
         src = (hit.get("source") or default_source or "").lower()
         return {
@@ -695,17 +754,18 @@ class BackendAPI(QObject):
         }
 
     def search_modpacks(self, query: str, source: str) -> list[dict]:
-        src = "curseforge" if (source or "").lower().startswith("curse") else "modrinth"
+        src = self._catalog_source(source)
         q = (query or "").strip()
         if not q:
             rows = []
             seen = set()
             for title, pack_src, key, slug in POPULAR_MODPACKS:
-                # CBC 始终置顶，避免只开着 Modrinth 页时装成 Create+
-                if pack_src != src and pack_src == "modrinth":
-                    continue
-                if pack_src != src and key != CBC_CF_ID:
-                    continue
+                if src != "all":
+                    # CBC 始终置顶，避免只开着 Modrinth 页时装成 Create+
+                    if pack_src != src and pack_src == "modrinth":
+                        continue
+                    if pack_src != src and key != CBC_CF_ID:
+                        continue
                 row = {
                     "name": title,
                     "author": "CurseForge" if pack_src == "curseforge" else "Modrinth",
@@ -713,7 +773,9 @@ class BackendAPI(QObject):
                     "id": key if pack_src == "curseforge" else None,
                     "slug": slug if pack_src == "curseforge" else key,
                     "source": pack_src,
-                    "description": "Forge 1.20.1 黄铜协奏曲，不是 Create+/CDC" if key == CBC_CF_ID else "",
+                    "description": "热门推荐" if key != CBC_CF_ID
+                    else "Forge 1.20.1 黄铜协奏曲，不是 Create+/CDC",
+                    "tags": ["热门"],
                 }
                 mark = (row["source"], row["id"] or row["slug"])
                 if mark in seen:
@@ -755,12 +817,12 @@ class BackendAPI(QObject):
         return rows
 
     def search_mods(self, query: str, source: str) -> list[dict]:
-        src = "curseforge" if (source or "").lower().startswith("curse") else "modrinth"
+        src = self._catalog_source(source)
         q = (query or "").strip()
         if not q:
             rows = []
             for title, mod_src, key, *_rest in POPULAR_MODS:
-                if mod_src != src:
+                if src != "all" and mod_src != src:
                     continue
                 rows.append({
                     "name": title,
@@ -769,6 +831,8 @@ class BackendAPI(QObject):
                     "id": key if mod_src == "curseforge" else None,
                     "slug": None if mod_src == "curseforge" else key,
                     "source": mod_src,
+                    "description": "热门推荐",
+                    "tags": ["热门"],
                 })
             self._mod_cache = rows
             return rows
@@ -790,7 +854,7 @@ class BackendAPI(QObject):
                 "downloads": int(h.get("downloads") or 0),
                 "id": h.get("id"),
                 "slug": h.get("slug"),
-                "source": h.get("source") or src,
+                "source": h.get("source") or ("modrinth" if src == "all" else src),
                 "description": h.get("description") or h.get("summary") or "",
                 "tags": h.get("tags") or [],
                 "updated": h.get("updated") or "",
@@ -924,6 +988,7 @@ class BackendAPI(QObject):
             cancel=dm.cancel,
         )
         log(f"安装到实例 {inst.name}")
+        vid = version
         if loader and loader != "无":
             kind = loader.lower()
             log(f"安装 {loader} （Minecraft {version}）")
@@ -941,7 +1006,10 @@ class BackendAPI(QObject):
         else:
             log(f"安装原版 {version}")
             installer.install_version(version)
-        log(f"版本 {version} 安装完成")
+            vid = version
+        self._last_installed = {"instance": inst.name, "version": vid, "loader": loader or "无"}
+        log(f"版本 {vid} 安装完成")
+        return f"已安装 {vid}"
 
     def _install_modpack_impl(self, progress, log, name, source, extra=None):
         extra = extra or {}

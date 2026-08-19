@@ -339,6 +339,7 @@ class PclCatalogPage(QWidget):
         self.instance_box.currentTextChanged.connect(self.reload_installed)
 
         self._search_token = 0
+        self._popular_loaded = False
         self._reload_instances()
         self._show_idle()
 
@@ -378,7 +379,7 @@ class PclCatalogPage(QWidget):
         self.source_box.setCurrentIndex(0)
         self.version_box.setCurrentIndex(0)
         self.type_box.setCurrentIndex(0)
-        self._show_idle()
+        self._search()
 
     def _clear_list(self):
         while self.list_layout.count():
@@ -427,7 +428,7 @@ class PclCatalogPage(QWidget):
         if token != self._search_token:
             return
         results = list(results or [])
-        if type_f and type_f != "全部":
+        if type_f and type_f != "全部" and self.name_edit.text().strip():
             q = type_f.lower()
             filtered = []
             for row in results:
@@ -438,6 +439,13 @@ class PclCatalogPage(QWidget):
             if filtered:
                 results = filtered
         self._clear_list()
+        query = self.name_edit.text().strip()
+        if not query:
+            head = QLabel("热门推荐")
+            head.setStyleSheet(
+                f"color: {PCL_TITLE}; font-size: 13px; font-weight: 700;"
+                " background: transparent; padding: 10px 12px 6px 12px;")
+            self.list_layout.addWidget(head)
         if not results:
             self.list_layout.addWidget(EmptyState(self.spec["icon"], self.spec["empty_search"]))
             self.list_layout.addStretch(1)
@@ -448,6 +456,9 @@ class PclCatalogPage(QWidget):
 
     def reload_installed(self):
         self._reload_instances()
+        if not self._popular_loaded:
+            self._popular_loaded = True
+            self._search()
 
     def _install(self, item, tile=None):
         if isinstance(item, str):

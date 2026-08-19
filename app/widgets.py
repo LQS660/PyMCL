@@ -33,6 +33,30 @@ class InputDialog(MessageBoxBase):
         return self.edit.text().strip()
 
 
+def prompt_feedback_consent(parent) -> bool:
+    """首次（或未同意时）弹窗，必须手动点同意才会上传。"""
+    from qfluentwidgets import MessageBox
+    from mclauncher import feedback as fb
+    box = MessageBox(
+        "是否上传诊断数据",
+        "第一次打开需要你亲自选择。\n\n"
+        "同意后才会向开发者上传：\n"
+        "· 你提交的反馈内容\n"
+        "· 本机配置（CPU / 内存 / 显卡 / Java / 实例）\n\n"
+        "暂不同意则不会上传，以后可在设置里更改。",
+        parent,
+    )
+    box.yesButton.setText("同意")
+    box.cancelButton.setText("暂不同意")
+    ok = bool(box.exec())
+    fb.set_consent(ok)
+    if ok:
+        fb.start_heartbeat()
+    else:
+        fb.stop_heartbeat(send_offline=False)
+    return ok
+
+
 class ComboDialog(MessageBoxBase):
     """Fluent 风格的下拉选择对话框。"""
 

@@ -37,6 +37,11 @@ def split_progress_message(message: str):
     return text, ""
 
 
+def _is_download_title(title: str) -> bool:
+    t = str(title or "")
+    return not (t.startswith("启动游戏") or t.startswith("微软登录"))
+
+
 class TaskCard(SimpleCardWidget):
     def __init__(self, task_id: str, title: str, backend, parent=None):
         super().__init__(parent)
@@ -188,6 +193,8 @@ class DownloadDock(SimpleCardWidget):
             parent._place_download_dock()
 
     def _add(self, task_id, title):
+        if not _is_download_title(title):
+            return
         self._active[task_id] = title
         self._current = task_id
         n = len(self._active)
@@ -277,6 +284,8 @@ class TasksPage(QWidget):
         backend.finished.connect(self._finished)
 
     def _add(self, task_id, title):
+        if not _is_download_title(title):
+            return
         self.empty.hide()
         card = TaskCard(task_id, title, self.backend)
         self._cards[task_id] = card

@@ -36,7 +36,7 @@ class VersionCard(SimpleCardWidget):
         row.addStretch(1)
         install_btn = PushButton(FIF.DOWNLOAD, "安装")
         install_btn.setFixedHeight(30)
-        install_btn.clicked.connect(lambda: on_install(info))
+        install_btn.clicked.connect(lambda: on_install(info, self))
         row.addWidget(install_btn)
         layout.addLayout(row)
 
@@ -73,6 +73,8 @@ class VersionPage(QWidget):
         self.loader_box = ComboBox()
         self.loader_box.addItems(["无", "Fabric", "Forge", "Quilt", "NeoForge"])
         self.loader_box.setFixedWidth(120)
+        self.launch_after = CheckBox("完成后启动")
+        self.launch_after.setChecked(True)
         bar.addWidget(self.search)
         bar.addWidget(self.pivot)
         bar.addStretch(1)
@@ -80,6 +82,7 @@ class VersionPage(QWidget):
         bar.addWidget(self.instance_box)
         bar.addWidget(BodyLabel("加载器"))
         bar.addWidget(self.loader_box)
+        bar.addWidget(self.launch_after)
         root.addLayout(bar)
 
         scroll = ScrollArea(self)
@@ -199,13 +202,18 @@ class VersionPage(QWidget):
             self.installed_area.addLayout(row)
             self._installed_checks.append((cb, f"{instance} / {v}"))
 
-    def _install(self, info: dict):
+    def _install(self, info: dict, source=None):
         loader = self.loader_box.currentText()
         instance = self.instance_box.currentText() or "default"
+        win = self.window()
+        if source is not None and hasattr(win, "fly_to_tasks"):
+            win.fly_to_tasks(source, info["version"], "#2FA36B")
         if loader == "无":
-            self.backend.install_game(info["version"], instance=instance)
+            tid = self.backend.install_game(info["version"], instance=instance)
         else:
-            self.backend.install_game(info["version"], loader, instance=instance)
+            tid = self.backend.install_game(info["version"], loader, instance=instance)
+        if self.launch_after.isChecked() and hasattr(win, "queue_launch_after"):
+            win.queue_launch_after(tid, instance, info["version"], loader)
 
     def _uninstall_selected(self):
         selected = [v for rb, v in getattr(self, "_installed_checks", []) if rb.isChecked()]

@@ -391,6 +391,25 @@ def cmd_instance(args):
         print("实例列表:", ", ".join(names) if names else "（空）")
 
 
+def cmd_sysinfo(args):
+    from mclauncher import sysinfo as sysinfo_mod
+    print(sysinfo_mod.format_text(sysinfo_mod.collect(force=True, scan_system_java=True)))
+
+
+def cmd_feedback(args):
+    from mclauncher import feedback as fb
+    if args.i_agree:
+        fb.set_consent(True)
+    data = fb.submit(
+        category=args.category,
+        title=args.title or "",
+        body=args.body or "",
+        contact=args.contact or "",
+        include_sysinfo=not args.no_sysinfo,
+    )
+    print("已提交", data.get("id") or "")
+
+
 # ---------------------------------------------------------------- 入口
 
 def build_parser():
@@ -479,6 +498,19 @@ def build_parser():
     sp.add_argument("name", nargs="?", help="实例名")
     sp.add_argument("--new-name", help="重命名目标")
     sp.set_defaults(func=cmd_instance)
+
+    sp = sub.add_parser("sysinfo", help="打印本机配置（反馈系统会附带这些信息）")
+    sp.set_defaults(func=cmd_sysinfo)
+
+    sp = sub.add_parser("feedback", help="向反馈中心提交一条反馈")
+    sp.add_argument("--category", default="other",
+                    choices=["bug", "crash", "download", "multiplayer", "ai", "ui", "suggest", "other"])
+    sp.add_argument("--title", default="")
+    sp.add_argument("--body", default="")
+    sp.add_argument("--contact", default="")
+    sp.add_argument("--no-sysinfo", action="store_true")
+    sp.add_argument("--i-agree", action="store_true", help="确认同意上传诊断数据")
+    sp.set_defaults(func=cmd_feedback)
 
     return p
 

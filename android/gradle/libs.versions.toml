@@ -1,0 +1,28 @@
+[versions]
+compileSdk = "35"
+minSdk = "26"
+targetSdk = "34"
+agp = "8.13.2"
+kotlin = "2.3.20"
+commonsCompress = "1.26.0"
+xz = "1.9"
+appcompat = "1.7.0"
+material = "1.12.0"
+bytehook = "1.0.10"
+androidxTestExtJunit = "1.1.5"
+androidxTestRunner = "1.5.2"
+
+[libraries]
+commons-compress = { group = "org.apache.commons", name = "commons-compress", version.ref = "commonsCompress" }
+xz = { group = "org.tukaani", name = "xz", version.ref = "xz" }
+appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
+material = { group = "com.google.android.material", name = "material", version.ref = "material" }
+bytehook = { group = "com.bytedance", name = "bytehook", version.ref = "bytehook" }
+androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestExtJunit" }
+androidx-test-runner = { group = "androidx.test", name = "runner", version.ref = "androidxTestRunner" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

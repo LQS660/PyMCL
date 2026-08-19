@@ -12,8 +12,20 @@ instances/
 cache/
 build/
 dist/
-java/
+/java/
 .cursor/
+feedback_hub/data/
+device_id
+feedback_history.json
+
+# Android local/build
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/local.properties
+android/_ai_decode.txt
+android/regression-out/
 
 # Python
 __pycache__/

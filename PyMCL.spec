@@ -32,7 +32,9 @@ hiddenimports = (
     + _hidden("mclauncher")
     + _hidden("qfluentwidgets")
     + _hidden("qframelesswindow")
-    + ["mclauncher.terracotta", "app.pages.multiplayer_page", "app.pages.ai_page"]
+    + ["mclauncher.terracotta", "app.pages.multiplayer_page", "app.pages.ai_page",
+       "mclauncher.feedback", "mclauncher.feedback_defaults", "mclauncher.sysinfo",
+       "app.pages.feedback_page"]
 )
 
 excludes = [

@@ -1,0 +1,6 @@
+<resources>
+    <color name="pcl_green">#2E9B6B</color>
+    <color name="pcl_green_deep">#1E7A52</color>
+    <color name="pcl_bg">#FFFFFF</color>
+    <color name="pcl_text">#2B2B2B</color>
+</resources>

@@ -1,16 +1,20 @@
 # -*- coding: utf-8 -*-
 """主窗口：细顶栏 + 左侧 5 项导航。"""
 
-from qfluentwidgets import FluentIcon as FIF, InfoBadge, InfoBadgePosition, InfoBar, InfoBarPosition, setThemeColor
+from qfluentwidgets import FluentIcon as FIF, InfoBar, InfoBarPosition, setThemeColor
 from qfluentwidgets.window.fluent_window import FluentWindowBase
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import QLabel
 
 from mclauncher import APP_DISPLAY_NAME, APP_VERSION
 from .backend import BackendAPI
+from .fly_anim import fly_to
 from .pcl_chrome import PCL_BG, PCL_GREEN, PclSideBar, PclTitleBar, TITLE_H
+from .widgets import pick_color
 from .pages.ai_page import AiPage
 from .pages.catalog_page import DatapackPage, ModPage, ModpackPage, ResourcePackPage, ShaderPage
 from .pages.download_hub import DownloadSection
+from .pages.feedback_page import FeedbackPage
 from .pages.instance_page import InstancePage
 from .pages.java_page import JavaPage
 from .pages.launch_page import LaunchPage
@@ -43,6 +47,7 @@ class MainWindow(FluentWindowBase):
         self.instance_page = InstancePage(self.backend, self)
         self.multiplayer_page = MultiplayerPage(self.backend, self)
         self.ai_page = AiPage(self.backend, self)
+        self.feedback_page = FeedbackPage(self.backend, self)
         self.tasks_page = TasksPage(self.backend, self)
         self.download_section = DownloadSection(self.backend, self)
         self.download_section.bind([
@@ -61,6 +66,7 @@ class MainWindow(FluentWindowBase):
             "multiplayer": self.multiplayer_page,
             "download": self.download_section,
             "ai": self.ai_page,
+            "feedback": self.feedback_page,
             "tasks": self.tasks_page,
             "settings": self.settings_page,
         }
@@ -74,6 +80,7 @@ class MainWindow(FluentWindowBase):
             ("item", "multiplayer", FIF.PEOPLE, "联机"),
             ("item", "download", FIF.DOWNLOAD, "下载"),
             ("item", "ai", getattr(FIF, "CHAT", None) or FIF.HELP, "AI 助手"),
+            ("item", "feedback", getattr(FIF, "FEEDBACK", None) or getattr(FIF, "MAIL", None) or FIF.HELP, "反馈"),
             ("item", "settings", FIF.SETTING, "设置"),
             ("stretch",),
             ("item", "tasks", FIF.CLOUD_DOWNLOAD, "下载任务"),
@@ -89,11 +96,19 @@ class MainWindow(FluentWindowBase):
         self.side.set_current("launch", emit=False)
 
         target = self.side.button("tasks")
-        self.task_badge = InfoBadge.error(
-            0, parent=self, target=target,
-            position=InfoBadgePosition.TOP_RIGHT)
+        self.task_badge = QLabel("0", target)
+        self.task_badge.setObjectName("taskBadge")
+        self.task_badge.setAlignment(Qt.AlignCenter)
+        self.task_badge.setFixedHeight(16)
+        self.task_badge.setMinimumWidth(16)
+        self.task_badge.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.task_badge.setStyleSheet(
+            "#taskBadge { background: #E23C3C; color: #fff; border-radius: 8px;"
+            " font-size: 10px; font-weight: 700; padding: 0 4px; }"
+        )
         self.task_badge.hide()
 
+        self._launch_after = {}
         self.download_dock = DownloadDock(self.backend, self)
         self.backend.finished.connect(self._notify_task)
         self._ui_refresh = QTimer(self)
@@ -103,6 +118,16 @@ class MainWindow(FluentWindowBase):
         self.backend.ui_changed.connect(self._ui_refresh.start)
         self.backend.task_count_changed.connect(self._update_task_badge)
         self.stackedWidget.currentChanged.connect(lambda *_: self._place_download_dock())
+        QTimer.singleShot(700, self._ask_feedback_consent)
+
+    def _ask_feedback_consent(self):
+        from mclauncher import feedback as fb
+        from .widgets import prompt_feedback_consent
+        if not fb.consent_asked():
+            prompt_feedback_consent(self)
+            return
+        if fb.has_consent():
+            fb.start_heartbeat()
 
     def _on_nav(self, key: str):
         page = self._pages.get(key)
@@ -154,16 +179,32 @@ class MainWindow(FluentWindowBase):
             return
         self.task_badge.setText("99+" if count > 99 else str(count))
         self.task_badge.adjustSize()
+        self.task_badge.setFixedHeight(16)
         self.task_badge.show()
-        if self.task_badge.manager:
-            self.task_badge.move(self.task_badge.manager.position())
+        self._place_task_badge()
+
+    def _place_task_badge(self):
+        btn = self.side.button("tasks")
+        badge = getattr(self, "task_badge", None)
+        if btn is None or badge is None or badge.isHidden():
+            return
+        icon_w = btn.iconSize().width() if not btn.icon().isNull() else 16
+        pad, gap = 14, 6
+        text_w = btn.fontMetrics().horizontalAdvance(btn.text())
+        x = pad + icon_w + gap + text_w + 6
+        y = (btn.height() - badge.height()) // 2
+        x = min(x, btn.width() - badge.width() - 8)
+        x = max(pad + icon_w, x)
+        badge.move(x, y)
+        badge.raise_()
 
     def _place_download_dock(self):
         dock = getattr(self, "download_dock", None)
         if not dock:
             return
         page = self.stackedWidget.currentWidget()
-        hide_on = {self.settings_page, self.instance_page, self.tasks_page}
+        hide_on = {self.settings_page, self.instance_page, self.tasks_page,
+                   self.feedback_page, self.launch_page}
         if (not getattr(dock, "_active", None)) or page in hide_on:
             dock.hide()
             return
@@ -181,17 +222,70 @@ class MainWindow(FluentWindowBase):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._place_download_dock()
+        self._place_task_badge()
 
     def closeEvent(self, event):
         try:
             self.backend.terracotta_shutdown()
         except Exception:
             pass
+        try:
+            from mclauncher.feedback import stop_heartbeat
+            stop_heartbeat(send_offline=True)
+        except Exception:
+            pass
         super().closeEvent(event)
 
+    def fly_to_tasks(self, source, text: str, color: str | None = None):
+        if source is None:
+            return
+        if not self.backend.get_setting("ui_fly_animation", True):
+            return
+        duration = max(1, int(self.backend.get_setting("ui_fly_duration_ms", 620)))
+        letter = (str(text or "").strip()[:1] or "↓").upper()
+        fly_to(
+            self, source, letter, color or pick_color(str(text or "")),
+            target=self.side.button("tasks"), duration=duration,
+        )
+
+    def queue_launch_after(self, task_id, instance: str, version: str, loader: str = "无"):
+        if not task_id:
+            return
+        self._launch_after[task_id] = (instance, version, loader or "无")
+
+    def _launch_installed(self, instance: str, version: str, loader: str = "无"):
+        last = getattr(self.backend, "_last_installed", None) or {}
+        vid = version
+        if last.get("instance") == instance and last.get("version"):
+            vid = last["version"]
+        self.switchTo(self.launch_page)
+        self.launch_page.reload()
+        if instance:
+            self.launch_page.instance_box.setCurrentText(instance)
+            self.launch_page.reload()
+        box = self.launch_page.version_box
+        ids = [box.itemText(i) for i in range(box.count())]
+        pick = vid if vid in ids else next(
+            (i for i in ids if vid and vid in i),
+            next((i for i in ids if version and version in i and (
+                loader in ("", "无") or (loader or "").lower() in i.lower()
+            )), ids[0] if ids else ""),
+        )
+        if pick:
+            box.setCurrentText(pick)
+        self.launch_page._on_launch()
+
     def _notify_task(self, task_id, success, message):
+        pending = self._launch_after.pop(task_id, None)
         title = self.backend.task_title(task_id)
-        if title.startswith("启动游戏"):
+        if pending and success:
+            instance, version, loader = pending
+            InfoBar.success("安装完成", "正在启动游戏…", parent=self,
+                            position=InfoBarPosition.TOP_RIGHT, duration=2500)
+            QTimer.singleShot(
+                380, lambda i=instance, v=version, l=loader: self._launch_installed(i, v, l))
+            return
+        if str(title).startswith("启动游戏") or str(title).startswith("微软登录"):
             return
         self._place_download_dock()
         if success:

@@ -284,7 +284,10 @@ class LaunchPage(QWidget):
         if task_id != self._task_id:
             return
         self._crash_shown = True
-        CrashDialog(report or {}, self.window()).exec()
+        win = self.window()
+        CrashDialog(
+            report or {}, win, backend=getattr(win, "backend", None)
+        ).exec()
 
     def _on_finished(self, task_id, success, message):
         if task_id == self._login_task_id:

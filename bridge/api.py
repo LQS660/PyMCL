@@ -428,6 +428,7 @@ class BackendAPI:
 
     def get_settings(self) -> dict:
         from mclauncher.ai.defaults import DEFAULT_GATEWAY_URL, DEFAULT_MODEL
+        from mclauncher.feedback_defaults import DEFAULT_FEEDBACK_URL
         return {
             "share_libraries": bool(CONFIG.get("shared_libraries", False)),
             "share_assets": bool(CONFIG.get("shared_assets", False)),
@@ -442,6 +443,9 @@ class BackendAPI:
             "ai_api_key": CONFIG.get("ai_api_key") or "",
             "ai_model": CONFIG.get("ai_model") or DEFAULT_MODEL,
             "root": str(utils.ROOT),
+            "feedback_url": CONFIG.get("feedback_url") or DEFAULT_FEEDBACK_URL or "",
+            "feedback_heartbeat": bool(CONFIG.get("feedback_heartbeat", True)),
+            "feedback_consent": CONFIG.get("feedback_consent") is True,
         }
 
     def save_settings(self, data: dict):
@@ -464,8 +468,37 @@ class BackendAPI:
             if "ai_api_key" in data:
                 patch["ai_api_key"] = data.get("ai_api_key") or ""
             patch["ai_model"] = (data.get("ai_model") or CONFIG.get("ai_model") or "deepseek-v4-flash")
+        if "feedback_url" in data:
+            patch["feedback_url"] = (data.get("feedback_url") or "").strip()
+        if "feedback_heartbeat" in data:
+            patch["feedback_heartbeat"] = bool(data.get("feedback_heartbeat"))
+        if "feedback_consent" in data:
+            patch["feedback_consent"] = bool(data.get("feedback_consent"))
         CONFIG.update(patch)
         CONFIG.save()
+
+    def collect_sysinfo(self, force: bool = False, scan_system_java: bool = False) -> dict:
+        from mclauncher import sysinfo as sysinfo_mod
+        return sysinfo_mod.collect(force=force, scan_system_java=scan_system_java)
+
+    def sysinfo_text(self, info=None) -> str:
+        from mclauncher import sysinfo as sysinfo_mod
+        return sysinfo_mod.format_text(info)
+
+    def submit_feedback(self, category: str, title: str, body: str, contact: str = "",
+                        include_sysinfo: bool = True) -> dict:
+        from mclauncher import feedback as fb
+        return fb.submit(
+            category=category, title=title, body=body, contact=contact,
+            include_sysinfo=include_sysinfo)
+
+    def submit_crash_feedback(self, report: dict, extra: str = "") -> dict:
+        from mclauncher import feedback as fb
+        return fb.submit_crash(report, extra)
+
+    def feedback_history(self) -> list:
+        from mclauncher import feedback as fb
+        return fb.history()
 
     def get_accounts(self) -> list[str]:
         names = ["离线模式"]
