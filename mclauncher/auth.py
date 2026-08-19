@@ -1,0 +1,428 @@
+# -*- coding: utf-8 -*-
+"""账号系统：离线模式 + 微软正版登录（设备代码流）。"""
+import base64
+import os
+import stat
+import time
+import webbrowser
+
+import requests
+
+from . import utils
+
+# 微软 OAuth 端点
+MS_DEVICE_CODE_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
+MS_TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
+XBL_AUTH_URL = "https://user.auth.xboxlive.com/user/authenticate"
+XSTS_AUTH_URL = "https://xsts.auth.xboxlive.com/xsts/authorize"
+MC_LOGIN_URL = "https://api.minecraftservices.com/authentication/login_with_xbox"
+MC_ENTITLEMENTS_URL = "https://api.minecraftservices.com/entitlements/mcstore"
+MC_PROFILE_URL = "https://api.minecraftservices.com/minecraft/profile"
+
+XSTS_ERRORS = {
+    2148916227: "账号已被封禁。",
+    2148916233: "该微软账号没有 Xbox Live 账户，请先注册 Xbox。",
+    2148916235: "所在地区不支持 Xbox Live。",
+    2148916236: "需要成年账户才能进行身份验证。",
+    2148916237: "需要成年账户（家长同意缺失）。",
+    2148916238: "该账户是儿童账户，需要家长将其添加到家庭组。",
+}
+
+ACCOUNTS_FILE = utils.ROOT / "accounts.json"
+_TOKEN_KEYS = ("access_token", "refresh_token")
+_DPAPI_PREFIX = "dpapi:"
+_OWNED_ITEMS = frozenset({
+    "game_minecraft", "product_minecraft", "product_minecraft_java",
+})
+
+
+def _dpapi_protect(plain: bytes) -> bytes:
+    import ctypes
+    from ctypes import wintypes
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    buf = ctypes.create_string_buffer(plain, len(plain))
+    blob_in = DATA_BLOB(len(plain), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    blob_out = DATA_BLOB()
+    if not ctypes.windll.crypt32.CryptProtectData(
+            ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)):
+        raise OSError("CryptProtectData failed")
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+
+
+def _dpapi_unprotect(blob: bytes) -> bytes:
+    import ctypes
+    from ctypes import wintypes
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    buf = ctypes.create_string_buffer(blob, len(blob))
+    blob_in = DATA_BLOB(len(blob), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    blob_out = DATA_BLOB()
+    if not ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)):
+        raise OSError("CryptUnprotectData failed")
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+
+
+def seal_secret(value: str) -> str:
+    if not value or os.name != "nt" or str(value).startswith(_DPAPI_PREFIX):
+        return value
+    try:
+        return _DPAPI_PREFIX + base64.b64encode(_dpapi_protect(value.encode("utf-8"))).decode("ascii")
+    except OSError:
+        return value
+
+
+def open_secret(value: str) -> str:
+    if not value or not str(value).startswith(_DPAPI_PREFIX):
+        return value
+    try:
+        raw = base64.b64decode(value[len(_DPAPI_PREFIX):].encode("ascii"))
+        return _dpapi_unprotect(raw).decode("utf-8")
+    except (OSError, ValueError):
+        return value
+
+
+def seal_account(account: dict) -> dict:
+    out = dict(account or {})
+    for key in _TOKEN_KEYS:
+        if out.get(key):
+            out[key] = seal_secret(out[key])
+    return out
+
+
+def open_account(account: dict) -> dict:
+    out = dict(account or {})
+    for key in _TOKEN_KEYS:
+        if out.get(key):
+            out[key] = open_secret(out[key])
+    return out
+
+
+def _restrict_accounts_file():
+    try:
+        os.chmod(ACCOUNTS_FILE, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+
+
+class AuthError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------- 微软登录
+
+class MicrosoftAuthenticator:
+    def __init__(self, client_id="00000000402b5328", timeout=15):
+        self.client_id = client_id
+        self.timeout = timeout
+        self.session = requests.Session()
+        from .net import apply_direct_to_session
+        apply_direct_to_session(self.session)
+        self.session.headers["User-Agent"] = "PyMCL/1.0"
+
+    # ---- 第 1 步：获取设备码
+    def get_device_code(self):
+        resp = self.session.post(
+            MS_DEVICE_CODE_URL,
+            data={
+                "client_id": self.client_id,
+                "scope": "XboxLive.signin offline_access",
+            },
+            timeout=self.timeout,
+        )
+        if resp.status_code != 200:
+            raise AuthError(f"获取设备码失败 (HTTP {resp.status_code}): {resp.text[:200]}")
+        data = resp.json()
+        return {
+            "device_code": data["device_code"],
+            "user_code": data["user_code"],
+            "verification_uri": data["verification_uri"],
+            "expires_in": int(data["expires_in"]),
+            "interval": int(data.get("interval", 5)),
+        }
+
+    # ---- 第 2 步：轮询令牌
+    def poll_token(self, device_code, interval=5, expires_in=900, on_status=None):
+        deadline = time.time() + expires_in
+        while time.time() < deadline:
+            try:
+                resp = self.session.post(
+                    MS_TOKEN_URL,
+                    data={
+                        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                        "client_id": self.client_id,
+                        "device_code": device_code,
+                    },
+                    timeout=self.timeout,
+                )
+                try:
+                    data = resp.json()
+                except ValueError:
+                    data = {}
+            except requests.RequestException:
+                # 网络抖动：稍后重试
+                if on_status:
+                    on_status("网络错误，重试中…")
+                time.sleep(interval)
+                continue
+            if resp.status_code == 200:
+                return {"access_token": data["access_token"], "refresh_token": data.get("refresh_token")}
+            err = data.get("error", "")
+            if err == "authorization_pending":
+                if on_status:
+                    on_status("等待授权中…")
+            elif err == "slow_down":
+                interval += 5
+            elif err in ("expired_token", "authorization_declined", "bad_verification_code"):
+                raise AuthError("授权已过期或被拒绝，请重试。")
+            else:
+                raise AuthError(f"轮询令牌失败: {err} {data.get('error_description', '')}")
+            time.sleep(interval)
+        raise AuthError("授权超时。")
+
+    # ---- 第 3 步：Xbox Live 认证
+    def xbl_authenticate(self, ms_token):
+        resp = self.session.post(
+            XBL_AUTH_URL,
+            json={
+                "Properties": {
+                    "AuthMethod": "RPS",
+                    "SiteName": "user.auth.xboxlive.com",
+                    "RpsTicket": "d=" + ms_token,
+                },
+                "RelyingParty": "http://auth.xboxlive.com",
+                "TokenType": "JWT",
+            },
+            timeout=self.timeout,
+        )
+        if resp.status_code != 200:
+            raise AuthError(f"Xbox Live 认证失败 (HTTP {resp.status_code})")
+        return resp.json()["Token"]
+
+    # ---- 第 4 步：XSTS 认证
+    def xsts_authenticate(self, xbl_token):
+        resp = self.session.post(
+            XSTS_AUTH_URL,
+            json={
+                "Properties": {
+                    "SandboxId": "RETAIL",
+                    "UserTokens": [xbl_token],
+                },
+                "RelyingParty": "rp://api.minecraftservices.com/",
+                "TokenType": "JWT",
+            },
+            timeout=self.timeout,
+        )
+        if resp.status_code == 401:
+            data = resp.json()
+            xerr = data.get("XErr")
+            raise AuthError("XSTS 认证失败: " + XSTS_ERRORS.get(xerr, f"未知错误 {xerr}"))
+        if resp.status_code != 200:
+            raise AuthError(f"XSTS 认证失败 (HTTP {resp.status_code})")
+        data = resp.json()
+        token = data["Token"]
+        uhs = data["DisplayClaims"]["xui"][0]["uhs"]
+        return token, uhs
+
+    # ---- 第 5 步：换取 Minecraft 令牌
+    def mc_login(self, uhs, xsts_token):
+        resp = self.session.post(
+            MC_LOGIN_URL,
+            json={"identityToken": f"XBL3.0 x={uhs};{xsts_token}"},
+            timeout=self.timeout,
+        )
+        if resp.status_code != 200:
+            raise AuthError(f"Minecraft 登录失败 (HTTP {resp.status_code}): {resp.text[:200]}")
+        return resp.json()["access_token"]
+
+    # ---- 第 6 步：检查正版资格
+    def check_entitlements(self, mc_token):
+        resp = self.session.get(
+            MC_ENTITLEMENTS_URL,
+            headers={"Authorization": f"Bearer {mc_token}"},
+            timeout=self.timeout,
+        )
+        if resp.status_code != 200:
+            raise AuthError(f"检查正版资格失败 (HTTP {resp.status_code})")
+        items = resp.json().get("items", [])
+        names = {item.get("name") for item in items if isinstance(item, dict)}
+        if names & _OWNED_ITEMS:
+            return True
+        if names:
+            utils.log.warning("entitlements 未包含已知 Java 项，改由档案接口判定: %s", names)
+        return True
+
+    # ---- 第 7 步：获取玩家档案
+    def get_profile(self, mc_token):
+        resp = self.session.get(
+            MC_PROFILE_URL,
+            headers={"Authorization": f"Bearer {mc_token}"},
+            timeout=self.timeout,
+        )
+        if resp.status_code == 404:
+            raise AuthError("该账号尚未创建 Minecraft 档案（没有游戏角色名）。")
+        if resp.status_code != 200:
+            raise AuthError(f"获取玩家档案失败 (HTTP {resp.status_code})")
+        data = resp.json()
+        return {"uuid": utils.dashed_uuid(data["id"]), "name": data["name"]}
+
+    # ---- 完整登录（设备码流）
+    def login(self, on_code=None, on_status=None, open_browser=True):
+        """
+        on_code: 回调 (user_code, verification_uri) 用于展示给用户
+        返回账号 dict。
+        """
+        code = self.get_device_code()
+        if open_browser:
+            try:
+                webbrowser.open(code["verification_uri"])
+            except Exception:
+                pass
+        if on_code:
+            on_code(code["user_code"], code["verification_uri"], code["expires_in"])
+        tokens = self.poll_token(
+            code["device_code"],
+            interval=code["interval"],
+            expires_in=code["expires_in"],
+            on_status=on_status,
+        )
+        xbl = self.xbl_authenticate(tokens["access_token"])
+        xsts, uhs = self.xsts_authenticate(xbl)
+        mc_token = self.mc_login(uhs, xsts)
+        self.check_entitlements(mc_token)
+        profile = self.get_profile(mc_token)
+        return {
+            "type": "microsoft",
+            "name": profile["name"],
+            "uuid": profile["uuid"],
+            "access_token": mc_token,
+            "refresh_token": tokens.get("refresh_token"),
+            "xuid": uhs,
+            "expires_at": time.time() + 20 * 3600,  # MC 令牌有效期约 24 小时，提前刷新
+            "updated_at": time.time(),
+        }
+
+    # ---- 刷新令牌
+    def refresh(self, account):
+        if not account.get("refresh_token"):
+            raise AuthError("缺少刷新令牌，需要重新登录。")
+        resp = self.session.post(
+            MS_TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "client_id": self.client_id,
+                "refresh_token": account["refresh_token"],
+                "scope": "XboxLive.signin offline_access",
+            },
+            timeout=self.timeout,
+        )
+        if resp.status_code != 200:
+            raise AuthError("刷新令牌失败，需要重新登录。")
+        data = resp.json()
+        ms_token = data["access_token"]
+        refresh_token = data.get("refresh_token") or account["refresh_token"]
+        xbl = self.xbl_authenticate(ms_token)
+        xsts, uhs = self.xsts_authenticate(xbl)
+        mc_token = self.mc_login(uhs, xsts)
+        profile = self.get_profile(mc_token)
+        account.update({
+            "access_token": mc_token,
+            "refresh_token": refresh_token,
+            "xuid": uhs,
+            "expires_at": time.time() + 20 * 3600,
+            "updated_at": time.time(),
+        })
+        return account
+
+
+# ---------------------------------------------------------------- 账号管理
+
+class AccountManager:
+    def __init__(self):
+        self.accounts = []
+        self.active = None
+        self.load()
+
+    def load(self):
+        data = utils.read_json(ACCOUNTS_FILE, None) or {}
+        self.accounts = [open_account(a) for a in data.get("accounts", []) if isinstance(a, dict)]
+        self.active = data.get("active")
+
+    def save(self):
+        sealed = [seal_account(a) for a in self.accounts]
+        utils.write_json(ACCOUNTS_FILE, {"active": self.active, "accounts": sealed})
+        _restrict_accounts_file()
+
+    def add_account(self, account):
+        self.accounts = [a for a in self.accounts if a.get("name") != account.get("name")]
+        self.accounts.append(account)
+        self.active = account["name"]
+        self.save()
+        return account
+
+    def remove_account(self, name):
+        self.accounts = [a for a in self.accounts if a.get("name") != name]
+        if self.active == name:
+            self.active = self.accounts[0]["name"] if self.accounts else None
+        self.save()
+
+    def get_account(self, name):
+        for a in self.accounts:
+            if a.get("name") == name:
+                return a
+        return None
+
+    def get_active(self):
+        if self.active:
+            acc = self.get_account(self.active)
+            if acc:
+                return acc
+        return None
+
+    def offline_account(self, username):
+        username = username.strip() or "Player"
+        return {"type": "offline", "name": username, "uuid": utils.offline_uuid(username)}
+
+    def ensure_valid(self, account):
+        """正版账号若令牌过期则刷新；失败则抛 AuthError，禁止带过期 token 启动。"""
+        if not account or account.get("type") != "microsoft":
+            return account
+        expired = time.time() > float(account.get("expires_at") or 0)
+        if not expired and account.get("access_token"):
+            return account
+        if not account.get("refresh_token"):
+            raise AuthError("正版令牌已过期且无法刷新，请重新登录。")
+        from .config import CONFIG
+        client_id = CONFIG.get("microsoft_client_id") or "00000000402b5328"
+        account = MicrosoftAuthenticator(client_id=client_id).refresh(account)
+        return self.add_account(account)
+
+    def launch_props(self, account):
+        """转换为启动参数。"""
+        if account.get("type") == "microsoft":
+            return {
+                "name": account["name"],
+                "uuid": utils.dashed_uuid(account.get("uuid") or ""),
+                "token": account.get("access_token") or "0",
+                "user_type": "msa",
+                "xuid": account.get("xuid") or "",
+            }
+        name = account.get("name", "Player")
+        return {
+            "name": name,
+            "uuid": utils.dashed_uuid(account.get("uuid") or "") or utils.offline_uuid(name),
+            "token": "0",
+            "user_type": "legacy",
+            "xuid": "",
+        }

@@ -1,0 +1,80 @@
+#include "pymcl.h"
+
+static cJSON *g_cfg;
+
+static void apply_defaults(cJSON *o) {
+    if (!cJSON_GetObjectItem(o, "instances_dir")) cJSON_AddStringToObject(o, "instances_dir", "instances");
+    if (!cJSON_GetObjectItem(o, "default_instance")) cJSON_AddStringToObject(o, "default_instance", "default");
+    if (!cJSON_GetObjectItem(o, "java_dir")) cJSON_AddStringToObject(o, "java_dir", "java");
+    if (!cJSON_GetObjectItem(o, "shared_libraries")) cJSON_AddBoolToObject(o, "shared_libraries", 0);
+    if (!cJSON_GetObjectItem(o, "shared_assets")) cJSON_AddBoolToObject(o, "shared_assets", 0);
+    if (!cJSON_GetObjectItem(o, "memory_mb")) cJSON_AddNumberToObject(o, "memory_mb", 4096);
+    if (!cJSON_GetObjectItem(o, "download_threads")) cJSON_AddNumberToObject(o, "download_threads", 8);
+    if (!cJSON_GetObjectItem(o, "width")) cJSON_AddNumberToObject(o, "width", 854);
+    if (!cJSON_GetObjectItem(o, "height")) cJSON_AddNumberToObject(o, "height", 480);
+    if (!cJSON_GetObjectItem(o, "microsoft_client_id"))
+        cJSON_AddStringToObject(o, "microsoft_client_id", PYMCL_MS_CLIENT_DEFAULT);
+    if (!cJSON_GetObjectItem(o, "curseforge_api_key"))
+        cJSON_AddStringToObject(o, "curseforge_api_key",
+            "$2a$10$o8pygPrhvKBHuuh5imL2W.LCNFhB15zBYAExXx/TqTx/Zp5px2lxu");
+}
+
+void config_init(void) {
+    char p[PYMCL_PATH];
+    pymcl_path_join(p, sizeof(p), g_root, "config.json");
+    g_cfg = pymcl_read_json(p);
+    if (!g_cfg || !cJSON_IsObject(g_cfg)) {
+        if (g_cfg) cJSON_Delete(g_cfg);
+        g_cfg = cJSON_CreateObject();
+    }
+    apply_defaults(g_cfg);
+}
+
+cJSON *config_obj(void) { return g_cfg; }
+
+const char *config_str(const char *key, const char *def) {
+    cJSON *v = g_cfg ? cJSON_GetObjectItem(g_cfg, key) : NULL;
+    return cJSON_IsString(v) ? v->valuestring : def;
+}
+int config_int(const char *key, int def) {
+    cJSON *v = g_cfg ? cJSON_GetObjectItem(g_cfg, key) : NULL;
+    return cJSON_IsNumber(v) ? (int)v->valuedouble : def;
+}
+int config_bool(const char *key, int def) {
+    cJSON *v = g_cfg ? cJSON_GetObjectItem(g_cfg, key) : NULL;
+    if (cJSON_IsBool(v)) return cJSON_IsTrue(v);
+    if (cJSON_IsNumber(v)) return v->valuedouble != 0;
+    return def;
+}
+void config_set_str(const char *key, const char *val) {
+    if (!g_cfg) return;
+    cJSON_DeleteItemFromObject(g_cfg, key);
+    cJSON_AddStringToObject(g_cfg, key, val ? val : "");
+}
+void config_set_int(const char *key, int val) {
+    if (!g_cfg) return;
+    cJSON_DeleteItemFromObject(g_cfg, key);
+    cJSON_AddNumberToObject(g_cfg, key, val);
+}
+void config_set_bool(const char *key, int v) {
+    if (!g_cfg) return;
+    cJSON_DeleteItemFromObject(g_cfg, key);
+    cJSON_AddBoolToObject(g_cfg, key, v);
+}
+void config_save(void) {
+    char p[PYMCL_PATH];
+    pymcl_path_join(p, sizeof(p), g_root, "config.json");
+    pymcl_write_json(p, g_cfg);
+}
+void config_libraries_dir(const char *instance_path, char *out, size_t n) {
+    if (config_bool("shared_libraries", 0))
+        pymcl_path_join3(out, n, g_root, "shared", "libraries");
+    else
+        pymcl_path_join(out, n, instance_path, "libraries");
+}
+void config_assets_dir(const char *instance_path, char *out, size_t n) {
+    if (config_bool("shared_assets", 0))
+        pymcl_path_join3(out, n, g_root, "shared", "assets");
+    else
+        pymcl_path_join(out, n, instance_path, "assets");
+}

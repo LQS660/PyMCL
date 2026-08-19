@@ -1,0 +1,71 @@
+<UserControl
+    x:Class="PyMCL.Pages.AiPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="200"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="0,0,1,0" Padding="10,14">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Button x:Name="NewChatBtn" Content="新对话" Height="32" HorizontalAlignment="Stretch" Click="NewChat_Click"
+                        Style="{StaticResource AccentButtonStyle}"/>
+                <ListView x:Name="ChatList" Grid.Row="1" Margin="0,10,0,10" SelectionChanged="ChatList_SelectionChanged">
+                    <ListView.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" Padding="4"/>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+                <Button Grid.Row="2" Content="删除对话" HorizontalAlignment="Stretch" Click="DeleteChat_Click"/>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Column="1" Padding="24,20">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid>
+                <StackPanel Orientation="Horizontal" Spacing="10">
+                    <TextBlock Text="AI 助手" FontSize="20" FontWeight="SemiBold"/>
+                    <TextBlock x:Name="StatusLabel" VerticalAlignment="Center"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+                    <Button x:Name="StopBtn" Content="停止" IsEnabled="False" Click="Stop_Click"/>
+                    <Button x:Name="RetryBtn" Content="重试" Click="Retry_Click"/>
+                </StackPanel>
+            </Grid>
+            <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" Margin="0,10,0,10">
+                <Button Content="下一款游戏 1.20.1 Fabric" Click="Chip_Click" Tag="下一款游戏 1.20.1 Fabric"/>
+                <Button Content="装钠和光影" Click="Chip_Click" Tag="装钠和光影"/>
+                <Button Content="启动闪退了帮我看" Click="Chip_Click" Tag="启动闪退了帮我看"/>
+            </StackPanel>
+            <ScrollViewer x:Name="MsgScroll" Grid.Row="2">
+                <StackPanel x:Name="MsgHost" Spacing="10"/>
+            </ScrollViewer>
+            <Grid Grid.Row="3" Margin="0,12,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="InputBox" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="48" MaxHeight="140"
+                         PlaceholderText="问我要下什么、哪报错、模组怎么配…  Ctrl+Enter 发送"/>
+                <Button Grid.Column="1" Content="发送" Margin="10,0,0,0" Height="34" VerticalAlignment="Bottom"
+                        Click="Send_Click" Style="{StaticResource AccentButtonStyle}"/>
+            </Grid>
+        </Grid>
+    </Grid>
+</UserControl>

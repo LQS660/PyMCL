@@ -1,0 +1,27 @@
+<UserControl
+    x:Class="PyMCL.Pages.TasksPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Padding="28,20">
+        <Grid.ChildrenTransitions>
+            <TransitionCollection>
+                <EntranceThemeTransition FromVerticalOffset="20"/>
+            </TransitionCollection>
+        </Grid.ChildrenTransitions>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,14">
+            <TextBlock Text="下载任务" FontSize="20" FontWeight="SemiBold"/>
+            <TextBlock Text="下载板块内所有安装任务的实时进度；整合包安装会自动展开详细日志"
+                       Foreground="#888888" FontSize="12" TextWrapping="Wrap"/>
+        </StackPanel>
+        <ScrollViewer Grid.Row="1">
+            <StackPanel x:Name="ListHost" Spacing="10">
+                <TextBlock x:Name="Empty" Text="暂无任务 —— 去下载板块里的版本 / 整合包 / 模组 / 光影 / 资源包 / Java 发起"
+                           Foreground="#888888" TextWrapping="Wrap"/>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

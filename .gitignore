@@ -1,0 +1,38 @@
+# Local config and secrets
+config.json
+.env
+.env.*
+!.env.example
+*.log
+ai_chats.json
+
+# Runtime / generated
+instances/
+cache/
+build/
+dist/
+java/
+.cursor/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Promo toolchain (reinstall locally)
+promo/tools/venv/
+promo/tools/node_modules/
+promo/tools/ffmpeg/
+promo/tools/ffmpeg-extract/
+promo/tools/ffmpeg-release-essentials.zip
+promo/tools/package-lock.json
+promo/raw/*
+!promo/raw/.gitkeep
+promo/out/*
+!promo/out/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db

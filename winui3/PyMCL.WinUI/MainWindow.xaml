@@ -1,0 +1,131 @@
+<Window
+    x:Class="PyMCL.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="48"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <Grid x:Name="AppTitleBar" Height="48" Padding="0,0,138,0">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0,0,0">
+                <FontIcon Glyph="&#xE7FC;" FontSize="16" Margin="0,0,10,0"
+                          Foreground="{ThemeResource AccentFillColorDefaultBrush}"/>
+                <TextBlock Text="PyMCL" Style="{ThemeResource SubtitleTextBlockStyle}" VerticalAlignment="Center"/>
+                <TextBlock Text="WinUI 3" Margin="10,0,0,0" VerticalAlignment="Center"
+                           Style="{ThemeResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+            </StackPanel>
+        </Grid>
+
+        <NavigationView x:Name="NavView" Grid.Row="1"
+                        IsSettingsVisible="False"
+                        IsBackButtonVisible="Collapsed"
+                        IsPaneToggleButtonVisible="False"
+                        IsPaneOpen="True"
+                        PaneDisplayMode="Left"
+                        OpenPaneLength="188"
+                        CompactPaneLength="188"
+                        IsTitleBarAutoPaddingEnabled="False"
+                        PaneClosing="Nav_PaneClosing"
+                        SelectionChanged="Nav_SelectionChanged">
+            <NavigationView.MenuItems>
+                <NavigationViewItem Content="启动" Tag="launch">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE768;"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="实例" Tag="instance">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE80A;"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="下载" Tag="download">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE896;"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="AI 助手" Tag="ai">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE8BD;"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="设置" Tag="settings">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE713;"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.MenuItems>
+            <NavigationView.FooterMenuItems>
+                <NavigationViewItem Content="下载任务" Tag="tasks">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE753;"/>
+                    </NavigationViewItem.Icon>
+                    <NavigationViewItem.InfoBadge>
+                        <InfoBadge x:Name="TaskBadge" Visibility="Collapsed"/>
+                    </NavigationViewItem.InfoBadge>
+                </NavigationViewItem>
+            </NavigationView.FooterMenuItems>
+
+            <Grid x:Name="ContentRoot" SizeChanged="ContentRoot_SizeChanged">
+                <Frame x:Name="ContentFrame" Background="Transparent">
+                    <Frame.ContentTransitions>
+                        <TransitionCollection>
+                            <NavigationThemeTransition>
+                                <NavigationThemeTransition.DefaultNavigationTransitionInfo>
+                                    <SlideNavigationTransitionInfo Effect="FromRight"/>
+                                </NavigationThemeTransition.DefaultNavigationTransitionInfo>
+                            </NavigationThemeTransition>
+                        </TransitionCollection>
+                    </Frame.ContentTransitions>
+                </Frame>
+                <InfoBar x:Name="ToastBar" Severity="Informational" IsOpen="False"
+                         IsClosable="True" HorizontalAlignment="Right" VerticalAlignment="Top"
+                         Margin="0,12,16,0" MaxWidth="380"/>
+                <Border x:Name="DockHost" HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                        Margin="16,0,16,16" Visibility="Collapsed" CornerRadius="8"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1" Padding="14,10" MaxWidth="640"
+                        Translation="0,0,32">
+                    <Border.Shadow>
+                        <ThemeShadow/>
+                    </Border.Shadow>
+                    <Border.Background>
+                        <AcrylicBrush TintColor="{ThemeResource SolidBackgroundFillColorBase}"
+                                      TintOpacity="0.45" TintLuminosityOpacity="0.85"
+                                      FallbackColor="{ThemeResource SolidBackgroundFillColorBase}"/>
+                    </Border.Background>
+                    <StackPanel>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="DockTitle" Text="下载任务" FontWeight="SemiBold" VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis"/>
+                            <TextBlock x:Name="DockStatus" Grid.Column="1" Text="就绪"
+                                       Style="{ThemeResource CaptionTextBlockStyle}"
+                                       Margin="10,0" VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis"/>
+                            <TextBlock x:Name="DockSpeed" Grid.Column="2"
+                                       Style="{ThemeResource CaptionTextBlockStyle}"
+                                       Margin="8,0" VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis"/>
+                            <Button x:Name="DockToggle" Grid.Column="3" Width="32" Height="28"
+                                    Click="DockToggle_Click">
+                                <FontIcon x:Name="DockChevron" Glyph="&#xE70D;" FontSize="12"/>
+                            </Button>
+                        </Grid>
+                        <ProgressBar x:Name="DockProgress" Minimum="0" Maximum="100" Value="0" Margin="0,8,0,0"/>
+                        <TextBox x:Name="DockLog" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
+                                 Height="220" Visibility="Collapsed" Margin="0,8,0,0" FontSize="12"/>
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </NavigationView>
+    </Grid>
+</Window>

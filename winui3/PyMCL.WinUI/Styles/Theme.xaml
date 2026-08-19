@@ -1,0 +1,26 @@
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Color x:Key="SystemAccentColor">#2E9B6B</Color>
+    <Color x:Key="SystemAccentColorLight1">#4CB887</Color>
+    <Color x:Key="SystemAccentColorLight2">#6FCAA0</Color>
+    <Color x:Key="SystemAccentColorLight3">#A6E0C6</Color>
+    <Color x:Key="SystemAccentColorDark1">#1E7A52</Color>
+    <Color x:Key="SystemAccentColorDark2">#166241</Color>
+    <Color x:Key="SystemAccentColorDark3">#0E4630</Color>
+
+    <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="#2E9B6B"/>
+    <SolidColorBrush x:Key="AccentFillColorSecondaryBrush" Color="#3EAA7A"/>
+    <SolidColorBrush x:Key="AccentFillColorTertiaryBrush" Color="#5BC090"/>
+    <SolidColorBrush x:Key="AccentTextFillColorPrimaryBrush" Color="#1E7A52"/>
+    <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="#2E9B6B"/>
+    <SolidColorBrush x:Key="PclGreen" Color="#2E9B6B"/>
+
+    <Style x:Key="FluentCard" TargetType="Border">
+        <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}"/>
+        <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="CornerRadius" Value="8"/>
+    </Style>
+</ResourceDictionary>

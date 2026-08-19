@@ -1,0 +1,247 @@
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using PyMCL.Models;
+using PyMCL.Services;
+using Windows.Storage.Pickers;
+using Windows.UI;
+using WinRT.Interop;
+
+namespace PyMCL.Pages;
+
+public sealed partial class CatalogPage : UserControl
+{
+    private readonly CatalogKind _kind;
+    private int _token;
+
+    public CatalogPage() : this(CatalogKind.Mod) { }
+
+    public CatalogPage(CatalogKind kind)
+    {
+        _kind = kind;
+        InitializeComponent();
+        SearchTitle.Text = kind.SearchTitle;
+        LinkBtn.Content = kind.LinkLabel;
+        LocalBtn.Content = kind.LocalLabel;
+        SourceBox.SelectedIndex = 0;
+        VersionBox.SelectedIndex = 0;
+        foreach (var t in kind.Types) TypeBox.Items.Add(t);
+        TypeBox.SelectedIndex = 0;
+        ShowIdle();
+        Loaded += (_, _) => ReloadInstances();
+    }
+
+    public async void ReloadInstances()
+    {
+        if (AppServices.Client is null) return;
+        try
+        {
+            var insts = await AppServices.Client.CallAsync<List<InstanceInfo>>("get_instances") ?? new();
+            var cur = InstanceBox.SelectedItem as string;
+            InstanceBox.Items.Clear();
+            foreach (var i in insts) InstanceBox.Items.Add(i.Name);
+            if (cur != null && insts.Any(x => x.Name == cur)) InstanceBox.SelectedItem = cur;
+            else if (InstanceBox.Items.Count > 0) InstanceBox.SelectedIndex = 0;
+        }
+        catch { }
+    }
+
+    private void ShowIdle()
+    {
+        _token++;
+        ResultList.Children.Clear();
+        ResultList.Children.Add(new TextBlock
+        {
+            Text = "输入名称后点击搜索",
+            Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 40, 0, 0),
+        });
+    }
+
+    private void Reset_Click(object sender, RoutedEventArgs e)
+    {
+        NameEdit.Text = "";
+        SourceBox.SelectedIndex = 0;
+        VersionBox.SelectedIndex = 0;
+        TypeBox.SelectedIndex = 0;
+        ShowIdle();
+    }
+
+    private void Name_Key(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == Windows.System.VirtualKey.Enter) _ = SearchAsync();
+    }
+
+    private void Search_Click(object sender, RoutedEventArgs e) => _ = SearchAsync();
+
+    private async Task SearchAsync()
+    {
+        if (AppServices.Client is null) return;
+        var token = ++_token;
+        ResultList.Children.Clear();
+        ResultList.Children.Add(new TextBlock { Text = "正在搜索…", Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)), HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 40, 0, 0) });
+        var query = NameEdit.Text?.Trim() ?? "";
+        var source = SourceBox.SelectedItem as string ?? "全部";
+        var typeF = TypeBox.SelectedItem as string ?? "全部";
+        try
+        {
+            var rows = await AppServices.Client.CallAsync<List<CatalogItem>>(_kind.SearchMethod, new { query, source }) ?? new();
+            if (token != _token) return;
+            if (!string.IsNullOrEmpty(typeF) && typeF != "全部")
+            {
+                var q = typeF.ToLowerInvariant();
+                var filtered = rows.Where(r =>
+                {
+                    var blob = $"{r.Name} {r.Description} {string.Join(" ", r.Tags ?? new())}".ToLowerInvariant();
+                    return blob.Contains(q);
+                }).ToList();
+                if (filtered.Count > 0) rows = filtered;
+            }
+            ResultList.Children.Clear();
+            if (rows.Count == 0)
+            {
+                ResultList.Children.Add(new TextBlock { Text = _kind.EmptySearch, Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)), HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 40, 0, 0) });
+                return;
+            }
+            var i = 0;
+            foreach (var item in rows)
+            {
+                var row = BuildRow(item);
+                Motion.CardEnter(row, Math.Min(i++, 16) * 26, 1.02);
+                ResultList.Children.Add(row);
+            }
+        }
+        catch (Exception ex)
+        {
+            if (token != _token) return;
+            ResultList.Children.Clear();
+            ResultList.Children.Add(new TextBlock { Text = "搜索失败: " + ex.Message, Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)), Margin = new Thickness(12) });
+        }
+    }
+
+    private Border BuildRow(CatalogItem item)
+    {
+        var row = new Border { MinHeight = 72, BorderBrush = new SolidColorBrush(Color.FromArgb(255, 238, 243, 247)), BorderThickness = new Thickness(0, 0, 0, 1), Padding = new Thickness(12, 10, 12, 10) };
+        var g = new Grid();
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var tile = new Border
+        {
+            Width = 52, Height = 52, CornerRadius = new CornerRadius(10),
+            Background = new SolidColorBrush(Color.FromArgb(255, 46, 155, 107)),
+            Child = new TextBlock { Text = (item.Name.Length > 0 ? item.Name[..1] : "?").ToUpperInvariant(), Foreground = new SolidColorBrush(Microsoft.UI.Colors.White), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, FontWeight = Microsoft.UI.Text.FontWeights.Bold },
+        };
+        g.Children.Add(tile);
+        var info = new StackPanel { Margin = new Thickness(12, 0, 12, 0) };
+        info.Children.Add(new TextBlock { Text = item.Name, Foreground = new SolidColorBrush(Color.FromArgb(255, 27, 122, 84)), FontSize = 14, FontWeight = Microsoft.UI.Text.FontWeights.Bold, TextWrapping = TextWrapping.Wrap });
+        if (!string.IsNullOrWhiteSpace(item.Description))
+            info.Children.Add(new TextBlock { Text = item.Description, Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)), FontSize = 12, TextWrapping = TextWrapping.Wrap, MaxLines = 2 });
+        info.Children.Add(new TextBlock
+        {
+            Text = $"{FmtDownloads(item.Downloads)}  ·  {SrcLabel(item.Source)}",
+            Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)),
+            FontSize = 11,
+            Margin = new Thickness(0, 4, 0, 0),
+        });
+        Grid.SetColumn(info, 1);
+        g.Children.Add(info);
+        var btn = new Button { Content = "安装", Width = 72, Height = 30, Style = (Style)Application.Current.Resources["AccentButtonStyle"] };
+        btn.Click += (_, _) => _ = Install(item);
+        Grid.SetColumn(btn, 2);
+        g.Children.Add(btn);
+        row.Child = g;
+        return row;
+    }
+
+    private static string SrcLabel(string src)
+    {
+        var s = (src ?? "").ToLowerInvariant();
+        if (s.StartsWith("curse")) return "CurseForge";
+        if (s.StartsWith("modrinth") || s == "modrinth") return "Modrinth";
+        return string.IsNullOrEmpty(src) ? "—" : src;
+    }
+
+    private static string FmtDownloads(long n)
+    {
+        if (n >= 100_000_000) return $"{n / 100_000_000.0:0.#}亿".Replace(".0", "");
+        if (n >= 10_000) return $"{n / 10_000.0:0}万";
+        return n == 0 ? "—" : n.ToString();
+    }
+
+    private async Task Install(CatalogItem item)
+    {
+        if (AppServices.Client is null) return;
+        var instance = InstanceBox.SelectedItem as string ?? "default";
+        var gv = VersionBox.SelectedItem as string ?? VersionBox.Text ?? "";
+        if (gv.StartsWith("全部")) gv = "";
+        var src = string.IsNullOrWhiteSpace(item.Source) || item.Source == "全部"
+            ? (SourceBox.SelectedItem as string ?? "Modrinth")
+            : item.Source;
+        if (src == "全部") src = "Modrinth";
+        var extra = new Dictionary<string, object?>
+        {
+            ["name"] = item.Name,
+            ["source"] = src,
+            ["slug"] = item.Slug,
+            ["id"] = item.Id,
+            ["instance"] = instance,
+            ["game_version"] = gv,
+        };
+        try
+        {
+            if (_kind.IsModpack)
+                await AppServices.Client.StartTaskAsync(_kind.InstallMethod, new { name = item.Name, source = src, extra });
+            else
+                await AppServices.Client.StartTaskAsync(_kind.InstallMethod, new { name = item.Name, instance, extra });
+        }
+        catch (Exception ex) { AppServices.Toast?.Invoke("安装失败", ex.Message, InfoBarSeverity.Error); }
+    }
+
+    private async void Link_Click(object sender, RoutedEventArgs e)
+    {
+        var box = new TextBox { PlaceholderText = _kind.LinkHint };
+        var dlg = new ContentDialog { Title = _kind.LinkTitle, Content = box, PrimaryButtonText = "确定", CloseButtonText = "取消", XamlRoot = XamlRoot };
+        if (await dlg.ShowAsync() != ContentDialogResult.Primary) return;
+        var url = box.Text?.Trim();
+        if (string.IsNullOrEmpty(url) || AppServices.Client is null) return;
+        var instance = InstanceBox.SelectedItem as string ?? "default";
+        var extra = new Dictionary<string, object?> { ["name"] = url, ["url"] = url, ["instance"] = instance, ["source"] = "本地" };
+        try
+        {
+            if (_kind.IsModpack)
+                await AppServices.Client.StartTaskAsync(_kind.InstallMethod, new { name = url, source = "本地", extra });
+            else
+                await AppServices.Client.StartTaskAsync(_kind.InstallMethod, new { name = url, instance, extra });
+        }
+        catch (Exception ex) { AppServices.Toast?.Invoke("安装失败", ex.Message, InfoBarSeverity.Error); }
+    }
+
+    private async void Local_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var picker = new FileOpenPicker();
+            InitializeWithWindow.Initialize(picker, AppServices.WindowHandle);
+            picker.FileTypeFilter.Clear();
+            foreach (var ext in _kind.LocalFilter.Split(';', StringSplitOptions.RemoveEmptyEntries))
+                picker.FileTypeFilter.Add(ext.StartsWith('.') ? ext : "." + ext);
+            var files = await picker.PickMultipleFilesAsync();
+            if (files is null || AppServices.Client is null) return;
+            foreach (var f in files)
+            {
+                var extra = new Dictionary<string, object?>
+                {
+                    ["name"] = f.Path, ["path"] = f.Path, ["instance"] = InstanceBox.SelectedItem as string ?? "default", ["source"] = "本地",
+                };
+                if (_kind.IsModpack)
+                    await AppServices.Client.StartTaskAsync(_kind.InstallMethod, new { name = f.Path, source = "本地", extra });
+                else
+                    await AppServices.Client.StartTaskAsync(_kind.InstallMethod, new { name = f.Path, instance = extra["instance"], extra });
+            }
+        }
+        catch (Exception ex) { AppServices.Toast?.Invoke("导入失败", ex.Message, InfoBarSeverity.Error); }
+    }
+}

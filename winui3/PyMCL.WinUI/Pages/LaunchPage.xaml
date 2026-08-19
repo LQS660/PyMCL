@@ -1,0 +1,121 @@
+<UserControl
+    x:Class="PyMCL.Pages.LaunchPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    SizeChanged="Page_SizeChanged">
+    <Grid x:Name="LaunchRoot" Padding="28,20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <Border x:Name="Banner" MinHeight="132" Height="180" CornerRadius="12" Margin="0,0,0,16" Translation="0,0,32">
+            <Border.Shadow>
+                <ThemeShadow/>
+            </Border.Shadow>
+            <Border.Background>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                    <GradientStop Color="#123B2A" Offset="0"/>
+                    <GradientStop Color="#3E7C4F" Offset="0.55"/>
+                    <GradientStop Color="#7BB661" Offset="1"/>
+                </LinearGradientBrush>
+            </Border.Background>
+            <Grid>
+                <Grid x:Name="BannerInner" Padding="32,22">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition x:Name="BannerCol0" Width="*"/>
+                        <ColumnDefinition x:Name="BannerCol1" Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition x:Name="BannerRow1" Height="0"/>
+                    </Grid.RowDefinitions>
+                    <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
+                        <TextBlock Text="MINECRAFT" Foreground="#AAFFFFFF" FontSize="12" FontWeight="SemiBold" CharacterSpacing="80"/>
+                        <TextBlock x:Name="BannerTitle" Text="准备启程" Foreground="White" FontSize="30" FontWeight="Bold"
+                                   Margin="0,6,0,0" TextWrapping="Wrap" MaxLines="2"/>
+                        <TextBlock x:Name="BannerSub" Text="" Foreground="#C0FFFFFF" FontSize="13" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                    </StackPanel>
+                    <StackPanel x:Name="BannerBtns" Grid.Column="1" VerticalAlignment="Center">
+                        <Button x:Name="LaunchBtn" Content="启动游戏" Width="170" Height="46" Click="Launch_Click"
+                                Style="{StaticResource AccentButtonStyle}" FontSize="15" FontWeight="SemiBold"
+                                HorizontalAlignment="Stretch"/>
+                        <Button x:Name="StopBtn" Content="停止" Width="170" Height="32" Margin="0,10,0,0"
+                                Click="Stop_Click" IsEnabled="False" HorizontalAlignment="Stretch"/>
+                    </StackPanel>
+                </Grid>
+                <Rectangle x:Name="Shine" Width="96" HorizontalAlignment="Left" IsHitTestVisible="False" Opacity="0">
+                    <Rectangle.Fill>
+                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                            <GradientStop Color="Transparent" Offset="0"/>
+                            <GradientStop Color="#66FFFFFF" Offset="0.5"/>
+                            <GradientStop Color="Transparent" Offset="1"/>
+                        </LinearGradientBrush>
+                    </Rectangle.Fill>
+                    <Rectangle.RenderTransform>
+                        <TranslateTransform x:Name="ShineTx" X="-160"/>
+                    </Rectangle.RenderTransform>
+                </Rectangle>
+            </Grid>
+        </Border>
+
+        <ProgressBar x:Name="LaunchProgress" Grid.Row="1" Minimum="0" Maximum="100" Value="0"/>
+        <TextBlock x:Name="StatusLabel" Grid.Row="2" Text="就绪" Style="{ThemeResource CaptionTextBlockStyle}"
+                   Margin="0,6,0,12" TextWrapping="Wrap"/>
+
+        <Grid x:Name="BodyGrid" Grid.Row="3" ColumnSpacing="16" RowSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="BodyCol0" Width="360"/>
+                <ColumnDefinition x:Name="BodyCol1" Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition x:Name="BodyRow0" Height="*"/>
+                <RowDefinition x:Name="BodyRow1" Height="0"/>
+            </Grid.RowDefinitions>
+            <Border x:Name="ConfigCard" Style="{StaticResource FluentCard}" Translation="0,0,16">
+                <ScrollViewer x:Name="ConfigScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Padding="20,18">
+                        <TextBlock Text="启动配置" Style="{ThemeResource SubtitleTextBlockStyle}" Margin="0,0,0,12"/>
+                        <TextBlock Text="实例" Style="{ThemeResource CaptionTextBlockStyle}"/>
+                        <ComboBox x:Name="InstanceBox" HorizontalAlignment="Stretch" SelectionChanged="Instance_Changed" Margin="0,4,0,10"/>
+                        <TextBlock Text="版本" Style="{ThemeResource CaptionTextBlockStyle}"/>
+                        <ComboBox x:Name="VersionBox" HorizontalAlignment="Stretch" SelectionChanged="Version_Changed" Margin="0,4,0,10"/>
+                        <TextBlock Text="账号" Style="{ThemeResource CaptionTextBlockStyle}"/>
+                        <ComboBox x:Name="AccountBox" HorizontalAlignment="Stretch" Margin="0,4,0,10"/>
+                        <TextBlock Text="用户名" Style="{ThemeResource CaptionTextBlockStyle}"/>
+                        <TextBox x:Name="UsernameEdit" PlaceholderText="离线用户名" Text="Player" Margin="0,4,0,10"/>
+                        <TextBlock Text="Java（本实例）" Style="{ThemeResource CaptionTextBlockStyle}"/>
+                        <ComboBox x:Name="JavaBox" HorizontalAlignment="Stretch" SelectionChanged="Java_Changed" Margin="0,4,0,10"/>
+                        <Grid>
+                            <TextBlock Text="内存" Style="{ThemeResource CaptionTextBlockStyle}"/>
+                            <TextBlock x:Name="MemoryLabel" Text="4096 MB" HorizontalAlignment="Right" Style="{ThemeResource CaptionTextBlockStyle}"/>
+                        </Grid>
+                        <Slider x:Name="MemorySlider" Minimum="512" Maximum="32768" StepFrequency="256" Value="4096"
+                                ValueChanged="Memory_Changed" Margin="0,4,0,10"/>
+                        <TextBlock Text="分辨率" Style="{ThemeResource CaptionTextBlockStyle}"/>
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,12">
+                            <NumberBox x:Name="WidthSpin" Minimum="320" Maximum="7680" Value="854" Width="100" SpinButtonPlacementMode="Compact"/>
+                            <TextBlock Text="×" VerticalAlignment="Center" Margin="8,0"/>
+                            <NumberBox x:Name="HeightSpin" Minimum="240" Maximum="4320" Value="480" Width="100" SpinButtonPlacementMode="Compact"/>
+                        </StackPanel>
+                        <HyperlinkButton Content="使用微软账户登录…" Click="Login_Click"/>
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+            <Border x:Name="LogCard" Grid.Column="1" Style="{StaticResource FluentCard}" Padding="16" Translation="0,0,16">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock Text="实时日志" Style="{ThemeResource SubtitleTextBlockStyle}" Margin="0,0,0,8"/>
+                    <TextBox x:Name="LogEdit" Grid.Row="1" IsReadOnly="True" AcceptsReturn="True"
+                             TextWrapping="Wrap" PlaceholderText="启动日志将输出到这里…" FontSize="12"
+                             MinHeight="140" HorizontalAlignment="Stretch"/>
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>

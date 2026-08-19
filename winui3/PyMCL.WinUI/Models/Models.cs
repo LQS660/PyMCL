@@ -1,0 +1,224 @@
+using System.Text.Json.Serialization;
+
+namespace PyMCL.Models;
+
+public sealed class InstanceInfo
+{
+    public string Name { get; set; } = "";
+    public int Versions { get; set; }
+    public string Mc { get; set; } = "";
+    public string Pack { get; set; } = "";
+    [JsonPropertyName("pack_version")] public string PackVersion { get; set; } = "";
+    [JsonPropertyName("mc_version")] public string McVersion { get; set; } = "";
+    public string Java { get; set; } = "";
+    [JsonPropertyName("java_label")] public string JavaLabel { get; set; } = "";
+}
+
+public sealed class VersionRow
+{
+    public string Version { get; set; } = "";
+    public string Type { get; set; } = "";
+    public string Date { get; set; } = "";
+}
+
+public sealed class CatalogItem
+{
+    public string Name { get; set; } = "";
+    public string Author { get; set; } = "";
+    public long Downloads { get; set; }
+    public object? Id { get; set; }
+    public string? Slug { get; set; }
+    public string Source { get; set; } = "";
+    public string Description { get; set; } = "";
+    public List<string>? Tags { get; set; }
+    public string Updated { get; set; } = "";
+}
+
+public sealed class JavaInfo
+{
+    public string Name { get; set; } = "";
+    public string Major { get; set; } = "";
+    public string Path { get; set; } = "";
+}
+
+public sealed class JavaOption
+{
+    public string Label { get; set; } = "";
+    public string Value { get; set; } = "";
+}
+
+public sealed class SettingsDto
+{
+    [JsonPropertyName("share_libraries")] public bool ShareLibraries { get; set; }
+    [JsonPropertyName("share_assets")] public bool ShareAssets { get; set; }
+    [JsonPropertyName("download_threads")] public int DownloadThreads { get; set; }
+    [JsonPropertyName("default_memory_mb")] public int DefaultMemoryMb { get; set; }
+    [JsonPropertyName("default_resolution")] public List<int> DefaultResolution { get; set; } = new() { 854, 480 };
+    [JsonPropertyName("ms_client_id")] public string MsClientId { get; set; } = "";
+    [JsonPropertyName("curseforge_api_key")] public string CurseforgeApiKey { get; set; } = "";
+    [JsonPropertyName("ai_mode")] public string AiMode { get; set; } = "public";
+    [JsonPropertyName("ai_gateway_url")] public string AiGatewayUrl { get; set; } = "";
+    [JsonPropertyName("ai_base_url")] public string AiBaseUrl { get; set; } = "";
+    [JsonPropertyName("ai_api_key")] public string AiApiKey { get; set; } = "";
+    [JsonPropertyName("ai_model")] public string AiModel { get; set; } = "deepseek-v4-flash";
+    public string Root { get; set; } = "";
+}
+
+public sealed class AiStoreDto
+{
+    [JsonPropertyName("active_id")] public string ActiveId { get; set; } = "";
+    public List<AiChatDto> Chats { get; set; } = new();
+}
+
+public sealed class AiChatDto
+{
+    public string Id { get; set; } = "";
+    public string Title { get; set; } = "";
+    public List<AiMsgDto> Messages { get; set; } = new();
+}
+
+public sealed class AiMsgDto
+{
+    public string Role { get; set; } = "";
+    public string Content { get; set; } = "";
+}
+
+public sealed class TaskItem
+{
+    public string TaskId { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string Status { get; set; } = "排队中…";
+    public string Speed { get; set; } = "";
+    public string Log { get; set; } = "";
+    public double Progress { get; set; }
+    public bool Finished { get; set; }
+    public bool Success { get; set; }
+    public bool Expanded { get; set; }
+}
+
+public sealed class CrashReport
+{
+    public string Title { get; set; } = "";
+    public string Headline { get; set; } = "";
+    public string Summary { get; set; } = "";
+    public string Detail { get; set; } = "";
+    public string Help { get; set; } = "";
+    [JsonPropertyName("direct_file")] public string DirectFile { get; set; } = "";
+    [JsonPropertyName("exit_code")] public int? ExitCode { get; set; }
+    [JsonPropertyName("exit_hint")] public string ExitHint { get; set; } = "";
+    [JsonPropertyName("task_id")] public string TaskId { get; set; } = "";
+}
+
+public sealed class BridgeEvent
+{
+    public string Event { get; set; } = "";
+    public string TaskId { get; set; } = "";
+    public string Title { get; set; } = "";
+    public int Current { get; set; }
+    public int Total { get; set; }
+    public string Message { get; set; } = "";
+    public string Text { get; set; } = "";
+    public bool Success { get; set; }
+    public int Count { get; set; }
+    public string Code { get; set; } = "";
+    public string Uri { get; set; } = "";
+    public string Detail { get; set; } = "";
+    public string Kind { get; set; } = "";
+    public string Label { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string PayloadJson { get; set; } = "";
+    public bool Stopped { get; set; }
+    public CrashReport? Crash { get; set; }
+}
+
+public sealed class CatalogKind
+{
+    public string Title { get; set; } = "";
+    public string SearchTitle { get; set; } = "";
+    public string SearchMethod { get; set; } = "";
+    public string InstallMethod { get; set; } = "";
+    public string EmptySearch { get; set; } = "";
+    public string LinkLabel { get; set; } = "";
+    public string LinkTitle { get; set; } = "";
+    public string LinkHint { get; set; } = "";
+    public string LocalLabel { get; set; } = "";
+    public string LocalFilter { get; set; } = "";
+    public bool IsModpack { get; set; }
+    public string[] Types { get; set; } = Array.Empty<string>();
+
+    public static CatalogKind Mod { get; } = new()
+    {
+        Title = "Mod",
+        SearchTitle = "搜索 Mod",
+        SearchMethod = "search_mods",
+        InstallMethod = "install_mod",
+        EmptySearch = "没有找到相关模组",
+        LinkLabel = "从链接安装",
+        LinkTitle = "从链接安装模组",
+        LinkHint = "模组下载链接 (URL)",
+        LocalLabel = "导入 jar",
+        LocalFilter = ".jar",
+        Types = new[] { "全部", "优化", "科技", "魔法", "冒险" },
+    };
+
+    public static CatalogKind Modpack { get; } = new()
+    {
+        Title = "整合包",
+        SearchTitle = "搜索整合包",
+        SearchMethod = "search_modpacks",
+        InstallMethod = "install_modpack",
+        EmptySearch = "没有找到相关整合包",
+        LinkLabel = "从链接安装",
+        LinkTitle = "从链接安装整合包",
+        LinkHint = "整合包链接或文件",
+        LocalLabel = "导入文件",
+        LocalFilter = ".mrpack;.zip",
+        IsModpack = true,
+        Types = new[] { "全部", "生存", "空岛", "科技", "魔法" },
+    };
+
+    public static CatalogKind Datapack { get; } = new()
+    {
+        Title = "数据包",
+        SearchTitle = "搜索数据包",
+        SearchMethod = "search_datapacks",
+        InstallMethod = "install_datapack",
+        EmptySearch = "没有找到相关数据包",
+        LinkLabel = "从链接安装",
+        LinkTitle = "从链接安装数据包",
+        LinkHint = "数据包下载链接 (URL)",
+        LocalLabel = "导入 zip",
+        LocalFilter = ".zip",
+        Types = new[] { "全部", "生存", "冒险", "装饰" },
+    };
+
+    public static CatalogKind ResourcePack { get; } = new()
+    {
+        Title = "资源包",
+        SearchTitle = "搜索资源包",
+        SearchMethod = "search_resourcepacks",
+        InstallMethod = "install_resourcepack",
+        EmptySearch = "没有找到相关资源包",
+        LinkLabel = "从链接安装",
+        LinkTitle = "从链接安装资源包",
+        LinkHint = "资源包下载链接 (URL)",
+        LocalLabel = "导入 zip",
+        LocalFilter = ".zip",
+        Types = new[] { "全部", "16x", "32x", "64x", "写实", "现代风", "动态效果" },
+    };
+
+    public static CatalogKind Shader { get; } = new()
+    {
+        Title = "光影包",
+        SearchTitle = "搜索光影包",
+        SearchMethod = "search_shaders",
+        InstallMethod = "install_shader",
+        EmptySearch = "没有找到相关光影",
+        LinkLabel = "从链接安装",
+        LinkTitle = "从链接安装光影",
+        LinkHint = "光影包下载链接 (URL)",
+        LocalLabel = "导入 zip",
+        LocalFilter = ".zip",
+        Types = new[] { "全部", "写实", "卡通", "高性能", "光追" },
+    };
+}

@@ -1,0 +1,9 @@
+tools/venv/
+tools/node_modules/
+tools/ffmpeg-extract/
+tools/ffmpeg-release-essentials.zip
+tools/package-lock.json
+raw/*
+!raw/.gitkeep
+out/*
+!out/.gitkeep

@@ -1,0 +1,5 @@
+# PyMCL requirements
+# NOTE: keep this file ASCII-only! Old pip on Chinese Windows (GBK) fails to parse UTF-8 comments.
+requests>=2.31.0
+PySide6>=6.6.0
+PySide6-Fluent-Widgets>=1.5.0

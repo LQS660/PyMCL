@@ -1,0 +1,24 @@
+<UserControl
+    x:Class="PyMCL.Pages.DownloadHubPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="48"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
+                      HorizontalScrollMode="Enabled" VerticalScrollMode="Disabled" ZoomMode="Disabled">
+            <SelectorBar x:Name="CatBar" HorizontalAlignment="Left" SelectionChanged="CatBar_Changed">
+                <SelectorBarItem Text="原版游戏" Tag="原版游戏" IsSelected="True"/>
+                <SelectorBarItem Text="Mod" Tag="Mod"/>
+                <SelectorBarItem Text="整合包" Tag="整合包"/>
+                <SelectorBarItem Text="数据包" Tag="数据包"/>
+                <SelectorBarItem Text="资源包" Tag="资源包"/>
+                <SelectorBarItem Text="光影包" Tag="光影包"/>
+                <SelectorBarItem Text="Java" Tag="Java"/>
+            </SelectorBar>
+        </ScrollViewer>
+        <Frame x:Name="Inner" Grid.Row="1" Background="Transparent"/>
+    </Grid>
+</UserControl>
