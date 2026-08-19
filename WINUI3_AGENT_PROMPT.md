@@ -72,7 +72,7 @@ Python 桥：
 
 - 新文件例如 `bridge/server.py`，**不要 import PySide6 / qfluentwidgets**。
 - 把 `app/backend.py` 的业务抽到无 Qt 的函数，或在桥里直接调 `mclauncher`（安装/启动/搜索），行为与 `BackendAPI` 一致。
-- 工作目录 = 启动器根目录（与现在 `mclauncher.utils.ROOT` 相同），这样 `instances/`、`java/`、`config.json` 和 Qt 版共用。
+- 工作目录 = 启动器根目录（与现在 `mclauncher.utils.ROOT` 相同），这样 `.minecraft/`、`java/`、`config.json` 和 Qt 版共用。
 - 启动：C# 启动时拉起  
   `pymcl5\python.exe bridge\server.py --root <仓库根>`  
   退出时杀掉子进程。

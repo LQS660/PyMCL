@@ -7,8 +7,8 @@ from . import utils
 CONFIG_FILE = utils.ROOT / "config.json"
 
 DEFAULT_CONFIG = {
-    # 实例目录名（相对于启动器主目录）
-    "instances_dir": "instances",
+    # 实例目录名（相对于启动器主目录）。与 PCL/HMCL 一样用 .minecraft
+    "instances_dir": ".minecraft",
     "default_instance": "default",
     # Java 运行时目录名（所有实例共享）
     "java_dir": "java",
@@ -70,10 +70,25 @@ class Config:
                     self.data[k] = stored[k]
                 else:
                     missing = True
+            if self._migrate_legacy_instances_dir():
+                missing = True
             if missing:
                 self.save()
         else:
+            self._migrate_legacy_instances_dir()
             self.save()
+
+    def _migrate_legacy_instances_dir(self) -> bool:
+        """旧版默认 instances/ 迁到 .minecraft/。用户自己改过的路径不动。"""
+        current = str(self.data.get("instances_dir") or "").strip()
+        if current != "instances":
+            return False
+        old = utils.ROOT / "instances"
+        new = utils.ROOT / ".minecraft"
+        if old.is_dir() and not new.exists():
+            old.rename(new)
+        self.data["instances_dir"] = ".minecraft"
+        return True
 
     def save(self):
         utils.write_json(CONFIG_FILE, self.data)

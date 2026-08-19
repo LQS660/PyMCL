@@ -151,7 +151,7 @@ PyMCL/                      ← 启动器主目录（可用环境变量 PYMCL_HO
 ├── accounts.json           ← 登录账号缓存
 ├── cache/                  ← 版本清单等缓存
 ├── java/                   ← 自动下载的 Java 运行时（按版本区分）
-└── instances/
+└── .minecraft/             ← 与 PCL/HMCL 相同的实例根目录
     ├── default/            ← 实例 1（完全独立）
     │   ├── versions/1.21.4/...
     │   ├── libraries/  assets/  mods/  saves/  config/ ...

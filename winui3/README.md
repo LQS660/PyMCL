@@ -9,7 +9,7 @@
 | `python main.py` | 现有 Qt / qfluentwidgets |
 | `winui3\run.bat` 或仓库根 `run-winui.bat` | WinUI 3（本工程） |
 
-两边共用同一工作目录：`instances/`、`java/`、`config.json`、`cache/`。桥进程设置 `PYMCL_HOME` 为仓库根，与 `mclauncher.utils.ROOT` 一致。
+两边共用同一工作目录：`.minecraft/`、`java/`、`config.json`、`cache/`。桥进程设置 `PYMCL_HOME` 为仓库根，与 `mclauncher.utils.ROOT` 一致。
 
 ## 环境
 

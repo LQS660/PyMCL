@@ -3,7 +3,7 @@
 static cJSON *g_cfg;
 
 static void apply_defaults(cJSON *o) {
-    if (!cJSON_GetObjectItem(o, "instances_dir")) cJSON_AddStringToObject(o, "instances_dir", "instances");
+    if (!cJSON_GetObjectItem(o, "instances_dir")) cJSON_AddStringToObject(o, "instances_dir", ".minecraft");
     if (!cJSON_GetObjectItem(o, "default_instance")) cJSON_AddStringToObject(o, "default_instance", "default");
     if (!cJSON_GetObjectItem(o, "java_dir")) cJSON_AddStringToObject(o, "java_dir", "java");
     if (!cJSON_GetObjectItem(o, "shared_libraries")) cJSON_AddBoolToObject(o, "shared_libraries", 0);
@@ -19,6 +19,24 @@ static void apply_defaults(cJSON *o) {
             "$2a$10$o8pygPrhvKBHuuh5imL2W.LCNFhB15zBYAExXx/TqTx/Zp5px2lxu");
 }
 
+static int migrate_legacy_instances_dir(cJSON *o) {
+    cJSON *v = cJSON_GetObjectItem(o, "instances_dir");
+    if (!cJSON_IsString(v) || !v->valuestring) return 0;
+    if (strcmp(v->valuestring, "instances") != 0) return 0;
+    char oldp[PYMCL_PATH], newp[PYMCL_PATH];
+    pymcl_path_join(oldp, sizeof(oldp), g_root, "instances");
+    pymcl_path_join(newp, sizeof(newp), g_root, ".minecraft");
+    if (pymcl_dir_exists(oldp) && !pymcl_dir_exists(newp)) {
+        wchar_t *wa = pymcl_u8_to_wide(oldp), *wb = pymcl_u8_to_wide(newp);
+        MoveFileW(wa, wb);
+        free(wa);
+        free(wb);
+    }
+    cJSON_DeleteItemFromObject(o, "instances_dir");
+    cJSON_AddStringToObject(o, "instances_dir", ".minecraft");
+    return 1;
+}
+
 void config_init(void) {
     char p[PYMCL_PATH];
     pymcl_path_join(p, sizeof(p), g_root, "config.json");
@@ -27,7 +45,9 @@ void config_init(void) {
         if (g_cfg) cJSON_Delete(g_cfg);
         g_cfg = cJSON_CreateObject();
     }
+    int migrated = migrate_legacy_instances_dir(g_cfg);
     apply_defaults(g_cfg);
+    if (migrated) config_save();
 }
 
 cJSON *config_obj(void) { return g_cfg; }

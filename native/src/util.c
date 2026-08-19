@@ -590,7 +590,7 @@ void pymcl_set_root(const char *root) {
     }
 }
 void pymcl_instances_dir(char *out, size_t n) {
-    pymcl_path_join(out, n, g_root, config_str("instances_dir", "instances"));
+    pymcl_path_join(out, n, g_root, config_str("instances_dir", ".minecraft"));
 }
 void pymcl_java_dir(char *out, size_t n) {
     pymcl_path_join(out, n, g_root, config_str("java_dir", "java"));

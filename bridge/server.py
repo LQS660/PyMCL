@@ -156,7 +156,7 @@ def _call_kwargs(fn, params: dict):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="PyMCL WinUI bridge")
-    parser.add_argument("--root", required=True, help="启动器根目录，与 Qt 版共用 instances/java/config.json")
+    parser.add_argument("--root", required=True, help="启动器根目录，与 Qt 版共用 .minecraft/java/config.json")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=0, help="0 = 自动分配")
     args = parser.parse_args(argv)
