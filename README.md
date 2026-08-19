@@ -1,6 +1,6 @@
 # PyMCL —— 全版本 Minecraft 启动器（Python）
 
-一个用纯 Python 编写的 Minecraft 启动器，支持从远古版本（rd-132211 / Alpha / Beta）到最新快照的**全部 Minecraft 版本**，具备**联网下载**、**整合包安装**、**Java 自动匹配下载**与**版本隔离**功能。
+一个用纯 Python 编写的 Minecraft 启动器，支持从远古版本（rd-132211 / Alpha / Beta）到最新快照的**全部 Minecraft 版本**，具备**联网下载**、**整合包安装**、**Java 自动匹配下载**、**版本隔离**与**内置 AI 助手**。
 
 ## ✨ 功能
 
@@ -16,7 +16,8 @@
 - ☕ **Java 自动管理**：按版本要求自动下载 Mojang 官方 Java 运行时（精确匹配）或 Adoptium Temurin（Java 8/11/17/21），也可手动下载/指定。
 - 🗂️ **版本隔离**：每个“实例”都是一个独立的 `.minecraft`（拥有自己的 versions/libraries/assets/mods/saves），互不干扰；可选共享 libraries/assets 以节省磁盘空间。
 - 🔐 **账号系统**：离线模式 + 微软正版登录（设备代码流，自动刷新令牌）。
-- 🖥️ **图形界面 + 命令行**：tkinter GUI（启动/版本/整合包/模组/Java/实例/设置七大页），以及完整的 CLI。
+- 🖥️ **图形界面 + 命令行**：PySide6 Fluent UI（启动 / 版本 / 整合包 / 模组 / Java / 实例 / **AI 助手** / 设置等），以及完整的 CLI。
+- 🤖 **AI 助手**：对话里下游戏、装模组/光影/整合包、读崩溃日志、扫模组冲突、改模组配置；写操作会先弹确认。公益接口已内置（默认 `deepseek-v4-flash`），也可接自定义 NewAPI / 自建网关。
 - 🧩 **加载器**：Fabric / Quilt（官方 meta 版本 JSON）、Forge / NeoForge（官方安装器）。
 - 🪟 跨平台：Windows / macOS / Linux。
 
@@ -66,7 +67,8 @@ python main.py
 
 1. **实例**页创建实例（或直接使用默认实例）；
 2. **版本**页双击一个版本即可下载安装（支持关键字过滤）；
-3. **启动**页填用户名，点“🚀 启动游戏”（Java 自动匹配，没有会自动下载）。
+3. **启动**页填用户名，点“🚀 启动游戏”（Java 自动匹配，没有会自动下载）；
+4. **AI 助手**页直接说要做什么，例如「下一款游戏 1.20.1 Fabric」「装钠和光影」「启动闪退了帮我看」。
 
 ### 命令行
 
@@ -110,13 +112,42 @@ python main.py instance create 红石
 python main.py instance list
 ```
 
+## 🤖 AI 助手
+
+侧栏打开 **AI 助手**。公益模式不用填密钥；设置里也可改成「自定义 NewAPI」或自建网关。
+
+能做的事：
+
+| 能力 | 说明 |
+| --- | --- |
+| 装游戏 / 加载器 | 原版，以及 Fabric / Quilt / Forge / NeoForge |
+| 搜装内容 | 模组、整合包、光影、资源包、数据包（中文名可搜） |
+| 管模组 | 列出 / 启用 / 禁用 / 删除 |
+| 排错 | 读 `latest.log` 和崩溃报告，判断启动失败原因 |
+| 冲突 | 扫描重复模组、缺依赖、加载器不匹配 |
+| 改配置 | 读改实例 `config` 下的模组配置（先备份 `.bak`） |
+| 其它 | 看/下 Java、建实例、启动游戏 |
+
+写操作（安装、删除、改配置、启动）会先让你确认。需要选实例/版本/搜到多个结果时会弹出选择题，不会只在文字里问。
+
+自建公益网关（可选）：见 `ai_gateway/README.md`，把 `sk-` 只放在网关机器的环境变量里，启动器不带令牌。
+
+```bash
+cd ai_gateway
+copy .env.example .env
+python server.py
+```
+
+健康检查：`GET /health`。对话口：`POST /pymcl/chat`（请求头必须带 `X-PyMCL-Client: PyMCL/x.y.z`）。
+
 ## 🗂️ 目录结构与版本隔离
 
 ```
 PyMCL/                      ← 启动器主目录（可用环境变量 PYMCL_HOME 移动）
-├── main.py / gui.py        ← 入口（CLI / GUI）
-├── mclauncher/             ← 核心包
-├── config.json             ← 全局设置
+├── main.py                 ← 入口（CLI / GUI）
+├── mclauncher/             ← 核心包（含 mclauncher/ai 助手）
+├── ai_gateway/             ← 可选：公益 AI 网关（令牌不进启动器）
+├── config.json             ← 全局设置（本地生成，不进仓库）
 ├── accounts.json           ← 登录账号缓存
 ├── cache/                  ← 版本清单等缓存
 ├── java/                   ← 自动下载的 Java 运行时（按版本区分）
