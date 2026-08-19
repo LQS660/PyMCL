@@ -49,6 +49,27 @@ class TaskCancelled(Exception):
     """用户取消任务时由 progress 回调抛出。"""
 
 
+_QT_INT_SAFE = 2_000_000_000
+
+
+def _qt_progress(current, total):
+    """Qt Signal(int) 在 Windows 是 32 位，大整合包按万分比上报。"""
+    try:
+        cur = int(current or 0)
+        tot = int(total or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+    if cur < 0:
+        cur = 0
+    if tot < 0:
+        tot = 0
+    if tot > _QT_INT_SAFE or cur > _QT_INT_SAFE:
+        if tot > 0:
+            return min(10000, int(cur * 10000 / tot)), 10000
+        return 0, 0
+    return cur, tot
+
+
 class BackendWorker(QThread):
     """通用后台任务线程。target 的第一个参数必须是 progress 回调，第二个是 log 回调。"""
 
@@ -73,7 +94,8 @@ class BackendWorker(QThread):
     def _progress(self, current, total, message=""):
         if self._cancelled:
             raise TaskCancelled()
-        self.progress.emit(self.task_id, int(current or 0), int(total or 0), str(message or ""))
+        cur, tot = _qt_progress(current, total)
+        self.progress.emit(self.task_id, cur, tot, str(message or ""))
 
     def _log(self, text):
         self.log.emit(self.task_id, str(text))

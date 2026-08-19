@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
-"""下载管理器：多线程、断点友好、sha1 校验、进度回调、失败重试。"""
+"""下载管理器：多线程、断点续传、sha1 校验、进度回调、失败换源。"""
+import hashlib
 import os
 import re
+import shutil
 import threading
 import time
 from collections import deque
@@ -21,6 +23,29 @@ from .source import is_github_url
 
 class DownloadError(Exception):
     pass
+
+
+CONNECT_TIMEOUT = 8.0
+READ_TIMEOUT_DEFAULT = 90.0
+MIN_FREE_PAD = 64 * 1024 * 1024
+
+
+def _request_timeout(timeout):
+    """连接超时短、读超时按文件；int 300 不再把握手也卡 300 秒。"""
+    if isinstance(timeout, (tuple, list)) and len(timeout) >= 2:
+        return (max(1.0, float(timeout[0])), max(1.0, float(timeout[1])))
+    if timeout is None:
+        return (CONNECT_TIMEOUT, READ_TIMEOUT_DEFAULT)
+    t = float(timeout)
+    return (min(CONNECT_TIMEOUT, max(2.0, t)), max(t, CONNECT_TIMEOUT))
+
+
+def _free_bytes(path):
+    try:
+        p = Path(path)
+        return shutil.disk_usage(p.anchor or str(p)).free
+    except OSError:
+        return None
 
 
 def _looks_complete(path) -> bool:
@@ -74,6 +99,11 @@ def _should_switch_source(err) -> bool:
     return _transport_dead(err)
 
 
+def _keep_part(err) -> bool:
+    msg = str(err)
+    return "用户取消" in msg or "下载不完整" in msg
+
+
 def _enqueue_redirect(pending: deque, tried: set, location: str, depth: int):
     """Adoptium 等会 302 到 GitHub：这里展开国内镜像，避免直连 github.com 被本地代理证书拦死。"""
     nxt = expand_download_urls(location) if is_github_url(location) else [location]
@@ -103,7 +133,7 @@ def _safe_unlink(path):
     try:
         Path(path).unlink(missing_ok=True)
     except OSError:
-        pass  # 被杀毒软件/其它进程占用时忽略，避免掩盖真正的错误
+        pass
 
 
 def _safe_close(f):
@@ -111,6 +141,14 @@ def _safe_close(f):
         f.close()
     except OSError:
         pass
+
+
+def _is_cancel(err) -> bool:
+    if err is None:
+        return False
+    if err.__class__.__name__ == "TaskCancelled":
+        return True
+    return "用户取消" in str(err)
 
 
 class DownloadManager:
@@ -134,20 +172,19 @@ class DownloadManager:
         apply_direct_to_session(self.session)
         self.session.headers.update({
             "User-Agent": f"{APP_NAME}/{APP_VERSION} (python; +minecraft launcher)",
-            # 禁用 gzip，保证 Content-Length 与实际写入字节一致
-            "Accept-Encoding": "identity",
         })
         retry = Retry(
-            total=4,
-            connect=4,
-            read=4,
-            backoff_factor=0.6,
+            total=1,
+            connect=1,
+            read=1,
+            backoff_factor=0.2,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["GET"],
             raise_on_status=False,
         )
+        pool = max(16, self.threads)
         adapter = StatusHTTPAdapter(
-            self.tracker, max_retries=retry, pool_connections=16, pool_maxsize=16,
+            self.tracker, max_retries=retry, pool_connections=pool, pool_maxsize=pool,
         )
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
@@ -155,10 +192,11 @@ class DownloadManager:
     def _notify_progress(self, force=False):
         if not self.on_progress:
             return
-        now = time.monotonic()
-        if not force and now - self._last_notify < 0.15:
-            return
-        self._last_notify = now
+        with self._lock:
+            now = time.monotonic()
+            if not force and now - self._last_notify < 0.15:
+                return
+            self._last_notify = now
         snap = self.tracker.snapshot()
         done = snap.bytes_done if snap.bytes_total else snap.files_done
         total = snap.bytes_total if snap.bytes_total else snap.files_total
@@ -172,6 +210,10 @@ class DownloadManager:
                 raise
             pass
 
+    def _raise_if_cancel(self):
+        if self.cancel():
+            raise DownloadError("用户取消")
+
     # ------------------------------------------------------------ HTTP 基础
 
     def _extra_headers(self, url):
@@ -184,7 +226,7 @@ class DownloadManager:
                 headers["x-api-key"] = key
         return headers
 
-    def _iter_urls(self, url, urls=None):
+    def _iter_urls(self, url, urls=None, expand=True):
         raw = []
         if url:
             raw.append(url)
@@ -195,7 +237,8 @@ class DownloadManager:
                 raw.append(urls)
         out, seen = [], set()
         for u in raw:
-            for e in expand_download_urls(u):
+            extras = expand_download_urls(u) if expand else ([str(u)] if u else [])
+            for e in extras:
                 if e and e not in seen:
                     seen.add(e)
                     out.append(e)
@@ -209,12 +252,15 @@ class DownloadManager:
     def fetch_json(self, url, timeout=(4, 15), expand=True, **kwargs):
         last_err = None
         for u in self._get_urls(url, expand=expand):
+            self._raise_if_cancel()
             try:
-                resp = self.session.get(u, timeout=timeout, **kwargs)
+                resp = self.session.get(u, timeout=_request_timeout(timeout), **kwargs)
                 resp.raise_for_status()
                 return resp.json()
             except Exception as e:
                 last_err = e
+                if _is_cancel(e):
+                    raise DownloadError("用户取消") from e
                 if u == url or "github" in (u or ""):
                     utils.log.warning("fetch_json 失败 %s: %s", u, e)
         if last_err:
@@ -224,35 +270,51 @@ class DownloadManager:
     def fetch_text(self, url, timeout=(4, 15), expand=True, **kwargs):
         last_err = None
         for u in self._get_urls(url, expand=expand):
+            self._raise_if_cancel()
             try:
-                resp = self.session.get(u, timeout=timeout, **kwargs)
+                resp = self.session.get(u, timeout=_request_timeout(timeout), **kwargs)
                 resp.raise_for_status()
                 return resp.text
             except Exception as e:
                 last_err = e
+                if _is_cancel(e):
+                    raise DownloadError("用户取消") from e
         if last_err:
             raise last_err
         raise DownloadError(f"fetch_text 失败: {url}")
 
     # ------------------------------------------------------------ 单文件下载
 
-    def download(self, url, dest, sha1=None, size=None, force=False, timeout=300, sha512=None, urls=None) -> Path:
+    def download(self, url, dest, sha1=None, size=None, force=False, timeout=300,
+                 sha512=None, urls=None, expand=True) -> Path:
         """
-        下载单个文件到 dest。url 可以是单个地址，urls 为额外候选（会自动展开 GitHub 镜像）。
-        403/404 会立刻换源，不再对同一死链重试。
+        下载单个文件到 dest。url 可以是单个地址，urls 为额外候选（默认展开 GitHub 镜像）。
+        expand=False 时不改写候选（陶瓦等已自带国内源）。
+        403/404 会立刻换源。已有 .part 且带校验时按 Range 续传。
         """
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         key = str(dest)
-        candidates = self._iter_urls(url, urls)
+        candidates = self._iter_urls(url, urls, expand=expand)
         if not candidates:
             raise DownloadError(f"没有可下载的地址: {dest.name}")
+        if size:
+            free = _free_bytes(dest)
+            if free is not None and free < int(size) + (8 * 1024 * 1024):
+                raise DownloadError(
+                    f"磁盘空间不足：需要 {utils.format_size(size)}，剩余 {utils.format_size(free)}"
+                )
         self.tracker.start_file(key, dest.name, candidates[0], size)
         self._notify_progress(force=True)
         try:
             with _path_lock(dest):
-                result = self._download_locked(candidates, dest, sha1, size, force, timeout, sha512, key)
-            self.tracker.finish_file(key, size or (result.stat().st_size if result.is_file() else None))
+                result, skipped = self._download_locked(
+                    candidates, dest, sha1, size, force, timeout, sha512, key,
+                )
+            self.tracker.finish_file(
+                key, size or (result.stat().st_size if result.is_file() else None),
+                skipped=skipped,
+            )
             self._notify_progress(force=True)
             return result
         except Exception as e:
@@ -260,22 +322,23 @@ class DownloadManager:
             self._notify_progress(force=True)
             raise
 
-    def _download_locked(self, urls, dest, sha1, size, force, timeout, sha512, key) -> Path:
+    def _download_locked(self, urls, dest, sha1, size, force, timeout, sha512, key):
         if not force:
             if sha1 or size is not None:
                 if utils.file_matches(dest, sha1, size):
                     if not sha512 or utils.sha512_file(dest) == sha512.lower():
-                        return dest
+                        return dest, True
             elif dest.is_file() and _looks_complete(dest):
-                return dest
+                return dest, True
 
         part = dest.with_name(dest.name + ".part")
+        can_resume = bool(sha1 or sha512 or size is not None)
+        req_timeout = _request_timeout(timeout)
         last_err = None
         pending = deque((u, 0) for u in urls if u)
         tried = set()
         while pending:
-            if self.cancel():
-                raise DownloadError("用户取消")
+            self._raise_if_cancel()
             url, depth = pending.popleft()
             if url in tried:
                 continue
@@ -286,13 +349,21 @@ class DownloadManager:
             fatal = False
             redirected = False
             for attempt in range(2):
-                if self.cancel():
-                    raise DownloadError("用户取消")
+                self._raise_if_cancel()
                 try:
                     self.tracker.reset_connect()
                     headers = self._extra_headers(url)
+                    headers["Accept-Encoding"] = "identity"
+                    have = 0
+                    if can_resume and part.is_file():
+                        try:
+                            have = part.stat().st_size
+                        except OSError:
+                            have = 0
+                    if have > 0:
+                        headers["Range"] = f"bytes={have}-"
                     with self.session.get(
-                        url, stream=True, timeout=timeout, headers=headers,
+                        url, stream=True, timeout=req_timeout, headers=headers,
                         allow_redirects=False,
                     ) as resp:
                         if _is_redirect(resp):
@@ -308,56 +379,93 @@ class DownloadManager:
                         if not self.tracker.did_connect():
                             self.tracker.reuse()
                         code = resp.status_code
+                        if code == 416:
+                            _safe_unlink(part)
+                            raise DownloadError(f"HTTP 416: {url}")
                         if code in (403, 404, 408, 409, 410, 429) or code >= 500:
                             raise DownloadError(f"HTTP {code}: {url}")
-                        resp.raise_for_status()
-                        expected = int(resp.headers.get("Content-Length") or size or 0)
-                        self.tracker.http_ok(resp.status_code, expected)
+                        resume = code == 206 and have > 0
+                        if code == 200:
+                            have = 0
+                        elif code != 206:
+                            resp.raise_for_status()
+                        try:
+                            cl_n = int(resp.headers.get("Content-Length") or 0)
+                        except (TypeError, ValueError):
+                            cl_n = 0
+                        if resume:
+                            expected = have + cl_n if cl_n else int(size or 0)
+                        else:
+                            expected = cl_n or int(size or 0)
+                        self.tracker.http_ok(resp.status_code, expected, key)
                         self._notify_progress(force=True)
-                        with open(part, "wb") as f:
-                            got = 0
+
+                        hasher_sha1 = hashlib.sha1() if sha1 else None
+                        hasher_sha512 = hashlib.sha512() if sha512 else None
+                        if resume and (hasher_sha1 or hasher_sha512):
+                            with open(part, "rb") as rf:
+                                for buf in iter(lambda: rf.read(1024 * 1024), b""):
+                                    if hasher_sha1:
+                                        hasher_sha1.update(buf)
+                                    if hasher_sha512:
+                                        hasher_sha512.update(buf)
+
+                        with open(part, "ab" if resume else "wb") as f:
+                            got = have
                             for chunk in resp.iter_content(chunk_size=64 * 1024):
                                 if self.cancel():
                                     _safe_close(f)
-                                    _safe_unlink(part)
                                     raise DownloadError("用户取消")
                                 if chunk:
                                     f.write(chunk)
+                                    if hasher_sha1:
+                                        hasher_sha1.update(chunk)
+                                    if hasher_sha512:
+                                        hasher_sha512.update(chunk)
                                     got += len(chunk)
                                     self.tracker.transfer(key, got, expected)
                                     self._notify_progress()
-                        if expected and got != expected:
+                        if expected and got != expected and not (sha1 or sha512):
                             raise DownloadError(f"下载不完整 {url} ({got}/{expected})")
                     self.tracker.verify(dest.name)
                     self._notify_progress(force=True)
-                    if sha1 or size is not None:
+                    if hasher_sha1:
+                        if hasher_sha1.hexdigest() != str(sha1).lower():
+                            raise DownloadError(f"校验失败: {url} (期望 sha1={sha1}, size={size})")
+                    elif sha1 or size is not None:
                         if not utils.file_matches(part, sha1, size):
                             raise DownloadError(f"校验失败: {url} (期望 sha1={sha1}, size={size})")
                     elif not _looks_complete(part):
                         raise DownloadError(f"下载内容无效: {url}")
-                    if sha512 and utils.sha512_file(part) != sha512.lower():
+                    if hasher_sha512:
+                        if hasher_sha512.hexdigest() != sha512.lower():
+                            raise DownloadError(f"sha512 校验失败: {url}")
+                    elif sha512 and utils.sha512_file(part) != sha512.lower():
                         raise DownloadError(f"sha512 校验失败: {url}")
                     os.replace(part, dest)
-                    return dest
+                    return dest, False
                 except DownloadError as e:
                     last_err = e
-                    _safe_unlink(part)
-                    msg = str(e)
-                    if "用户取消" in msg or _should_switch_source(e):
+                    if not _keep_part(e):
+                        _safe_unlink(part)
+                    if _is_cancel(e) or _should_switch_source(e):
                         fatal = True
                         break
                     time.sleep(1.0 * (attempt + 1))
                 except Exception as e:
                     last_err = e
-                    _safe_unlink(part)
+                    if _is_cancel(e):
+                        raise DownloadError("用户取消") from e
+                    if not can_resume:
+                        _safe_unlink(part)
                     if _transport_dead(e):
                         fatal = True
                         break
                     time.sleep(1.0 * (attempt + 1))
             if redirected:
                 continue
-            if fatal and last_err and "用户取消" in str(last_err):
-                raise last_err
+            if fatal and last_err and _is_cancel(last_err):
+                raise last_err if isinstance(last_err, DownloadError) else DownloadError("用户取消")
             if last_err:
                 utils.log.warning("下载源失败，换下一个: %s", last_err)
         raise DownloadError(f"下载失败 {dest.name}: {last_err}")
@@ -366,19 +474,20 @@ class DownloadManager:
 
     def download_all(self, tasks, message="下载中"):
         """
-        tasks: [(url, dest, sha1, size), ...]，dest 为 Path 或 str。
-        url 可以是单个地址或候选列表。同一 dest 会合并镜像，避免镜像失败把已成功的官方下载判失败。
-        全部完成后返回；任何失败抛出 DownloadError（含失败列表）。
+        tasks: [(url, dest, sha1, size), ...] 或 5 元组带 sha512。
+        url 可以是单个地址或候选列表。同一 dest 会合并镜像。
+        全部完成后返回；用户取消抛出 DownloadError("用户取消")。
         """
         merged = {}
         order = []
         for raw in tasks:
             url, dest, sha1, size = raw[0], raw[1], raw[2], raw[3]
+            sha512 = raw[4] if len(raw) > 4 else None
             dest = Path(dest)
             key = os.path.abspath(str(dest))
             urls = list(url) if isinstance(url, (list, tuple)) else [url]
             if key not in merged:
-                merged[key] = [urls, dest, sha1, size]
+                merged[key] = [urls, dest, sha1, size, sha512]
                 order.append(key)
             else:
                 seen = set(merged[key][0])
@@ -390,25 +499,44 @@ class DownloadManager:
                     merged[key][2] = sha1
                 if merged[key][3] is None:
                     merged[key][3] = size
+                if merged[key][4] is None:
+                    merged[key][4] = sha512
         tasks = [tuple(merged[k]) for k in order]
         total = len(tasks)
         errors = []
         self._done = 0
-        total_bytes = sum(int(sz) for *_, sz in tasks if sz)
+        total_bytes = sum(int(t[3]) for t in tasks if t[3])
+        if total_bytes:
+            free = _free_bytes(tasks[0][1]) if tasks else None
+            if free is not None and free < total_bytes + MIN_FREE_PAD:
+                raise DownloadError(
+                    f"磁盘空间不足：需要 {utils.format_size(total_bytes)}，剩余 {utils.format_size(free)}"
+                )
         self.tracker.begin_batch(message, total, total_bytes)
         self._notify_progress(force=True)
+        cancelled = False
         try:
             with ThreadPoolExecutor(max_workers=self.threads) as pool:
                 futures = {pool.submit(self._task_download, t): t for t in tasks}
                 for fut in as_completed(futures):
-                    url, dest, sha1, size = futures[fut]
+                    dest = futures[fut][1]
                     try:
                         fut.result()
                     except Exception as e:
-                        errors.append(f"{dest.name}: {e}")
+                        if _is_cancel(e):
+                            cancelled = True
+                        else:
+                            errors.append(f"{Path(dest).name}: {e}")
+                    if cancelled or self.cancel():
+                        cancelled = True
+                        for other in futures:
+                            other.cancel()
                     with self._lock:
                         self._done += 1
                     self._notify_progress(force=True)
+            if cancelled:
+                self.tracker.end_batch(ok=False, message="已取消")
+                raise DownloadError("用户取消")
             if errors:
                 self.tracker.end_batch(ok=False, message=f"{message}失败 {len(errors)}/{total}")
                 raise DownloadError(f"{message}失败（{len(errors)}/{total} 个文件）: {'; '.join(errors[:8])}")
@@ -422,11 +550,12 @@ class DownloadManager:
             raise
 
     def _task_download(self, task):
-        url, dest, sha1, size = task
+        url, dest, sha1, size = task[0], task[1], task[2], task[3]
+        sha512 = task[4] if len(task) > 4 else None
         if isinstance(url, (list, tuple)):
             first = url[0] if url else None
-            return self.download(first, dest, sha1=sha1, size=size, urls=url)
-        return self.download(url, dest, sha1=sha1, size=size)
+            return self.download(first, dest, sha1=sha1, size=size, sha512=sha512, urls=url)
+        return self.download(url, dest, sha1=sha1, size=size, sha512=sha512)
 
     # ------------------------------------------------------------ 解压
 

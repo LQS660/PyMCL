@@ -32,6 +32,7 @@ _FILE_MIRRORS = (
 )
 
 _lock = threading.Lock()
+_probe_run = threading.Lock()
 _probe = None  # (ok_fast: bool, fetched_at: float)
 
 
@@ -63,21 +64,29 @@ def official_is_fast() -> bool:
     with _lock:
         if _probe and now - _probe[1] < PROBE_TTL:
             return _probe[0]
-    fast = _probe_official()
-    with _lock:
-        _probe = (fast, time.monotonic())
-    return fast
+    with _probe_run:
+        with _lock:
+            if _probe and time.monotonic() - _probe[1] < PROBE_TTL:
+                return _probe[0]
+        fast = _probe_official()
+        with _lock:
+            _probe = (fast, time.monotonic())
+        return fast
 
 
 def _probe_official() -> bool:
     import requests
+    from . import APP_NAME, APP_VERSION
     t0 = time.monotonic()
     try:
         session = requests.Session()
         if not _cfg("use_system_proxy", True):
             session.trust_env = False
             session.proxies = {"http": None, "https": None}
-        resp = session.get(_OFFICIAL_PROBE, timeout=PROBE_LIMIT, headers={"User-Agent": "PyMCL"})
+        resp = session.get(
+            _OFFICIAL_PROBE, timeout=PROBE_LIMIT,
+            headers={"User-Agent": f"{APP_NAME}/{APP_VERSION} (python; +minecraft launcher)"},
+        )
         elapsed = time.monotonic() - t0
         return resp.status_code < 400 and elapsed < PROBE_LIMIT
     except Exception:

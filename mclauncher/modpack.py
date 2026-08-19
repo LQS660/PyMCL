@@ -653,7 +653,10 @@ def install_mrpack(dm: DownloadManager, source, instance: Instance,
             if not str(dest).startswith(str(instance.path.resolve()) + os.sep):
                 raise ModpackError(f"整合包文件路径非法: {rel}")
             hashes = f.get("hashes") or {}
-            tasks.append((modrinth_download_urls(downloads), dest, hashes.get("sha1"), f.get("size")))
+            tasks.append((
+                modrinth_download_urls(downloads), dest,
+                hashes.get("sha1"), f.get("size"), hashes.get("sha512"),
+            ))
             if hashes.get("sha512"):
                 sha512_checks.append((dest, hashes["sha512"]))
         if tasks:

@@ -222,7 +222,7 @@ class ToolLine(QFrame):
 
     def set_progress(self, current: int, total: int, message: str = ""):
         if total:
-            self.bar.setValue(int(current * 100 / total))
+            self.bar.setValue(min(100, max(0, int(current * 100 / total))))
         if message:
             self.lab.setText(message.split("  |  ", 1)[0])
 

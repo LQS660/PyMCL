@@ -105,7 +105,7 @@ class TaskCard(SimpleCardWidget):
 
     def set_progress(self, current: int, total: int, message: str):
         if total > 0:
-            self.progress.setValue(int(current * 100 / total))
+            self.progress.setValue(min(100, max(0, int(current * 100 / total))))
         status, speed = split_progress_message(message)
         self.status.setText(status or "处理中…")
         self.speed.setText(speed)
@@ -212,7 +212,7 @@ class DownloadDock(SimpleCardWidget):
             return
         self._current = task_id
         if total > 0:
-            self.progress.setValue(int(current * 100 / total))
+            self.progress.setValue(min(100, max(0, int(current * 100 / total))))
         status, speed = split_progress_message(message)
         title = self._active.get(task_id, "")
         n = len(self._active)

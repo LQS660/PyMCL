@@ -427,22 +427,44 @@ def install_mojang_runtime(dm: DownloadManager, component, on_progress=None, for
         return exe
 
     utils.ensure_dir(java_dir)
-    archive = java_dir / f"{component}-{PLATFORM_KEY}.zip"
+    _safe_unlink(java_dir / f"{component}-{PLATFORM_KEY}.zip")
     if on_progress:
         on_progress(f"下载 Mojang Java 运行时 {component} ({ver})", 0, 1)
-    # 旧的损坏/空壳压缩包不能复用，强制重下
-    if not _archive_valid(archive, ".zip"):
-        dm.download(url, archive, sha1=sha1, size=info.get("size"), force=True)
-    try:
+    man_path = java_dir / f"{component}-{PLATFORM_KEY}.manifest.json"
+    dm.download(url, man_path, sha1=sha1, size=info.get("size"), force=force)
+    files = (utils.read_json(man_path, None) or {}).get("files") or {}
+    if not files:
+        raise DownloadError(f"Mojang 运行时清单无效: {component}")
+    if force:
         utils.remove_tree(target_dir)
-        utils.ensure_dir(target_dir)
-        dm.extract_archive(archive, target_dir)
-    except Exception:
-        utils.remove_tree(target_dir)
-        _safe_unlink(archive)
-        raise
-    finally:
-        _safe_unlink(archive)
+    utils.ensure_dir(target_dir)
+    tasks = []
+    for rel, meta in files.items():
+        kind = (meta or {}).get("type")
+        dest = target_dir / rel
+        if kind == "directory":
+            dest.mkdir(parents=True, exist_ok=True)
+            continue
+        if kind != "file":
+            continue
+        raw = ((meta or {}).get("downloads") or {}).get("raw") or {}
+        file_url, file_sha1, file_size = raw.get("url"), raw.get("sha1"), raw.get("size")
+        if not file_url:
+            utils.log.warning("Mojang 运行时缺少 raw 下载: %s", rel)
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not force and utils.file_matches(dest, file_sha1, file_size):
+            continue
+        tasks.append((file_url, dest, file_sha1, file_size))
+    if tasks:
+        dm.download_all(tasks, message=f"下载 Mojang Java {component}")
+    if not utils.IS_WINDOWS:
+        for rel, meta in files.items():
+            if not (meta or {}).get("executable"):
+                continue
+            p = target_dir / rel
+            if p.is_file():
+                os.chmod(p, 0o755)
     exe = utils.find_executable(target_dir)
     if exe:
         utils.write_json(target_dir / "runtime.meta.json", {
@@ -450,7 +472,7 @@ def install_mojang_runtime(dm: DownloadManager, component, on_progress=None, for
             "component": component, "version": ver, "major": get_java_major(exe),
         })
         return exe
-    utils.log.warning("Mojang 运行时解压后未找到 java 可执行文件: %s", target_dir)
+    utils.log.warning("Mojang 运行时安装后未找到 java 可执行文件: %s", target_dir)
     return None
 
 

@@ -272,7 +272,7 @@ class LaunchPage(QWidget):
     def _on_progress(self, task_id, current, total, message):
         if task_id != self._task_id:
             return
-        self.progress.setValue(int(current * 100 / total) if total else 0)
+        self.progress.setValue(min(100, max(0, int(current * 100 / total))) if total else 0)
         status, speed = (message or "").split("  |  ", 1) if "  |  " in (message or "") else (message, "")
         self.status_label.setText((status or "处理中…") + (f"    {speed}" if speed else ""))
 

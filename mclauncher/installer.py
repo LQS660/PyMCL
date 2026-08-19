@@ -479,12 +479,16 @@ class Installer:
             artifact = downloads.get("artifact")
             if artifact and artifact.get("url"):
                 path = artifact.get("path") or utils.maven_artifact_path(name)
-                tasks.append((artifact["url"], libs_dir / path, artifact.get("sha1"), artifact.get("size")))
+                dest = libs_dir / path
+                if force or not utils.file_matches(dest, artifact.get("sha1"), artifact.get("size")):
+                    tasks.append((artifact["url"], dest, artifact.get("sha1"), artifact.get("size")))
             elif not downloads and not lib.get("natives"):
                 # 旧版 Forge：url 缺省则走 libraries.minecraft.net（LaunchWrapper 等）
                 path = utils.maven_artifact_path(name)
-                tasks.append((_library_base_url(lib) + path, libs_dir / path,
-                              _lib_sha1(lib), _lib_size(lib)))
+                dest = libs_dir / path
+                sha1, sz = _lib_sha1(lib), _lib_size(lib)
+                if force or not utils.file_matches(dest, sha1, sz):
+                    tasks.append((_library_base_url(lib) + path, dest, sha1, sz))
             elif not downloads.get("classifiers"):
                 utils.log.warning("库 %s 没有可下载的 artifact，跳过", name)
 
@@ -501,7 +505,8 @@ class Installer:
                 path = entry.get("path") or utils.maven_artifact_path(name + ":" + nkey)
                 jarpath = libs_dir / path
                 url = entry.get("url") or (_library_base_url(lib) + path.replace("\\", "/"))
-                tasks.append((url, jarpath, entry.get("sha1"), entry.get("size")))
+                if force or not utils.file_matches(jarpath, entry.get("sha1"), entry.get("size")):
+                    tasks.append((url, jarpath, entry.get("sha1"), entry.get("size")))
                 natives_tasks.append((jarpath, lib.get("extract") or {}))
 
         if tasks:
@@ -516,7 +521,7 @@ class Installer:
                     self.dm.extract_jar_natives(jarpath, natives_dir,
                                                 exclude=extract.get("exclude") or [])
                 except Exception as e:
-                    utils.log.warning("解压 natives 失败 %s: %s", jarpath, e)
+                    raise InstallError(f"解压 natives 失败 {jarpath.name}: {e}") from e
                 if self.on_progress:
                     self.on_progress("解压 natives", i + 1, len(natives_tasks))
 
@@ -643,15 +648,25 @@ class Installer:
             return
         assets_dir = inst.assets_dir()
         index_file = assets_dir / "indexes" / f"{idx['id']}.json"
-        if not index_file.is_file() or force:
+        need_index = force or not utils.file_matches(index_file, idx.get("sha1"), idx.get("size"))
+        if not idx.get("sha1") and not idx.get("size"):
+            need_index = force or not index_file.is_file()
+        if need_index:
             if self.on_progress:
                 self.on_progress(f"下载资源索引 {idx['id']}", 0, 1)
             self.dm.download(idx["url"], index_file,
-                             sha1=idx.get("sha1"), size=idx.get("size"), force=force)
+                             sha1=idx.get("sha1"), size=idx.get("size"), force=True)
         index = utils.read_json(index_file, None) or {}
         objects = index.get("objects") or {}
+        if not objects and (idx.get("sha1") or idx.get("url")):
+            if self.on_progress:
+                self.on_progress(f"资源索引无效，重新下载 {idx['id']}", 0, 1)
+            self.dm.download(idx["url"], index_file,
+                             sha1=idx.get("sha1"), size=idx.get("size"), force=True)
+            index = utils.read_json(index_file, None) or {}
+            objects = index.get("objects") or {}
         if not objects:
-            return
+            raise InstallError(f"资源索引为空或损坏: {idx.get('id')}")
 
         tasks = []
         for name, obj in objects.items():

@@ -174,6 +174,7 @@ class DownloadTracker:
         self._active = 0
         self._in_batch = False
         self._inflight = {}
+        self._file_expected = {}
         self._completed_bytes = 0
         self._tls = threading.local()
         self._reset_locked()
@@ -196,6 +197,7 @@ class DownloadTracker:
         self.error = ""
         self.saw_connect = False
         self._inflight.clear()
+        self._file_expected = {}
         self._completed_bytes = 0
         self._speed.reset()
 
@@ -217,6 +219,7 @@ class DownloadTracker:
             self._in_batch = True
             self._active += 1
             self._inflight.clear()
+            self._file_expected.clear()
             self._completed_bytes = 0
             self._speed.reset()
             self.phase = "prepare"
@@ -255,6 +258,7 @@ class DownloadTracker:
             if not self._in_batch:
                 if self._active == 0:
                     self._inflight.clear()
+                    self._file_expected.clear()
                     self._completed_bytes = 0
                     self._speed.reset()
                     self.files_done = 0
@@ -263,6 +267,8 @@ class DownloadTracker:
                     self.bytes_total = int(size or 0)
                 self._active += 1
             self._inflight[key] = 0
+            if size:
+                self._file_expected[key] = int(size)
             self.filename = filename or ""
             self.url = str(url or "")
             self.host = host
@@ -402,16 +408,27 @@ class DownloadTracker:
             if not self.handshake:
                 self.handshake = "复用已有 TCP 连接"
 
-    def http_ok(self, status, content_length=0):
+    def _note_expected_locked(self, key, expected):
+        exp = int(expected or 0)
+        if exp <= 0:
+            return
+        old = self._file_expected.get(key, 0) if key else 0
+        if key and exp > old:
+            if self._in_batch:
+                self.bytes_total += exp - old
+            self._file_expected[key] = exp
+        if not self._in_batch:
+            self.bytes_total = max(self.bytes_total, exp)
+        elif self.bytes_total <= 0:
+            self.bytes_total = exp
+
+    def http_ok(self, status, content_length=0, key=None):
         if not self.watching():
             return
         with self._lock:
             self.http_status = int(status or 0)
             if content_length:
-                if not self._in_batch:
-                    self.bytes_total = max(self.bytes_total, int(content_length))
-                elif self.bytes_total <= 0:
-                    self.bytes_total = int(content_length)
+                self._note_expected_locked(key, content_length)
             self.phase = "http_ok"
             self.detail = f"已收到 HTTP {self.http_status}"
 
@@ -424,8 +441,8 @@ class DownloadTracker:
             delta = int(got or 0) - prev
             if delta > 0:
                 self._speed.add(delta)
-            if expected and not self._in_batch:
-                self.bytes_total = max(self.bytes_total, int(expected))
+            if expected:
+                self._note_expected_locked(key, expected)
             self.phase = "transfer"
             n = len(self._inflight)
             if n > 1:
@@ -491,30 +508,52 @@ def _make_connection_classes(tracker: DownloadTracker):
         t0 = time.monotonic()
         try:
             infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
-            ip = infos[0][4][0]
         except OSError as e:
             tracker.dns_fail(e)
             raise NameResolutionError(conn.host, conn, e) from e
+        addrs = []
+        seen = set()
+        for _fam, _typ, _proto, _canon, sa in infos:
+            ip = sa[0]
+            if ip in seen:
+                continue
+            seen.add(ip)
+            addrs.append(sa)
+        addrs.sort(key=lambda sa: 0 if ":" not in str(sa[0]) else 1)
+        if not addrs:
+            err = OSError("getaddrinfo 没有返回地址")
+            tracker.dns_fail(err)
+            raise NameResolutionError(conn.host, conn, err) from err
+        ip = addrs[0][0]
         tracker.dns_ok(host, ip, int((time.monotonic() - t0) * 1000))
-        tracker.tcp(ip, port)
-        t1 = time.monotonic()
-        try:
-            sock = create_connection(
-                (ip, port),
-                _connect_timeout(conn),
-                source_address=conn.source_address,
-                socket_options=conn.socket_options,
-            )
-        except socket.timeout as e:
-            tracker.tcp_fail(f"超时: {e}")
+        timeout = _connect_timeout(conn)
+        last_err = None
+        for sa in addrs:
+            ip = sa[0]
+            tracker.tcp(ip, port)
+            t1 = time.monotonic()
+            try:
+                sock = create_connection(
+                    (ip, port),
+                    timeout,
+                    source_address=conn.source_address,
+                    socket_options=conn.socket_options,
+                )
+            except socket.timeout as e:
+                last_err = e
+                tracker.tcp_fail(f"超时: {ip}:{port}")
+                continue
+            except OSError as e:
+                last_err = e
+                tracker.tcp_fail(e)
+                continue
+            tracker.tcp_ok(ip, port, int((time.monotonic() - t1) * 1000))
+            return sock
+        if isinstance(last_err, socket.timeout):
             raise ConnectTimeoutError(
-                conn, f"TCP 握手超时 {ip}:{port} (timeout={_connect_timeout(conn)})",
-            ) from e
-        except OSError as e:
-            tracker.tcp_fail(e)
-            raise NewConnectionError(conn, f"TCP 握手失败: {e}") from e
-        tracker.tcp_ok(ip, port, int((time.monotonic() - t1) * 1000))
-        return sock
+                conn, f"TCP 握手超时 {ip}:{port} (timeout={timeout})",
+            ) from last_err
+        raise NewConnectionError(conn, f"TCP 握手失败: {last_err}") from last_err
 
     class StatusHTTPConnection(HTTPConnection):
         def _new_conn(self):
