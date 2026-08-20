@@ -54,9 +54,18 @@ public sealed partial class SettingsPage : UserControl
         SyncAiMode();
         if (IsoBox != null)
         {
-            IsoBox.SelectedIndex = s.DefaultIsolation == "all" ? 2 : s.DefaultIsolation == "saves" ? 1 : 0;
+            IsoBox.SelectedIndex = s.DefaultIsolation == "all" ? 3 : s.DefaultIsolation == "mods" ? 2 : s.DefaultIsolation == "saves" ? 1 : 0;
         }
         if (JvmEdit != null) JvmEdit.Text = s.DefaultJvmArgs ?? "";
+        if (VisBox != null)
+            VisBox.SelectedIndex = s.LauncherVisibility switch { "minimize" => 1, "hide" => 2, "hide_reopen" => 3, "close" => 4, _ => 0 };
+        if (GcBox != null)
+            GcBox.SelectedIndex = s.GcPreset switch { "g1" => 1, "g1_tuned" => 2, "zgc" => 3, "none" => 4, _ => 0 };
+        if (LimitSpin != null) LimitSpin.Value = s.DownloadLimitKbps;
+        if (HomeBox != null)
+            HomeBox.SelectedIndex = s.HomepageMode == "custom" ? 1 : s.HomepageMode == "blank" ? 2 : 0;
+        if (HomePath != null) HomePath.Text = s.CustomHomepage ?? "";
+        if (AutoUpd != null) AutoUpd.IsOn = s.AutoCheckUpdate;
         RootLabel.Text = "启动器主目录: " + s.Root;
     }
 
@@ -83,6 +92,12 @@ public sealed partial class SettingsPage : UserControl
                     ai_model = string.IsNullOrWhiteSpace(AiModel.Text) ? "deepseek-v4-flash" : AiModel.Text.Trim(),
                     default_isolation = (IsoBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "none",
                     default_jvm_args = JvmEdit?.Text?.Trim() ?? "",
+                    launcher_visibility = (VisBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "keep",
+                    gc_preset = (GcBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "auto",
+                    download_limit_kbps = (int)LimitSpin.Value,
+                    homepage_mode = (HomeBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "news",
+                    custom_homepage = HomePath?.Text?.Trim() ?? "",
+                    auto_check_update = AutoUpd.IsOn,
                 },
             });
             AppServices.Toast?.Invoke("已保存", "设置已写入 config.json", InfoBarSeverity.Success);
@@ -170,6 +185,42 @@ public sealed partial class SettingsPage : UserControl
             AppServices.Toast?.Invoke("清理完成", "删除 " + (result.TryGetValue("removed", out var r) ? r : 0) + " 个文件", InfoBarSeverity.Success);
         }
         catch (Exception ex) { AppServices.Toast?.Invoke("清理失败", ex.Message, InfoBarSeverity.Error); }
+    }
+
+    private async void Help_Click(object sender, RoutedEventArgs e)
+    {
+        if (AppServices.Client is null) return;
+        try
+        {
+            var arts = await AppServices.Client.CallAsync<List<HelpArticle>>("help_articles") ?? new();
+            var list = new ListView { MaxHeight = 280 };
+            foreach (var a in arts) list.Items.Add(new ListViewItem { Content = a.Title, Tag = a.Id });
+            if (list.Items.Count > 0) list.SelectedIndex = 0;
+            var body = new TextBlock { TextWrapping = TextWrapping.Wrap, MaxWidth = 420 };
+            list.SelectionChanged += async (_, _) =>
+            {
+                if (list.SelectedItem is ListViewItem li && li.Tag is string id)
+                {
+                    try
+                    {
+                        var art = await AppServices.Client.CallAsync<HelpArticle>("help_article", new { article_id = id });
+                        body.Text = art?.Body ?? "";
+                    }
+                    catch { }
+                }
+            };
+            if (arts.Count > 0)
+            {
+                var first = await AppServices.Client.CallAsync<HelpArticle>("help_article", new { article_id = arts[0].Id });
+                body.Text = first?.Body ?? "";
+            }
+            var box = new StackPanel { Spacing = 8 };
+            box.Children.Add(list);
+            box.Children.Add(body);
+            var dlg = new ContentDialog { Title = "帮助", Content = box, CloseButtonText = "关闭", XamlRoot = XamlRoot };
+            await dlg.ShowAsync();
+        }
+        catch (Exception ex) { AppServices.Toast?.Invoke("帮助", ex.Message, InfoBarSeverity.Error); }
     }
 
     private async void GlobalMods_Click(object sender, RoutedEventArgs e)

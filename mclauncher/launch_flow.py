@@ -7,6 +7,7 @@ import subprocess
 
 from . import global_mods, utils, version_settings
 from .argsplit import split_args
+from .config import CONFIG
 
 
 def prepare(instance, version_id, extra_game_args=None, memory_mb=None):
@@ -19,23 +20,41 @@ def prepare(instance, version_id, extra_game_args=None, memory_mb=None):
     if settings.get("server") and "--server" not in extras:
         extras += ["--server", str(settings["server"])]
         extras += ["--port", str(settings.get("port") or 25565)]
+    mode = settings.get("window_mode") or CONFIG.get("window_mode") or "window"
+    if mode == "fullscreen" and "--fullscreen" not in extras:
+        extras.append("--fullscreen")
+    from . import gc as gc_mod
+    jvm = gc_mod.apply(settings.get("gc") or CONFIG.get("gc_preset") or "auto",
+                       settings.get("jvm_args") or "")
     return {
         "settings": settings,
         "game_dir": gdir,
         "memory_mb": mem,
         "extra_game_args": extras,
-        "jvm_args": settings.get("jvm_args") or "",
-        "priority": settings.get("process_priority") or "normal",
+        "jvm_args": jvm,
+        "priority": settings.get("process_priority") or CONFIG.get("default_priority") or "normal",
         "global_mods": n,
+        "pre_launch_wait": settings.get("pre_launch_wait", True),
+        "login_account": settings.get("login_account") or "",
+        "nide8_id": settings.get("nide8_id") or "",
+        "auth_server": settings.get("auth_server") or "",
+        "window_mode": mode,
     }
 
 
-def run_hook(command: str, cwd, log=None) -> int:
+def run_hook(command: str, cwd, log=None, wait: bool = True) -> int:
     cmd = (command or "").strip()
     if not cmd:
         return 0
     if log:
         log(f"运行启动脚本: {cmd}")
+    if not wait:
+        subprocess.Popen(
+            cmd, cwd=str(cwd), shell=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+        return 0
     proc = subprocess.run(
         cmd, cwd=str(cwd), shell=True,
         capture_output=True, text=True,

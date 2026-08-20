@@ -347,6 +347,7 @@ class Installer:
         self.on_progress = on_progress
         self.cancel = cancel or (lambda: False)
         self._java_cache = None
+        self.skip_assets = False
 
     def _note(self, msg, done=0, total=1):
         msg = str(msg or "").strip()
@@ -433,7 +434,10 @@ class Installer:
             self._run_processors(vjson, resolved, vdir, vanilla_jar, force=force, java=java)
 
         # 资源文件
-        self._install_assets(resolved, force=force)
+        if getattr(self, "skip_assets", False):
+            self._note("已跳过资源文件校验")
+        else:
+            self._install_assets(resolved, force=force)
 
         # 日志配置
         self._install_logging(resolved)

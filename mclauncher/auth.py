@@ -396,14 +396,28 @@ class AccountManager:
             self.save()
         return self.active
 
-    def offline_account(self, username):
+    def offline_account(self, username, skin="default"):
         username = username.strip() or "Player"
-        return {"type": "offline", "name": username, "uuid": utils.offline_uuid(username)}
+        skin = (skin or "default").lower()
+        if skin == "steve":
+            uuid = "8667ba71-b85a-4004-af54-457a9734eed7"
+        elif skin == "alex":
+            uuid = "ec561538-f3fd-461d-a7c9-7aa354f5bba9"
+        else:
+            uuid = utils.offline_uuid(username)
+        return {"type": "offline", "name": username, "uuid": uuid, "skin": skin}
 
     def ensure_valid(self, account):
         """正版 / 皮肤站令牌过期则刷新；失败则抛 AuthError。"""
         if not account:
             return account
+        if account.get("type") == "nide8":
+            expired = time.time() > float(account.get("expires_at") or 0)
+            if not expired and account.get("access_token"):
+                return account
+            from . import nide8 as nide8_mod
+            account = nide8_mod.refresh(account)
+            return self.add_account(account)
         if account.get("type") == "authlib":
             expired = time.time() > float(account.get("expires_at") or 0)
             if not expired and account.get("access_token"):
@@ -441,6 +455,15 @@ class AccountManager:
                 "user_type": "mojang",
                 "xuid": "",
                 "authlib_api": account.get("api") or "",
+            }
+        if account.get("type") == "nide8":
+            return {
+                "name": account.get("name", "Player"),
+                "uuid": utils.dashed_uuid(account.get("uuid") or ""),
+                "token": account.get("access_token") or "0",
+                "user_type": "mojang",
+                "xuid": "",
+                "nide8_id": account.get("server_id") or "",
             }
         name = account.get("name", "Player")
         return {

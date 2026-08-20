@@ -66,6 +66,14 @@ public sealed class SettingsDto
     [JsonPropertyName("default_jvm_args")] public string DefaultJvmArgs { get; set; } = "";
     [JsonPropertyName("update_url")] public string UpdateUrl { get; set; } = "";
     [JsonPropertyName("download_source")] public string DownloadSource { get; set; } = "auto";
+    [JsonPropertyName("launcher_visibility")] public string LauncherVisibility { get; set; } = "keep";
+    [JsonPropertyName("gc_preset")] public string GcPreset { get; set; } = "auto";
+    [JsonPropertyName("download_limit_kbps")] public int DownloadLimitKbps { get; set; }
+    [JsonPropertyName("auto_check_update")] public bool AutoCheckUpdate { get; set; } = true;
+    [JsonPropertyName("custom_homepage")] public string CustomHomepage { get; set; } = "";
+    [JsonPropertyName("homepage_mode")] public string HomepageMode { get; set; } = "news";
+    [JsonPropertyName("window_mode")] public string WindowMode { get; set; } = "window";
+    [JsonPropertyName("game_dir")] public string GameDir { get; set; } = "";
 }
 
 public sealed class VersionSettingsDto
@@ -77,6 +85,13 @@ public sealed class VersionSettingsDto
     public string Port { get; set; } = "";
     [JsonPropertyName("pre_launch")] public string PreLaunch { get; set; } = "";
     [JsonPropertyName("post_launch")] public string PostLaunch { get; set; } = "";
+    [JsonPropertyName("login_account")] public string LoginAccount { get; set; } = "";
+    [JsonPropertyName("nide8_id")] public string Nide8Id { get; set; } = "";
+    public string Gc { get; set; } = "";
+    [JsonPropertyName("window_title")] public string WindowTitle { get; set; } = "";
+    [JsonPropertyName("window_mode")] public string WindowMode { get; set; } = "window";
+    [JsonPropertyName("pre_launch_wait")] public bool PreLaunchWait { get; set; } = true;
+    [JsonPropertyName("offline_skin")] public string OfflineSkin { get; set; } = "default";
 }
 
 public sealed class NewsRow
@@ -188,6 +203,33 @@ public sealed class BridgeEvent
     public CrashReport? Crash { get; set; }
 }
 
+public sealed class CatalogFile
+{
+    public object? Id { get; set; }
+    public string Name { get; set; } = "";
+    [JsonPropertyName("version_number")] public string VersionNumber { get; set; } = "";
+    public string Filename { get; set; } = "";
+    [JsonPropertyName("game_versions")] public List<string>? GameVersions { get; set; }
+    public List<string>? Loaders { get; set; }
+    public string Date { get; set; } = "";
+    public long Downloads { get; set; }
+    [JsonPropertyName("release_type")] public string ReleaseType { get; set; } = "";
+    public string Source { get; set; } = "";
+}
+
+public sealed class LoaderVer
+{
+    public string Label { get; set; } = "";
+    public string Id { get; set; } = "";
+}
+
+public sealed class HelpArticle
+{
+    public string Id { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string Body { get; set; } = "";
+}
+
 public sealed class CatalogKind
 {
     public string Title { get; set; } = "";
@@ -202,6 +244,8 @@ public sealed class CatalogKind
     public string LocalFilter { get; set; } = "";
     public bool IsModpack { get; set; }
     public string[] Types { get; set; } = Array.Empty<string>();
+    public string FileKind { get; set; } = "mod";
+    public string DefaultSource { get; set; } = "";
 
     public static CatalogKind Mod { get; } = new()
     {
@@ -232,6 +276,7 @@ public sealed class CatalogKind
         LocalFilter = ".mrpack;.zip",
         IsModpack = true,
         Types = new[] { "全部", "生存", "空岛", "科技", "魔法" },
+        FileKind = "modpack",
     };
 
     public static CatalogKind Datapack { get; } = new()
@@ -247,6 +292,7 @@ public sealed class CatalogKind
         LocalLabel = "导入 zip",
         LocalFilter = ".zip",
         Types = new[] { "全部", "生存", "冒险", "装饰" },
+        FileKind = "datapack",
     };
 
     public static CatalogKind ResourcePack { get; } = new()
@@ -262,6 +308,7 @@ public sealed class CatalogKind
         LocalLabel = "导入 zip",
         LocalFilter = ".zip",
         Types = new[] { "全部", "16x", "32x", "64x", "写实", "现代风", "动态效果" },
+        FileKind = "resourcepack",
     };
 
     public static CatalogKind Shader { get; } = new()
@@ -277,5 +324,23 @@ public sealed class CatalogKind
         LocalLabel = "导入 zip",
         LocalFilter = ".zip",
         Types = new[] { "全部", "写实", "卡通", "高性能", "光追" },
+        FileKind = "shader",
+    };
+
+    public static CatalogKind World { get; } = new()
+    {
+        Title = "世界",
+        SearchTitle = "搜索世界",
+        SearchMethod = "search_worlds",
+        InstallMethod = "install_world",
+        EmptySearch = "没有找到相关世界",
+        LinkLabel = "从链接安装",
+        LinkTitle = "从链接安装世界",
+        LinkHint = "世界下载链接 (URL)",
+        LocalLabel = "导入 zip",
+        LocalFilter = ".zip",
+        Types = new[] { "全部", "生存", "冒险", "创造" },
+        FileKind = "world",
+        DefaultSource = "CurseForge",
     };
 }

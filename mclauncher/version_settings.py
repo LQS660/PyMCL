@@ -12,13 +12,16 @@ from .config import CONFIG
 FILE_NAME = "pymcl.json"
 ISOLATION_NONE = "none"
 ISOLATION_SAVES = "saves"
+ISOLATION_MODS = "mods"
 ISOLATION_ALL = "all"
 ISOLATION_LABELS = {
     ISOLATION_NONE: "关闭（共用实例目录）",
     ISOLATION_SAVES: "隔离存档",
+    ISOLATION_MODS: "隔离 Mod 与配置",
     ISOLATION_ALL: "隔离全部",
 }
 SHARED_LINKS = ("mods", "config", "resourcepacks", "shaderpacks", "downloads")
+SAVES_LINKS = ("saves",)
 
 DEFAULTS = {
     "isolation": ISOLATION_NONE,
@@ -28,10 +31,21 @@ DEFAULTS = {
     "game_args": "",
     "pre_launch": "",
     "post_launch": "",
+    "pre_launch_wait": True,
     "server": "",
     "port": "",
     "process_priority": "normal",
     "icon": "",
+    "hidden": False,
+    "login_account": "",
+    "auth_server": "",
+    "auth_server_name": "",
+    "nide8_id": "",
+    "gc": "",
+    "window_title": "",
+    "window_mode": "window",
+    "skip_assets": False,
+    "offline_skin": "default",
 }
 
 
@@ -63,7 +77,7 @@ def save(instance, version_id, data: dict) -> dict:
 def game_dir(instance, version_id, settings=None) -> Path:
     settings = settings or load(instance, version_id)
     iso = settings.get("isolation") or ISOLATION_NONE
-    if iso in (ISOLATION_ALL, ISOLATION_SAVES):
+    if iso in (ISOLATION_ALL, ISOLATION_SAVES, ISOLATION_MODS):
         return instance.versions_dir() / version_id
     return Path(instance.path)
 
@@ -111,6 +125,11 @@ def apply_isolation(instance, version_id, settings=None) -> Path:
         for name in SHARED_LINKS:
             _junction(gdir / name, Path(instance.path) / name)
         utils.ensure_dir(gdir / "saves")
+    elif iso == ISOLATION_MODS:
+        for name in SAVES_LINKS + ("resourcepacks", "shaderpacks", "screenshots"):
+            _junction(gdir / name, Path(instance.path) / name)
+        for name in ("mods", "config"):
+            utils.ensure_dir(gdir / name)
     elif iso == ISOLATION_ALL:
         for name in ("mods", "config", "saves", "resourcepacks", "shaderpacks"):
             utils.ensure_dir(gdir / name)

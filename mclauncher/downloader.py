@@ -166,6 +166,9 @@ class DownloadManager:
         self._lock = threading.Lock()
         self._done = 0
         self._last_notify = 0.0
+        self._pace_lock = threading.Lock()
+        self._paced = 0
+        self._pace_t0 = time.monotonic()
 
         self.session = requests.Session()
         from .net import apply_direct_to_session
@@ -188,6 +191,23 @@ class DownloadManager:
         )
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
+
+    def _pace(self, n: int):
+        try:
+            from .config import CONFIG
+            kbps = int(CONFIG.get("download_limit_kbps") or 0)
+        except Exception:
+            return
+        if kbps <= 0 or n <= 0:
+            return
+        bps = kbps * 1024
+        with self._pace_lock:
+            self._paced += n
+            elapsed = time.monotonic() - self._pace_t0
+            expected = self._paced / bps
+            delay = expected - elapsed
+            if delay > 0.002:
+                time.sleep(min(delay, 1.5))
 
     def _notify_progress(self, force=False):
         if not self.on_progress:
@@ -425,6 +445,7 @@ class DownloadManager:
                                     got += len(chunk)
                                     self.tracker.transfer(key, got, expected)
                                     self._notify_progress()
+                                    self._pace(len(chunk))
                         if expected and got != expected and not (sha1 or sha512):
                             raise DownloadError(f"下载不完整 {url} ({got}/{expected})")
                     self.tracker.verify(dest.name)

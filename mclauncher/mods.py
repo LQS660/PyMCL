@@ -36,10 +36,11 @@ def modrinth_download_urls(urls) -> list:
 
 def install_modrinth_mod(dm: DownloadManager, slug, instance: Instance,
                          mc_version=None, loader=None, on_progress=None,
-                         use_mirror=True):
+                         use_mirror=True, version_id=None):
     """安装单个 Modrinth 模组：自动匹配 MC 版本与加载器，含必需依赖。
 
     use_mirror=True 时优先走 MCIM 国内镜像；镜像失败会自动回退官方 CDN。
+    version_id 指定时安装该版本，不再自动挑最新。
     """
     inst = instance
     inst.ensure_standard_dirs()
@@ -47,7 +48,15 @@ def install_modrinth_mod(dm: DownloadManager, slug, instance: Instance,
         mc_version = detect_mc_version(inst)
     if loader is None:
         loader = detect_loader(inst)
-    version = _pick_version(dm, slug, mc_version, loader)
+    if version_id:
+        try:
+            version = dm.fetch_json(f"{MODRINTH_API}/version/{version_id}", timeout=API_TIMEOUT)
+        except Exception as e:
+            raise ModError(f"获取模组版本 {version_id} 失败: {e}") from e
+        if not isinstance(version, dict):
+            raise ModError(f"模组版本 {version_id} 无效")
+    else:
+        version = _pick_version(dm, slug, mc_version, loader)
 
     seen = set()
     downloaded = []
@@ -98,13 +107,23 @@ class ModError(Exception):
 
 # ================================================================ 搜索
 
-def search_mods(dm: DownloadManager, query, limit=30):
+def _mr_facets(project_type, game_version=None, categories=None):
+    facets = [[f"project_type:{project_type}"]]
+    if game_version:
+        facets.append([f"versions:{game_version}"])
+    cats = [c for c in (categories or []) if c]
+    if cats:
+        facets.append([f"categories:{c}" for c in cats])
+    return json.dumps(facets)
+
+
+def search_mods(dm: DownloadManager, query, limit=30, game_version=None, categories=None):
     """搜索 Modrinth 模组（project_type:mod），官方与镜像短超时轮询。"""
     params = {
-        "query": query,
-        "facets": json.dumps([["project_type:mod"]]),
+        "query": query or " ",
+        "facets": _mr_facets("mod", game_version, categories),
         "limit": limit,
-        "index": "relevance",
+        "index": "relevance" if (query or "").strip() else "downloads",
     }
     last_err = None
     from . import source
@@ -126,6 +145,9 @@ def search_mods(dm: DownloadManager, query, limit=30):
             "description": (h.get("description") or "")[:120],
             "author": h.get("author", "?"),
             "downloads": h.get("downloads", 0),
+            "tags": [str(c) for c in (h.get("display_categories") or h.get("categories") or [])[:6]],
+            "updated": str(h.get("date_modified") or "")[:10],
+            "source": "modrinth",
         }
         for h in data.get("hits", [])
     ]
@@ -159,10 +181,14 @@ def list_versions(dm: DownloadManager, slug, game_version=None, loaders=None):
             "id": v.get("id"),
             "name": v.get("name"),
             "version_number": v.get("version_number"),
+            "version_type": v.get("version_type") or "release",
             "game_versions": v.get("game_versions", []),
             "loaders": v.get("loaders", []),
             "files": files,
             "dependencies": v.get("dependencies", []),
+            "date_published": str(v.get("date_published") or "")[:19],
+            "downloads": v.get("downloads") or 0,
+            "changelog": (v.get("changelog") or "")[:400],
         })
     return result
 
@@ -457,6 +483,7 @@ CF_CLASS_MODPACK = 4471   # Modpacks
 CF_CLASS_RESOURCEPACK = 12  # Texture Packs
 CF_CLASS_SHADER = 6552
 CF_CLASS_DATAPACK = 6945
+CF_CLASS_WORLD = 17
 
 
 def _cf_api_headers(api_key=None):
@@ -610,7 +637,7 @@ def cf_files_by_ids(dm: DownloadManager, file_ids, api_key=None):
 
 
 def search_curseforge(dm: DownloadManager, query=None, limit=30, api_key=None,
-                      class_id=CF_CLASS_MOD, slug=None):
+                      class_id=CF_CLASS_MOD, slug=None, game_version=None):
     """搜索 CurseForge（官方 API 优先，国内镜像兜底）。"""
     params = {
         "gameId": 432,
@@ -623,6 +650,8 @@ def search_curseforge(dm: DownloadManager, query=None, limit=30, api_key=None,
         params["searchFilter"] = query
     if slug:
         params["slug"] = slug
+    if game_version:
+        params["gameVersion"] = game_version
 
     data = _cf_fetch(dm, "/mods/search", api_key=api_key, params=params)
     return [_cf_norm(m) for m in _cf_items(data)]
@@ -709,7 +738,8 @@ def _cf_download_urls(addon_id, file_id, filename=None):
 
 
 def install_curseforge_mod(dm: DownloadManager, addon_id, instance: Instance,
-                           mc_version=None, loader=None, api_key=None, on_progress=None):
+                           mc_version=None, loader=None, api_key=None, on_progress=None,
+                           file_id=None):
     """安装 CurseForge 模组：自动匹配实例 MC 版本与加载器。"""
     inst = instance
     inst.ensure_standard_dirs()
@@ -726,21 +756,33 @@ def install_curseforge_mod(dm: DownloadManager, addon_id, instance: Instance,
             files = cf_files(dm, addon_id, api_key=api_key, page_size=100)
         except Exception as e:
             utils.log.warning("cf_files 兜底也失败: %s", e)
-    if not files:
-        raise ModError("该模组没有可下载的文件")
+    if file_id:
+        hit = next((x for x in files if str(x.get("id")) == str(file_id)), None)
+        if not hit:
+            try:
+                files = cf_files(dm, addon_id, api_key=api_key, page_size=100)
+            except Exception:
+                files = files or []
+            hit = next((x for x in files if str(x.get("id")) == str(file_id)), None)
+        if not hit:
+            raise ModError(f"找不到 CurseForge 文件 {file_id}")
+        f = hit
+    else:
+        if not files:
+            raise ModError("该模组没有可下载的文件")
 
-    candidates = [f for f in files
-                  if not mc_version or mc_version in (f.get("gameVersions") or [])]
-    if loader:
-        pref = [f for f in candidates
-                if any(loader.lower() in (gv or "").lower() for gv in (f.get("gameVersions") or []))]
-        if pref:
-            candidates = pref
-    if not candidates:
-        utils.log.warning("没有与 MC %s 完全匹配的文件，使用最新文件", mc_version)
-        candidates = files
+        candidates = [f for f in files
+                      if not mc_version or mc_version in (f.get("gameVersions") or [])]
+        if loader:
+            pref = [f for f in candidates
+                    if any(loader.lower() in (gv or "").lower() for gv in (f.get("gameVersions") or []))]
+            if pref:
+                candidates = pref
+        if not candidates:
+            utils.log.warning("没有与 MC %s 完全匹配的文件，使用最新文件", mc_version)
+            candidates = files
 
-    f = candidates[0]
+        f = candidates[0]
     file_id = f.get("id")
     if file_id is None:
         raise ModError("模组文件信息缺失")
@@ -808,7 +850,8 @@ def install_cf_mod(dm: DownloadManager, url, instance: Instance, on_progress=Non
 
 
 def install_mod_from_source(dm: DownloadManager, source, instance: Instance,
-                            mc_version=None, loader=None, on_progress=None):
+                            mc_version=None, loader=None, on_progress=None,
+                            version_id=None):
     """
     统一安装入口：支持
     - Modrinth 链接 (modrinth.com/mod/<slug>) 或直接 slug
@@ -821,7 +864,8 @@ def install_mod_from_source(dm: DownloadManager, source, instance: Instance,
     if re.match(r"^https?://", s):
         m = re.search(r"modrinth\.com/mod(?:s)?/([^/?#]+)", s)
         if m:
-            return install_modrinth_mod(dm, m.group(1), inst, mc_version, loader, on_progress)
+            return install_modrinth_mod(dm, m.group(1), inst, mc_version, loader, on_progress,
+                                        version_id=version_id)
         if "curseforge.com" in s:
             return install_cf_mod(dm, s, inst, on_progress)
         if s.split("?")[0].lower().endswith(".jar"):
@@ -836,7 +880,7 @@ def install_mod_from_source(dm: DownloadManager, source, instance: Instance,
         shutil.copy2(p, inst.path / "mods" / p.name)
         return {"source": "file", "files": [p.name]}
     # 不是链接也不是文件：当作 Modrinth slug
-    return install_modrinth_mod(dm, s, inst, mc_version, loader, on_progress)
+    return install_modrinth_mod(dm, s, inst, mc_version, loader, on_progress, version_id=version_id)
 
 
 # ================================================================ 光影 / 资源包 / 数据包
@@ -848,11 +892,12 @@ CONTENT_KINDS = {
 }
 
 
-def search_modrinth_projects(dm: DownloadManager, query, project_type, limit=30):
+def search_modrinth_projects(dm: DownloadManager, query, project_type, limit=30,
+                             game_version=None, categories=None):
     """按 project_type 搜 Modrinth（shader / resourcepack / datapack / mod）。"""
     params = {
         "query": query or " ",
-        "facets": json.dumps([[f"project_type:{project_type}"]]),
+        "facets": _mr_facets(project_type, game_version, categories),
         "limit": limit,
         "index": "relevance" if (query or "").strip() else "downloads",
     }
@@ -904,14 +949,21 @@ def delete_content_file(instance: Instance, subdir: str, filename: str):
 
 
 def install_modrinth_content(dm: DownloadManager, slug, instance: Instance, subdir: str,
-                             mc_version=None, on_progress=None):
+                             mc_version=None, on_progress=None, version_id=None):
     inst = instance
     inst.ensure_standard_dirs()
     dest_dir = inst.path / subdir
     dest_dir.mkdir(parents=True, exist_ok=True)
-    versions = list_versions(dm, slug, game_version=mc_version or None)
-    if not versions:
-        versions = list_versions(dm, slug)
+    if version_id:
+        try:
+            chosen = dm.fetch_json(f"{MODRINTH_API}/version/{version_id}", timeout=API_TIMEOUT)
+        except Exception as e:
+            raise ModError(f"获取版本失败: {e}") from e
+        versions = [chosen] if chosen else []
+    else:
+        versions = list_versions(dm, slug, game_version=mc_version or None)
+        if not versions:
+            versions = list_versions(dm, slug)
     if not versions:
         raise ModError(f"{slug} 没有可下载版本")
     f = _primary_file(versions[0])
@@ -927,7 +979,7 @@ def install_modrinth_content(dm: DownloadManager, slug, instance: Instance, subd
 
 
 def install_cf_content(dm: DownloadManager, addon_id, instance: Instance, subdir: str,
-                       mc_version=None, api_key=None, on_progress=None):
+                       mc_version=None, api_key=None, on_progress=None, file_id=None):
     inst = instance
     inst.ensure_standard_dirs()
     dest_dir = inst.path / subdir
@@ -938,9 +990,17 @@ def install_cf_content(dm: DownloadManager, addon_id, instance: Instance, subdir
         files = cf_files(dm, addon_id, api_key=api_key, page_size=50)
     if not files:
         raise ModError("没有可下载文件")
-    candidates = [f for f in files
-                  if not mc_version or mc_version in (f.get("gameVersions") or [])]
-    f = (candidates or files)[0]
+    if file_id:
+        f = next((x for x in files if str(x.get("id")) == str(file_id)), None)
+        if not f:
+            files = cf_files(dm, addon_id, api_key=api_key, page_size=50)
+            f = next((x for x in files if str(x.get("id")) == str(file_id)), None)
+        if not f:
+            raise ModError(f"找不到文件 {file_id}")
+    else:
+        candidates = [x for x in files
+                      if not mc_version or mc_version in (x.get("gameVersions") or [])]
+        f = (candidates or files)[0]
     file_id = f.get("id")
     filename = f.get("fileName") or f"file-{addon_id}-{file_id}.zip"
     dest = dest_dir / filename
@@ -992,10 +1052,15 @@ def install_content_from_source(dm: DownloadManager, instance: Instance, subdir:
         dm.download(str(url), dest, timeout=900)
         return {"source": "url", "files": [dest.name]}
     src = str(extra.get("source") or "").lower()
-    if extra.get("id") and src.startswith("curse"):
-        return install_cf_content(dm, extra["id"], inst, subdir, mc_version, on_progress=on_progress)
+    file_id = extra.get("file_id") or extra.get("version_id")
+    if extra.get("id") and (src.startswith("curse") or extra.get("file_id")):
+        return install_cf_content(
+            dm, extra["id"], inst, subdir, mc_version, on_progress=on_progress,
+            file_id=file_id)
     slug = extra.get("slug") or extra.get("name")
     if not slug:
         raise ModError("缺少 slug / 文件 / 链接")
-    return install_modrinth_content(dm, slug, inst, subdir, mc_version, on_progress=on_progress)
+    return install_modrinth_content(
+        dm, slug, inst, subdir, mc_version, on_progress=on_progress,
+        version_id=extra.get("version_id"))
 

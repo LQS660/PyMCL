@@ -83,7 +83,7 @@ private val tabs = listOf(
 )
 
 private val downloadChips = listOf(
-    "原版游戏", "Mod", "整合包", "数据包", "资源包", "光影包", "下载任务",
+    "原版游戏", "Mod", "整合包", "数据包", "资源包", "光影包", "世界", "下载任务",
 )
 
 @OptIn(ExperimentalMaterial3Api::class)

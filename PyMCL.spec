@@ -34,7 +34,8 @@ hiddenimports = (
     + _hidden("qframelesswindow")
     + ["mclauncher.terracotta", "app.pages.multiplayer_page", "app.pages.ai_page",
        "mclauncher.feedback", "mclauncher.feedback_defaults", "mclauncher.sysinfo",
-       "app.pages.feedback_page"]
+       "app.pages.feedback_page", "app.ui_alive", "app.pages.file_pick",
+       "app.pages.install_wizard", "app.pages.first_run", "app.pages.global_mods_dialog"]
 )
 
 excludes = [

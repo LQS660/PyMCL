@@ -1,21 +1,22 @@
 # -*- coding: utf-8 -*-
 """主窗口：细顶栏 + 左侧 5 项导航。"""
 
-from qfluentwidgets import FluentIcon as FIF, InfoBar, InfoBarPosition, setTheme, setThemeColor, Theme
+from qfluentwidgets import FluentIcon as FIF, InfoBar, InfoBarPosition, setTheme, setThemeColor, Theme as FluentTheme
 from qfluentwidgets.window.fluent_window import FluentWindowBase
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QLabel
+from PySide6.QtCore import Qt, QEasingCurve, QPoint, QPropertyAnimation, QTimer
+from PySide6.QtWidgets import QApplication, QLabel
 
 from mclauncher import APP_DISPLAY_NAME, APP_VERSION
 from .backend import BackendAPI
 from .fly_anim import fly_to
-from .pcl_chrome import PCL_BG, PCL_GREEN, PclSideBar, PclTitleBar, TITLE_H
+from .pcl_chrome import Theme, fade_stack_to, PclSideBar, PclTitleBar, TITLE_H
 from .widgets import pick_color
 from .pages.account_page import AccountPage
 from .pages.ai_page import AiPage
-from .pages.catalog_page import DatapackPage, ModPage, ModpackPage, ResourcePackPage, ShaderPage
+from .pages.catalog_page import DatapackPage, ModPage, ModpackPage, ResourcePackPage, ShaderPage, WorldPage
 from .pages.download_hub import DownloadSection
 from .pages.feedback_page import FeedbackPage
+from .pages.help_page import HelpPage
 from .pages.instance_page import InstancePage
 from .pages.java_page import JavaPage
 from .pages.launch_page import LaunchPage
@@ -31,10 +32,15 @@ class MainWindow(FluentWindowBase):
         self.setWindowTitle(f"{APP_DISPLAY_NAME} v{APP_VERSION}")
         self.resize(1180, 760)
         self.setMicaEffectEnabled(False)
-        self.setCustomBackgroundColor(PCL_BG, "#1B1B1B")
-        setThemeColor(PCL_GREEN, save=False)
+        self.setCustomBackgroundColor("#FFFFFF", "#1B1B1B")
+        setThemeColor("#2E9B6B", save=False)
 
         self.backend = BackendAPI(self)
+        self._clip_seen = None
+        self._fly_jobs = []
+        self._quit_on_exit = False
+        self._dock_anim = None
+        self._nav_fade = None
         self.apply_theme()
 
         self.launch_page = LaunchPage(self.backend, self)
@@ -45,12 +51,14 @@ class MainWindow(FluentWindowBase):
         self.datapack_page = DatapackPage(self.backend, self)
         self.resource_page = ResourcePackPage(self.backend, self)
         self.shader_page = ShaderPage(self.backend, self)
+        self.world_page = WorldPage(self.backend, self)
         self.java_page = JavaPage(self.backend, self)
         self.instance_page = InstancePage(self.backend, self)
         self.account_page = AccountPage(self.backend, self)
         self.multiplayer_page = MultiplayerPage(self.backend, self)
         self.ai_page = AiPage(self.backend, self)
         self.feedback_page = FeedbackPage(self.backend, self)
+        self.help_page = HelpPage(self.backend, self)
         self.tasks_page = TasksPage(self.backend, self)
         self.download_section = DownloadSection(self.backend, self)
         self.download_section.bind([
@@ -60,6 +68,7 @@ class MainWindow(FluentWindowBase):
             ("数据包", self.datapack_page),
             ("资源包", self.resource_page),
             ("光影包", self.shader_page),
+            ("世界", self.world_page),
             ("Java", self.java_page),
         ])
 
@@ -71,6 +80,7 @@ class MainWindow(FluentWindowBase):
             "download": self.download_section,
             "ai": self.ai_page,
             "feedback": self.feedback_page,
+            "help": self.help_page,
             "tasks": self.tasks_page,
             "settings": self.settings_page,
         }
@@ -86,6 +96,7 @@ class MainWindow(FluentWindowBase):
             ("item", "download", FIF.DOWNLOAD, "下载"),
             ("item", "ai", getattr(FIF, "CHAT", None) or FIF.HELP, "AI 助手"),
             ("item", "feedback", getattr(FIF, "FEEDBACK", None) or getattr(FIF, "MAIL", None) or FIF.HELP, "反馈"),
+            ("item", "help", FIF.HELP, "帮助"),
             ("item", "settings", FIF.SETTING, "设置"),
             ("stretch",),
             ("item", "tasks", FIF.CLOUD_DOWNLOAD, "下载任务"),
@@ -122,16 +133,27 @@ class MainWindow(FluentWindowBase):
         self._ui_refresh.timeout.connect(self._refresh_pages)
         self.backend.ui_changed.connect(self._ui_refresh.start)
         self.backend.task_count_changed.connect(self._update_task_badge)
+        self.backend.game_started.connect(self._on_game_started)
+        self.backend.game_exited.connect(self._on_game_exited)
         self.stackedWidget.currentChanged.connect(lambda *_: self._place_download_dock())
-        QTimer.singleShot(700, self._ask_feedback_consent)
+        QTimer.singleShot(400, self._boot_extras)
 
     def apply_theme(self):
         color = self.backend.get_setting("theme_color", "#2E9B6B") or "#2E9B6B"
         dark = bool(self.backend.get_setting("ui_dark", False))
+        Theme.apply(dark)
         setThemeColor(color, save=False)
-        setTheme(Theme.DARK if dark else Theme.LIGHT, save=False)
-        bg = "#1B1B1B" if dark else "#FFFFFF"
-        self.setCustomBackgroundColor(bg, "#1B1B1B")
+        setTheme(FluentTheme.DARK if dark else FluentTheme.LIGHT, save=False)
+        self.setCustomBackgroundColor(Theme.bg, "#1B1B1B")
+        bar = self.titleBar
+        if hasattr(bar, "restyle"):
+            bar.restyle()
+        side = getattr(self, "side", None)
+        if side is not None and hasattr(side, "restyle"):
+            side.restyle()
+        cat = getattr(getattr(self, "download_section", None), "cat", None)
+        if cat is not None and hasattr(cat, "restyle"):
+            cat.restyle()
         image = self.backend.get_setting("ui_background", "") or ""
         if image:
             path = str(image).replace("\\", "/")
@@ -140,6 +162,53 @@ class MainWindow(FluentWindowBase):
             )
         else:
             self.stackedWidget.setStyleSheet("")
+        if getattr(self, "_pages", None):
+            page = self.stackedWidget.currentWidget()
+            if page is not None:
+                self._reload_page(page)
+
+    def _boot_extras(self):
+        if self.backend.get_setting("first_run", True):
+            from .pages.first_run import FirstRunDialog
+            dlg = FirstRunDialog(self.backend, self)
+            if dlg.exec():
+                dlg.apply()
+            else:
+                data = self.backend.get_settings()
+                data["first_run"] = False
+                self.backend.save_settings(data)
+        self._ask_feedback_consent()
+        if not self.backend.get_setting("auto_check_update", True):
+            return
+
+        def ok(info):
+            info = info or {}
+            if info.get("has_update"):
+                InfoBar.info("发现更新", info.get("message") or "到设置里安装", parent=self,
+                             position=InfoBarPosition.TOP_RIGHT, duration=5000)
+
+        self.backend.call_async(self.backend.check_update, ok, lambda *_: None)
+
+    def _on_game_started(self):
+        mode = self.backend.get_setting("launcher_visibility") or "keep"
+        if mode == "close":
+            self._quit_on_exit = True
+            self.hide()
+        elif mode in ("hide", "hide_reopen"):
+            self.hide()
+        elif mode == "minimize":
+            self.showMinimized()
+
+    def _on_game_exited(self, _code):
+        if self._quit_on_exit:
+            self._quit_on_exit = False
+            QApplication.instance().quit()
+            return
+        mode = self.backend.get_setting("launcher_visibility") or "keep"
+        if mode == "hide_reopen":
+            self.show()
+            self.raise_()
+            self.activateWindow()
 
     def _ask_feedback_consent(self):
         from mclauncher import feedback as fb
@@ -154,16 +223,16 @@ class MainWindow(FluentWindowBase):
         page = self._pages.get(key)
         if page is None:
             return
-        self.stackedWidget.setCurrentWidget(page, popOut=False)
+        fade_stack_to(self.stackedWidget, page, self)
         self._reload_page(page)
 
     def switchTo(self, interface):
         if self.download_section.has_page(interface) and interface is not self.download_section:
-            self.stackedWidget.setCurrentWidget(self.download_section, popOut=False)
+            fade_stack_to(self.stackedWidget, self.download_section, self)
             self.side.set_current("download", emit=False)
             self.download_section.show_page(interface)
             return
-        self.stackedWidget.setCurrentWidget(interface, popOut=False)
+        fade_stack_to(self.stackedWidget, interface, self)
         for key, page in self._pages.items():
             if page is interface:
                 self.side.set_current(key, emit=False)
@@ -219,30 +288,64 @@ class MainWindow(FluentWindowBase):
         badge.move(x, y)
         badge.raise_()
 
-    def _place_download_dock(self):
+    def _place_download_dock(self, animate=True):
         dock = getattr(self, "download_dock", None)
         if not dock:
             return
         page = self.stackedWidget.currentWidget()
-        hide_on = {self.settings_page, self.instance_page, self.tasks_page,
-                   self.feedback_page, self.launch_page}
-        if (not getattr(dock, "_active", None)) or page in hide_on:
-            dock.hide()
-            return
-        dock.show()
+        hide_on = {self.settings_page, self.instance_page, self.tasks_page, self.feedback_page}
+        want = bool(getattr(dock, "_active", None)) and page not in hide_on
         g = self.stackedWidget.geometry()
         dock.adjustSize()
         w = min(640, max(420, g.width() - 40))
         h = dock.sizeHint().height()
         x = g.x() + (g.width() - w) // 2
         y = g.y() + g.height() - h - 18
+        dest = QPoint(max(g.x() + 12, x), max(g.y() + 12, y))
         dock.setFixedWidth(w)
-        dock.move(max(g.x() + 12, x), max(g.y() + 12, y))
-        dock.raise_()
+        prev = getattr(self, "_dock_anim", None)
+        if prev is not None:
+            prev.stop()
+            self._dock_anim = None
+        if want:
+            if not dock.isVisible():
+                dock.move(dest.x(), dest.y() + 28)
+                dock.show()
+                dock.raise_()
+                if animate:
+                    self._dock_anim = self._anim_pos(dock, dest, 280)
+                else:
+                    dock.move(dest)
+            else:
+                dock.move(dest)
+                dock.raise_()
+            return
+        if not dock.isVisible():
+            return
+        if not animate:
+            dock.hide()
+            return
+
+        def after():
+            dock.hide()
+            self._dock_anim = None
+
+        self._dock_anim = self._anim_pos(dock, QPoint(dest.x(), dest.y() + 24), 200, after)
+
+    def _anim_pos(self, widget, end, ms, done=None):
+        anim = QPropertyAnimation(widget, b"pos", self)
+        anim.setDuration(ms)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.setStartValue(widget.pos())
+        anim.setEndValue(end)
+        if done:
+            anim.finished.connect(done)
+        anim.start()
+        return anim
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._place_download_dock()
+        self._place_download_dock(animate=False)
         self._place_task_badge()
 
     def closeEvent(self, event):

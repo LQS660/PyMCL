@@ -104,6 +104,8 @@ public sealed partial class LaunchPage : UserControl
     public async Task ReloadAsync()
     {
         if (AppServices.Client is null) return;
+        if (!string.IsNullOrEmpty(_taskId) && LaunchBtn is { IsEnabled: false })
+            return;
         var insts = await AppServices.Client.CallAsync<List<InstanceInfo>>("get_instances") ?? new();
         var cur = InstanceBox.SelectedItem as string;
         InstanceBox.SelectionChanged -= Instance_Changed;
@@ -469,7 +471,11 @@ public sealed partial class LaunchPage : UserControl
             LaunchBtn.IsEnabled = true;
             StopBtn.IsEnabled = false;
             StatusLabel.Text = ev.Message;
-            if (ev.Success) LaunchProgress.Value = 100;
+            if (ev.Success)
+            {
+                LaunchProgress.Value = 100;
+                StatusLabel.Text = string.IsNullOrEmpty(ev.Message) ? "已正常退出" : ev.Message;
+            }
             else if (!_crashShown && ev.Message != "已取消")
             {
                 _crashShown = true;

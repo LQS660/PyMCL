@@ -176,11 +176,25 @@ def resolve_cf_modpack_file(dm: DownloadManager, addon_id, api_key=None, cf_slug
 
 
 def install_cf_modpack(dm: DownloadManager, addon_id, instance: Instance,
-                       api_key=None, on_progress=None, cancel=None, cf_slug=None):
+                       api_key=None, on_progress=None, cancel=None, cf_slug=None,
+                       file_id=None):
     """安装 CurseForge 整合包：解析最新文件后下载 zip，再复用 install_cf_zip。"""
-    from .mods import _cf_download_urls
+    from .mods import _cf_download_urls, cf_files
 
-    info = resolve_cf_modpack_file(dm, addon_id, api_key=api_key, cf_slug=cf_slug)
+    if file_id:
+        files = cf_files(dm, addon_id, api_key=api_key, page_size=50)
+        f = next((x for x in files if str(x.get("id")) == str(file_id)), None)
+        if not f:
+            raise ModpackError(f"找不到整合包文件 {file_id}")
+        info = {
+            "addon_id": addon_id,
+            "file_id": f.get("id"),
+            "fileName": f.get("fileName"),
+            "downloadUrl": f.get("downloadUrl"),
+            "name": cf_slug or f"curseforge:{addon_id}",
+        }
+    else:
+        info = resolve_cf_modpack_file(dm, addon_id, api_key=api_key, cf_slug=cf_slug)
     addon_id = info["addon_id"]
     file_id = info["file_id"]
     filename = info.get("fileName")
@@ -506,7 +520,8 @@ def _resolve_pack_minecraft(dm, declared, on_progress=None):
 
 
 def install_mrpack_by_slug(dm: DownloadManager, slug, instance: Instance,
-                           on_progress=None, cancel=None, force=False, java=None):
+                           on_progress=None, cancel=None, force=False, java=None,
+                           version_id=None):
     """通过 Modrinth slug 安装整合包；某个包版本装不上就自动换下一个。"""
     proj = modrinth_project(dm, slug)
     title = proj.get("title") or slug
@@ -517,9 +532,13 @@ def install_mrpack_by_slug(dm: DownloadManager, slug, instance: Instance,
             "请到「模组」页安装，或换一个真正的整合包（机械动力可搜黄铜协奏曲 CBC）。"
         )
     versions = modrinth_versions(dm, slug)
+    if version_id:
+        pinned = [v for v in versions if str(v.get("id")) == str(version_id)]
+        if pinned:
+            versions = pinned
     if not versions:
         raise ModpackError(f"整合包 {slug} 没有可下载的版本")
-    candidates = _mrpack_candidates(versions, limit=5)
+    candidates = _mrpack_candidates(versions, limit=1 if version_id else 5)
     if not candidates:
         names = [f.get("filename") for f in (versions[0].get("files") or [])]
         raise ModpackError(

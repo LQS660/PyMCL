@@ -11,7 +11,12 @@ from mclauncher.launch_flow import prepare
 from mclauncher.optifine import _profile
 from mclauncher.skin import avatar_url, body_url
 from mclauncher.updater import newer
-from mclauncher.version_settings import apply_isolation, load, save
+from mclauncher.catalog_files import split_cf_game_versions
+from mclauncher.game_install import parse_optifine_token
+from mclauncher.gc import apply as gc_apply
+from mclauncher.nide8 import normalize_server_id
+from mclauncher.version_ops import sanitize_id
+from mclauncher.version_settings import ISOLATION_LABELS, apply_isolation, load, save
 
 
 class _Inst:
@@ -61,6 +66,38 @@ def main():
     save(inst, "1.20.1", {"isolation": "none"})
     prep2 = prepare(inst, "1.20.1", memory_mb=1024)
     check("关闭隔离用实例目录", Path(prep2["game_dir"]) == td)
+
+    save(inst, "1.20.1", {"isolation": "mods"})
+    data_m = load(inst, "1.20.1")
+    check("隔离 mods 档位", data_m["isolation"] == "mods" and "mods" in ISOLATION_LABELS)
+    gdir_m = apply_isolation(inst, "1.20.1", data_m)
+    check("隔离 mods 目录", gdir_m == vdir)
+
+    check("gc 已有旗标不重复", "UseZGC" not in gc_apply("zgc", "-XX:+UseG1GC") and "UseG1GC" in gc_apply("zgc", "-XX:+UseG1GC"))
+    check("gc 前置写入", gc_apply("g1", "-Xmx4G").startswith("-XX:+UseG1GC"))
+    sid = "a" * 32
+    check("nide8 规范化", normalize_server_id(f"https://auth.mc-user.com:233/{sid}") == sid)
+    games, loaders = split_cf_game_versions(["1.20.1", "Forge", "Fabric", "snapshot"])
+    check("cf 版本拆分", "1.20.1" in games and "forge" in loaders and "fabric" in loaders)
+    t, patch = parse_optifine_token("HD_U_I6")
+    check("optifine token", t == "HD" and "I6" in patch)
+    check("sanitize_id", sanitize_id("a/b:c") == "a-b-c")
+
+    from app.pcl_chrome import Theme
+    Theme.apply(True)
+    check("深色色板", Theme.dark and Theme.bg == "#1B1B1B" and Theme.btn_bg != "#FFFFFF")
+    Theme.apply(False)
+    check("浅色色板", (not Theme.dark) and Theme.bg == "#FFFFFF")
+    more_row = lambda shown, cols: (shown + cols - 1) // cols
+    check("加载更多行 整除", more_row(80, 4) == 20)
+    check("加载更多行 余数", more_row(81, 4) == 21)
+    from app.ui_alive import widget_alive
+    class Dummy:
+        _dismissed = True
+        def objectName(self):
+            return ""
+    check("dismissed 守卫", widget_alive(Dummy()) is False)
+    check("None 守卫", widget_alive(None) is False)
 
     if failed:
         raise SystemExit("FAIL " + " | ".join(failed))

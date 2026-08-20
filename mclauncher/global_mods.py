@@ -52,6 +52,32 @@ def _link_file(dest: Path, src: Path):
             pass
 
 
+def set_enabled(filename: str, enabled: bool) -> str:
+    d = root()
+    p = d / filename
+    if not p.is_file():
+        raise FileNotFoundError(filename)
+    name = p.name
+    if enabled:
+        if name.lower().endswith(".jar.disabled"):
+            dest = p.with_name(name[: -len(".disabled")])
+        elif name.lower().endswith(".disabled"):
+            dest = p.with_name(name[: -len(".disabled")])
+        else:
+            return name
+        if dest.exists():
+            raise OSError(f"启用失败，已存在: {dest.name}")
+        p.rename(dest)
+        return dest.name
+    if name.lower().endswith(".disabled"):
+        return name
+    dest = p.with_name(name + ".disabled")
+    if dest.exists():
+        raise OSError(f"禁用失败，已存在: {dest.name}")
+    p.rename(dest)
+    return dest.name
+
+
 def apply(game_mods_dir: Path) -> int:
     """把已启用的全局 jar 放进游戏 mods。返回链接/复制数量。"""
     src_dir = root()

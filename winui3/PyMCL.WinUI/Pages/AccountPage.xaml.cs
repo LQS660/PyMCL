@@ -27,7 +27,15 @@ public sealed partial class AccountPage : UserControl
             bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var title = row.Name + (row.Active ? "  · 当前" : "") + "  ·  " + row.Type;
+            var kind = row.Type switch
+            {
+                "microsoft" => "微软",
+                "authlib" => "皮肤站",
+                "nide8" => "统一通行证",
+                "offline" => "离线",
+                _ => row.Type,
+            };
+            var title = row.Name + (row.Active ? "  · 当前" : "") + "  ·  " + kind;
             bar.Children.Add(new TextBlock { Text = title, VerticalAlignment = VerticalAlignment.Center });
             var use = new Button { Content = "使用" };
             use.Click += async (_, _) =>
@@ -87,7 +95,33 @@ public sealed partial class AccountPage : UserControl
             AppServices.Toast?.Invoke("缺少名字", "请填写离线角色名", InfoBarSeverity.Warning);
             return;
         }
-        try { await AppServices.Client.CallAsync("add_offline_account", new { username = name }); await ReloadAsync(); }
+        try
+        {
+            var skin = (SkinBox.SelectedItem as string) switch { "Steve" => "steve", "Alex" => "alex", _ => "default" };
+            await AppServices.Client.CallAsync("add_offline_account", new { username = name, skin });
+            await ReloadAsync();
+        }
         catch (Exception ex) { AppServices.Toast?.Invoke("保存失败", ex.Message, InfoBarSeverity.Error); }
+    }
+
+    private async void Nide8_Click(object sender, RoutedEventArgs e)
+    {
+        if (AppServices.Client is null) return;
+        var sid = Nide8Id.Text?.Trim() ?? "";
+        if (string.IsNullOrEmpty(sid))
+        {
+            AppServices.Toast?.Invoke("缺少服务器 ID", "请填写统一通行证服务器 ID", InfoBarSeverity.Warning);
+            return;
+        }
+        try
+        {
+            await AppServices.Client.StartTaskAsync("start_nide8_login", new
+            {
+                server_id = sid,
+                username = Nide8User.Text?.Trim() ?? "",
+                password = Nide8Pw.Password ?? "",
+            });
+        }
+        catch (Exception ex) { AppServices.Toast?.Invoke("登录失败", ex.Message, InfoBarSeverity.Error); }
     }
 }

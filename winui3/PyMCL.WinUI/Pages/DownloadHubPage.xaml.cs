@@ -13,6 +13,7 @@ public sealed partial class DownloadHubPage : UserControl
     private readonly CatalogPage _data = new(CatalogKind.Datapack);
     private readonly CatalogPage _res = new(CatalogKind.ResourcePack);
     private readonly CatalogPage _shader = new(CatalogKind.Shader);
+    private readonly CatalogPage _world = new(CatalogKind.World);
     private readonly JavaPage _java = new();
     private readonly Dictionary<string, FrameworkElement> _pages = new();
     private string _current = "原版游戏";
@@ -28,6 +29,7 @@ public sealed partial class DownloadHubPage : UserControl
         _pages["数据包"] = _data;
         _pages["资源包"] = _res;
         _pages["光影包"] = _shader;
+        _pages["世界"] = _world;
         _pages["Java"] = _java;
         ShowCategory("原版游戏");
     }

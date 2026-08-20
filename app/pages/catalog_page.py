@@ -5,13 +5,16 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget,
 )
+from PySide6.QtGui import QGuiApplication
 from qfluentwidgets import (
-    ComboBox, EditableComboBox, FluentIcon as FIF, LineEdit, PushButton,
-    ScrollArea, TransparentPushButton,
+    ComboBox, EditableComboBox, FluentIcon as FIF, InfoBar, InfoBarPosition, LineEdit, PushButton,
+    ScrollArea, TransparentPushButton, TransparentToolButton,
 )
 
-from ..pcl_chrome import PCL_BLUE, PCL_CARD, PCL_HOVER, PCL_LINE, PCL_MUTED, PCL_TITLE, _icon
+from ..pcl_chrome import Theme, chip_qss, ghost_btn_qss, row_qss, _icon
 from ..widgets import EmptyState, IconTile, InputDialog
+
+_HEART = getattr(FIF, "HEART", FIF.TAG)
 
 try:
     from mclauncher.config import CONFIG
@@ -40,7 +43,7 @@ class PclCard(QFrame):
         super().__init__(parent)
         self.setObjectName("pclCard")
         self.setStyleSheet(
-            f"#pclCard {{ background: {PCL_CARD}; border: 1px solid {PCL_LINE};"
+            f"#pclCard {{ background: {Theme.card}; border: 1px solid {Theme.line};"
             " border-radius: 10px; }"
         )
 
@@ -63,23 +66,20 @@ def _meta_chip(fif, text: str) -> QWidget:
     h.setContentsMargins(0, 0, 0, 0)
     h.setSpacing(3)
     icon = QLabel()
-    icon.setPixmap(_icon(fif, PCL_MUTED, 12))
+    icon.setPixmap(_icon(fif, Theme.muted, 12))
     lab = QLabel(text)
-    lab.setStyleSheet(f"color: {PCL_MUTED}; font-size: 11px; background: transparent;")
+    lab.setStyleSheet(f"color: {Theme.muted}; font-size: 11px; background: transparent;")
     h.addWidget(icon)
     h.addWidget(lab)
     return w
 
 
 class PclResultRow(QFrame):
-    def __init__(self, item: dict, on_install, parent=None):
+    def __init__(self, item: dict, on_install, parent=None, on_fav=None):
         super().__init__(parent)
         self.item = item
         self.setObjectName("pclRow")
-        self.setStyleSheet(
-            "#pclRow { background: transparent; border-bottom: 1px solid #EEF3F7; }"
-            "#pclRow:hover { background: #F5FBFF; }"
-        )
+        self.setStyleSheet(row_qss("pclRow"))
         self.setFixedHeight(88)
         name = item.get("name") or "?"
         desc = (item.get("description") or item.get("summary") or "").strip()
@@ -98,19 +98,18 @@ class PclResultRow(QFrame):
         title_row.setSpacing(6)
         title = QLabel(name)
         title.setStyleSheet(
-            f"color: {PCL_TITLE}; font-size: 14px; font-weight: 700; background: transparent;")
+            f"color: {Theme.title}; font-size: 14px; font-weight: 700; background: transparent;")
         title_row.addWidget(title)
         for tag in tags[:4]:
             chip = QLabel(str(tag))
             chip.setStyleSheet(
-                f"color: {PCL_MUTED}; background: #F0F4F8; border-radius: 3px;"
-                " padding: 1px 6px; font-size: 11px;")
+                chip_qss())
             title_row.addWidget(chip)
         title_row.addStretch(1)
         info.addLayout(title_row)
         if desc:
             d = QLabel(desc[:90])
-            d.setStyleSheet(f"color: {PCL_MUTED}; font-size: 12px; background: transparent;")
+            d.setStyleSheet(f"color: {Theme.muted}; font-size: 12px; background: transparent;")
             info.addWidget(d)
         meta = QHBoxLayout()
         meta.setSpacing(14)
@@ -122,15 +121,16 @@ class PclResultRow(QFrame):
         info.addLayout(meta)
         layout.addLayout(info, 1)
 
-        btn = PushButton("安装")
-        btn.setFixedSize(72, 30)
-        btn.setStyleSheet(
-            f"PushButton {{ border: 1px solid {PCL_BLUE}; color: {PCL_BLUE};"
-            " background: white; border-radius: 4px; }"
-            "PushButton:hover { background: " + PCL_HOVER + "; }"
-        )
+        btn = PushButton("选择版本")
+        btn.setFixedSize(88, 30)
+        btn.setStyleSheet(ghost_btn_qss())
         btn.clicked.connect(lambda: on_install(item, btn))
         layout.addWidget(btn)
+        if on_fav:
+            star = TransparentToolButton(_HEART)
+            star.setToolTip("收藏")
+            star.clicked.connect(lambda: on_fav(item))
+            layout.addWidget(star)
 
 
 MOD_SPEC = {
@@ -243,6 +243,28 @@ DATAPACK_SPEC = {
     "types": ["全部", "生存", "冒险", "装饰"],
 }
 
+WORLD_SPEC = {
+    "object_name": "worldPage",
+    "search_title": "搜索世界",
+    "empty_search": "没有找到相关世界",
+    "empty_installed": "还没有安装世界",
+    "installed_title": "已安装",
+    "local_label": "导入 zip",
+    "local_filter": "世界 (*.zip)",
+    "local_dialog": "选择世界",
+    "link_label": "从链接安装",
+    "link_title": "从链接安装世界",
+    "link_hint": "世界下载链接 (URL)",
+    "link_ph": "https://…/world.zip",
+    "icon": FIF.GLOBE,
+    "search": "search_worlds",
+    "install": "install_world",
+    "list_installed": "list_saves",
+    "delete": "delete_save",
+    "task_prefix": "安装世界",
+    "types": ["全部", "生存", "冒险", "创造"],
+}
+
 
 class PclCatalogPage(QWidget):
     def __init__(self, backend, spec: dict, parent=None):
@@ -303,11 +325,7 @@ class PclCatalogPage(QWidget):
         btns.addStretch(1)
         self.search_btn = PushButton("搜索")
         self.search_btn.setFixedSize(88, 32)
-        self.search_btn.setStyleSheet(
-            f"PushButton {{ border: 1px solid {PCL_BLUE}; color: {PCL_BLUE};"
-            " background: white; border-radius: 4px; }"
-            "PushButton:hover { background: " + PCL_HOVER + "; }"
-        )
+        self.search_btn.setStyleSheet(ghost_btn_qss())
         self.reset_btn = PushButton("重置条件")
         self.reset_btn.setFixedSize(88, 32)
         btns.addWidget(self.search_btn)
@@ -332,10 +350,12 @@ class PclCatalogPage(QWidget):
         self.installed_ver_box.setFixedWidth(160)
         self.installed_ver_box.addItem("实例目录")
         self.installed_ver_box.setVisible(False)
+        self.fav_btn = TransparentPushButton(_HEART, "收藏")
         mode_row.addWidget(self.mode_search)
         mode_row.addWidget(self.mode_installed)
         mode_row.addWidget(self.installed_ver_box)
         mode_row.addStretch(1)
+        mode_row.addWidget(self.fav_btn)
         mode_row.addWidget(self.update_btn)
         rc.addLayout(mode_row)
         scroll = ScrollArea()
@@ -359,17 +379,19 @@ class PclCatalogPage(QWidget):
         self.mode_search.clicked.connect(lambda: self._set_mode("search"))
         self.mode_installed.clicked.connect(lambda: self._set_mode("installed"))
         self.update_btn.clicked.connect(self._check_updates)
+        self.fav_btn.clicked.connect(self._show_favs)
         self.update_btn.setVisible(self.spec.get("list_installed") == "get_installed_mods")
 
         self._search_token = 0
         self._popular_loaded = False
         self._mode = "search"
+        self.setAcceptDrops(True)
         self._reload_instances()
         self._show_idle()
 
     def _lab(self, text: str) -> QLabel:
         lab = QLabel(text)
-        lab.setStyleSheet(f"color: {PCL_MUTED}; font-size: 12px; background: transparent;")
+        lab.setStyleSheet(f"color: {Theme.muted}; font-size: 12px; background: transparent;")
         lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         lab.setFixedWidth(40)
         return lab
@@ -429,17 +451,29 @@ class PclCatalogPage(QWidget):
         query = self.name_edit.text().strip()
         source = self._source()
         type_f = self.type_box.currentText()
+        gv = self.version_box.currentText()
+        extra = {
+            "game_version": "" if (not gv or str(gv).startswith("全部")) else gv,
+            "category": type_f,
+        }
         call_async = getattr(self.backend, "call_async", None)
+
+        def _call():
+            try:
+                return fn(query, source, extra)
+            except TypeError:
+                return fn(query, source)
+
         if callable(call_async):
             self.list_layout.addWidget(EmptyState(self.spec["icon"], "正在搜索…"))
             self.list_layout.addStretch(1)
             call_async(
-                lambda: fn(query, source),
+                _call,
                 lambda rows, t=token, tf=type_f: self._on_search_ok(t, rows, tf),
                 lambda err, t=token: self._on_search_err(t, err),
             )
             return
-        self._on_search_ok(token, fn(query, source), type_f)
+        self._on_search_ok(token, _call(), type_f)
 
     def _on_search_err(self, token, err):
         if token != self._search_token:
@@ -452,22 +486,13 @@ class PclCatalogPage(QWidget):
         if token != self._search_token:
             return
         results = list(results or [])
-        if type_f and type_f != "全部" and self.name_edit.text().strip():
-            q = type_f.lower()
-            filtered = []
-            for row in results:
-                blob = " ".join(str(row.get(k) or "") for k in ("name", "description", "tags")).lower()
-                tags = " ".join(str(t) for t in (row.get("tags") or [])).lower()
-                if q in blob or q in tags:
-                    filtered.append(row)
-            if filtered:
-                results = filtered
+        del type_f
         self._clear_list()
         query = self.name_edit.text().strip()
         if not query:
             head = QLabel("热门推荐")
             head.setStyleSheet(
-                f"color: {PCL_TITLE}; font-size: 13px; font-weight: 700;"
+                f"color: {Theme.title}; font-size: 13px; font-weight: 700;"
                 " background: transparent; padding: 10px 12px 6px 12px;")
             self.list_layout.addWidget(head)
         if not results:
@@ -475,7 +500,7 @@ class PclCatalogPage(QWidget):
             self.list_layout.addStretch(1)
             return
         for row in results:
-            self.list_layout.addWidget(PclResultRow(row, self._install))
+            self.list_layout.addWidget(PclResultRow(row, self._install, on_fav=self._toggle_fav))
         self.list_layout.addStretch(1)
 
     def _set_mode(self, mode: str):
@@ -533,7 +558,10 @@ class PclCatalogPage(QWidget):
                 rows = getter(inst) or []
         elif callable(list_fn):
             names = list_fn(inst) or []
-            rows = [{"filename": n} for n in names]
+            if names and isinstance(names[0], dict):
+                rows = names
+            else:
+                rows = [{"filename": n} for n in names]
         else:
             rows = []
         if not rows:
@@ -549,9 +577,7 @@ class PclCatalogPage(QWidget):
         from qfluentwidgets import SwitchButton, TransparentToolButton
         host = QFrame()
         host.setObjectName("pclRow")
-        host.setStyleSheet(
-            "#pclRow { background: transparent; border-bottom: 1px solid #EEF3F7; }"
-        )
+        host.setStyleSheet(row_qss("pclRow"))
         host.setFixedHeight(52)
         lay = QHBoxLayout(host)
         lay.setContentsMargins(12, 6, 12, 6)
@@ -577,7 +603,9 @@ class PclCatalogPage(QWidget):
                 self.backend.enable_mod(inst, filename, ver)
             else:
                 self.backend.disable_mod(inst, filename, ver)
-        except Exception:
+        except Exception as e:
+            InfoBar.error("切换失败", str(e), parent=self,
+                          position=InfoBarPosition.TOP, duration=4000)
             self.reload_installed()
 
     def _delete_installed(self, filename):
@@ -588,11 +616,29 @@ class PclCatalogPage(QWidget):
             "get_installed_shaders": "delete_shader",
             "get_installed_resourcepacks": "delete_resourcepack",
             "get_installed_datapacks": "delete_datapack",
+            "get_installed_modpacks": "delete_modpack",
+            "list_saves": "delete_save",
         }.get(kind)
-        if fn == "delete_mod":
-            self.backend.delete_mod(inst, filename, self._installed_version())
-        elif fn:
-            getattr(self.backend, fn)(inst, filename)
+        if fn == "delete_modpack":
+            from qfluentwidgets import MessageBox
+            box = MessageBox(
+                "删除整合包实例",
+                f"将删除整个实例「{inst}」及其文件，不可恢复。",
+                self,
+            )
+            box.yesButton.setText("删除实例")
+            box.cancelButton.setText("取消")
+            if not box.exec():
+                return
+        try:
+            if fn == "delete_mod":
+                self.backend.delete_mod(inst, filename, self._installed_version())
+            elif fn:
+                getattr(self.backend, fn)(inst, filename)
+        except Exception as e:
+            InfoBar.error("删除失败", str(e), parent=self,
+                          position=InfoBarPosition.TOP, duration=4000)
+            return
         self.reload_installed()
 
     def _check_updates(self):
@@ -602,6 +648,84 @@ class PclCatalogPage(QWidget):
     def _install(self, item, tile=None):
         if isinstance(item, str):
             item = {"name": item}
+        if item.get("path") or item.get("url"):
+            self._do_install(item, tile)
+            return
+        if not (item.get("slug") or item.get("id")):
+            self._do_install(item, tile)
+            return
+        from .file_pick import FilePickDialog
+        kind = {
+            "install_mod": "mod",
+            "install_modpack": "modpack",
+            "install_shader": "shader",
+            "install_resourcepack": "resourcepack",
+            "install_datapack": "datapack",
+            "install_world": "world",
+        }.get(self.spec.get("install") or "", "mod")
+        gv = self.version_box.currentText()
+        dlg = FilePickDialog(self.backend, item, kind, gv, self)
+        if dlg.exec():
+            extra = dlg.selected_extra()
+            if kind == "datapack":
+                extra = self._maybe_datapack_save(extra)
+            self._do_install(extra, tile)
+
+    def _maybe_datapack_save(self, extra):
+        try:
+            saves = self.backend.list_saves(self._current_instance()) or []
+        except Exception:
+            return extra
+        names = [s.get("name") for s in saves if s.get("name")]
+        if not names:
+            return extra
+        from ..widgets import ComboDialog
+        dlg = ComboDialog("装进存档", "可选：把数据包装进某个存档，或只放到 datapacks 文件夹。",
+                          ["不装进存档"] + names, "不装进存档", self)
+        if dlg.exec() and dlg.value() and dlg.value() != "不装进存档":
+            extra = dict(extra)
+            extra["save"] = dlg.value()
+        return extra
+
+    def _toggle_fav(self, item):
+        try:
+            self.backend.toggle_favorite(item)
+            InfoBar.success("已更新收藏", item.get("name") or "", parent=self,
+                            position=InfoBarPosition.TOP, duration=1800)
+        except Exception as e:
+            InfoBar.error("收藏失败", str(e), parent=self,
+                          position=InfoBarPosition.TOP, duration=3000)
+
+    def _show_favs(self):
+        self._clear_list()
+        rows = self.backend.catalog_favorites() or []
+        if not rows:
+            self.list_layout.addWidget(EmptyState(_HEART, "还没有收藏"))
+            self.list_layout.addStretch(1)
+            return
+        for row in rows:
+            self.list_layout.addWidget(PclResultRow(row, self._install, on_fav=self._toggle_fav))
+        self.list_layout.addStretch(1)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        clip = QGuiApplication.clipboard().text().strip()
+        win = self.window()
+        seen = getattr(win, "_clip_seen", None) if win is not None else getattr(self, "_clip_seen", None)
+        if not clip or clip == seen:
+            return
+        low = clip.lower()
+        if not any(x in low for x in ("modrinth.com", "curseforge.com")):
+            return
+        if win is not None:
+            win._clip_seen = clip
+        self._clip_seen = clip
+        if not self.name_edit.text().strip():
+            self.name_edit.setText(clip)
+        InfoBar.info("识别到剪贴板链接", clip[:96], parent=self,
+                     position=InfoBarPosition.TOP, duration=3500)
+
+    def _do_install(self, item, tile=None):
         name = item.get("name") or ""
         win = self.window()
         if tile is not None and hasattr(win, "fly_to_tasks"):
@@ -611,7 +735,7 @@ class PclCatalogPage(QWidget):
         extra["instance"] = self._current_instance()
         extra["source"] = item.get("source") or self._source()
         gv = self.version_box.currentText()
-        extra["game_version"] = "" if (not gv or str(gv).startswith("全部")) else gv
+        extra.setdefault("game_version", "" if (not gv or str(gv).startswith("全部")) else gv)
         if callable(fn):
             try:
                 if self.spec.get("install") == "install_modpack":
@@ -630,6 +754,16 @@ class PclCatalogPage(QWidget):
                 log("待后端对接")
                 progress(1, 1, "待对接")
             start(f"{self.spec['task_prefix']} {name}".strip(), _pending)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path:
+                self._do_install({"name": path, "path": path}, self.local_btn)
 
     def _install_from_link(self):
         dlg = InputDialog(self.spec["link_title"], self.spec["link_hint"],
@@ -668,3 +802,12 @@ class ResourcePackPage(PclCatalogPage):
 class DatapackPage(PclCatalogPage):
     def __init__(self, backend, parent=None):
         super().__init__(backend, DATAPACK_SPEC, parent)
+
+
+class WorldPage(PclCatalogPage):
+    def __init__(self, backend, parent=None):
+        super().__init__(backend, WORLD_SPEC, parent)
+        self.source_box.blockSignals(True)
+        self.source_box.clear()
+        self.source_box.addItems(["CurseForge"])
+        self.source_box.blockSignals(False)

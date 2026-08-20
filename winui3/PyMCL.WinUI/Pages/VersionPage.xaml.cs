@@ -61,7 +61,14 @@ public sealed partial class VersionPage : UserControl
         InstanceBox.SelectionChanged += Instance_Changed;
     }
 
-    private void Filter_Changed(object sender, object e) => Refill();
+    private int _limit = 80;
+    private bool _firstPaint = true;
+
+    private void Filter_Changed(object sender, object e)
+    {
+        _limit = 80;
+        Refill();
+    }
 
     private async void Instance_Changed(object sender, SelectionChangedEventArgs e) => await ReloadInstalled();
 
@@ -71,20 +78,29 @@ public sealed partial class VersionPage : UserControl
         var vtype = "all";
         if (TypePivot.SelectedItem is RadioButton rb && rb.Tag is string tag)
             vtype = tag;
-        var rows = _all.Where(v =>
+        var filtered = _all.Where(v =>
             (string.IsNullOrEmpty(text) || v.Version.ToLowerInvariant().Contains(text)) &&
             (vtype == "all"
                 || (vtype == "old_alpha" && (v.Type == "old_alpha" || v.Type == "old_beta"))
-                || v.Type == vtype)).Take(80).ToList();
+                || v.Type == vtype)).ToList();
+        var rows = filtered.Take(_limit).ToList();
         var cards = new List<UIElement>();
         if (rows.Count == 0)
             cards.Add(new TextBlock { Text = "没有匹配的版本", Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)), Margin = new Thickness(8) });
         foreach (var v in rows)
             cards.Add(BuildCard(v));
+        var pop = _firstPaint;
+        _firstPaint = false;
         for (var i = 0; i < cards.Count; i++)
         {
-            if (cards[i] is Border)
-                Motion.CardEnter(cards[i], Math.Min(i, 14) * 32);
+            if (cards[i] is Border b)
+                Motion.CardEnter(b, Math.Min(i, 8) * 24, 1.045, pop && i < 10);
+        }
+        if (filtered.Count > _limit)
+        {
+            var more = new Button { Content = $"加载更多（还有 {filtered.Count - _limit}）", HorizontalAlignment = HorizontalAlignment.Stretch, Margin = new Thickness(0, 8, 0, 0) };
+            more.Click += (_, _) => { _limit += 80; Refill(); };
+            cards.Add(more);
         }
         VersionGrid.ItemsSource = cards;
     }
@@ -121,17 +137,7 @@ public sealed partial class VersionPage : UserControl
         Grid.SetRow(date, 1);
         g.Children.Add(date);
         var btn = new Button { Content = "安装", Height = 30, HorizontalAlignment = HorizontalAlignment.Right };
-        btn.Click += async (_, _) =>
-        {
-            if (AppServices.Client is null) return;
-            var loader = LoaderBox.SelectedItem as string ?? "无";
-            var inst = InstanceBox.SelectedItem as string ?? "default";
-            try
-            {
-                await AppServices.Client.StartTaskAsync("install_game", new { version = info.Version, loader, instance = inst });
-            }
-            catch (Exception ex) { AppServices.Toast?.Invoke("安装失败", ex.Message, InfoBarSeverity.Error); }
-        };
+        btn.Click += async (_, _) => await OpenInstallWizard(info);
         Grid.SetRow(btn, 3);
         g.Children.Add(btn);
         card.Child = g;
@@ -237,8 +243,9 @@ public sealed partial class VersionPage : UserControl
         var iso = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch };
         iso.Items.Add("关闭（共用实例目录）");
         iso.Items.Add("隔离存档");
+        iso.Items.Add("隔离 Mod 与配置");
         iso.Items.Add("隔离全部");
-        iso.SelectedIndex = data?.Isolation == "all" ? 2 : data?.Isolation == "saves" ? 1 : 0;
+        iso.SelectedIndex = data?.Isolation == "all" ? 3 : data?.Isolation == "mods" ? 2 : data?.Isolation == "saves" ? 1 : 0;
         var mem = new TextBox { PlaceholderText = "留空则用启动页", Text = data?.MemoryMb?.ToString() ?? "" };
         var jvm = new TextBox { PlaceholderText = "JVM 参数", Text = data?.JvmArgs ?? "", AcceptsReturn = true };
         var server = new TextBox { PlaceholderText = "直连服务器", Text = data?.Server ?? "" };
@@ -246,6 +253,21 @@ public sealed partial class VersionPage : UserControl
         var pre = new TextBox { PlaceholderText = "启动前命令", Text = data?.PreLaunch ?? "" };
         var post = new TextBox { PlaceholderText = "退出后命令", Text = data?.PostLaunch ?? "" };
         var box = new StackPanel { Spacing = 8, MinWidth = 360 };
+        var nide = new TextBox { PlaceholderText = "统一通行证服务器 ID", Text = data?.Nide8Id ?? "" };
+        var gc = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch };
+        gc.Items.Add("跟随全局");
+        gc.Items.Add("G1（推荐）");
+        gc.Items.Add("G1");
+        gc.Items.Add("调优 G1");
+        gc.Items.Add("ZGC");
+        gc.Items.Add("不指定");
+        var gcMap = new Dictionary<string, int> { ["auto"] = 1, ["g1"] = 2, ["g1_tuned"] = 3, ["zgc"] = 4, ["none"] = 5 };
+        gc.SelectedIndex = data?.Gc != null && gcMap.TryGetValue(data.Gc, out var gi) ? gi : 0;
+        var winMode = new ComboBox();
+        winMode.Items.Add("窗口");
+        winMode.Items.Add("全屏");
+        winMode.SelectedIndex = data?.WindowMode == "maximize" ? 1 : 0;
+        var wait = new CheckBox { Content = "等待启动前命令结束", IsChecked = data?.PreLaunchWait != false };
         box.Children.Add(new TextBlock { Text = "隔离" });
         box.Children.Add(iso);
         box.Children.Add(new TextBlock { Text = "内存 MB" });
@@ -258,6 +280,11 @@ public sealed partial class VersionPage : UserControl
         box.Children.Add(new TextBlock { Text = "启动前 / 退出后" });
         box.Children.Add(pre);
         box.Children.Add(post);
+        box.Children.Add(new TextBlock { Text = "统一通行证 / GC / 窗口" });
+        box.Children.Add(nide);
+        box.Children.Add(gc);
+        box.Children.Add(winMode);
+        box.Children.Add(wait);
         var dlg = new ContentDialog
         {
             Title = "版本设置 · " + version,
@@ -267,7 +294,8 @@ public sealed partial class VersionPage : UserControl
             XamlRoot = XamlRoot,
         };
         if (await dlg.ShowAsync() != ContentDialogResult.Primary) return;
-        var isoKey = iso.SelectedIndex == 2 ? "all" : iso.SelectedIndex == 1 ? "saves" : "none";
+        var isoKey = iso.SelectedIndex == 3 ? "all" : iso.SelectedIndex == 2 ? "mods" : iso.SelectedIndex == 1 ? "saves" : "none";
+        var gcKey = gc.SelectedIndex switch { 1 => "auto", 2 => "g1", 3 => "g1_tuned", 4 => "zgc", 5 => "none", _ => "" };
         try
         {
             await AppServices.Client.CallAsync("save_version_settings", new
@@ -283,10 +311,82 @@ public sealed partial class VersionPage : UserControl
                     port = port.Text ?? "",
                     pre_launch = pre.Text ?? "",
                     post_launch = post.Text ?? "",
+                    nide8_id = nide.Text ?? "",
+                    gc = gcKey,
+                    window_mode = winMode.SelectedIndex == 1 ? "maximize" : "window",
+                    pre_launch_wait = wait.IsChecked == true,
                 },
             });
             AppServices.Toast?.Invoke("已保存", "版本设置已写入", InfoBarSeverity.Success);
         }
         catch (Exception ex) { AppServices.Toast?.Invoke("保存失败", ex.Message, InfoBarSeverity.Error); }
+    }
+
+    private async Task OpenInstallWizard(VersionRow info)
+    {
+        if (AppServices.Client is null) return;
+        var primary = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch };
+        foreach (var n in new[] { "无（原版）", "Fabric", "Forge", "Quilt", "NeoForge" })
+            primary.Items.Add(n);
+        primary.SelectedIndex = 0;
+        var loaderVer = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch };
+        loaderVer.Items.Add("最新");
+        loaderVer.SelectedIndex = 0;
+        var of = new CheckBox { Content = "同时安装 OptiFine（Forge / 原版）" };
+        var ll = new CheckBox { Content = "同时安装 LiteLoader（1.7–1.12）" };
+        var skip = new CheckBox { Content = "跳过资源文件校验" };
+        async void ReloadLoaders()
+        {
+            var name = primary.SelectedItem as string ?? "无";
+            of.IsEnabled = name.StartsWith("无") || name == "Forge";
+            if (!of.IsEnabled) of.IsChecked = false;
+            var loader = name.StartsWith("无") ? "" : name;
+            loaderVer.Items.Clear();
+            loaderVer.Items.Add("最新");
+            loaderVer.SelectedIndex = 0;
+            if (string.IsNullOrEmpty(loader) || AppServices.Client is null) return;
+            try
+            {
+                var rows = await AppServices.Client.CallAsync<List<LoaderVer>>("list_loader_versions", new { mc_version = info.Version, loader }) ?? new();
+                foreach (var r in rows.Take(30))
+                    loaderVer.Items.Add(string.IsNullOrEmpty(r.Label) ? r.Id : r.Label);
+            }
+            catch { }
+        }
+        primary.SelectionChanged += (_, _) => ReloadLoaders();
+        var box = new StackPanel { Spacing = 8, MinWidth = 380 };
+        box.Children.Add(new TextBlock { Text = "主加载器" });
+        box.Children.Add(primary);
+        box.Children.Add(new TextBlock { Text = "加载器版本" });
+        box.Children.Add(loaderVer);
+        box.Children.Add(of);
+        box.Children.Add(ll);
+        box.Children.Add(skip);
+        var dlg = new ContentDialog
+        {
+            Title = "安装 " + info.Version,
+            Content = box,
+            PrimaryButtonText = "开始安装",
+            CloseButtonText = "取消",
+            XamlRoot = XamlRoot,
+        };
+        if (await dlg.ShowAsync() != ContentDialogResult.Primary) return;
+        var pname = primary.SelectedItem as string ?? "无（原版）";
+        var loader = pname.StartsWith("无") ? "无" : pname;
+        var lv = loaderVer.SelectedItem as string ?? "最新";
+        if (lv == "最新") lv = "";
+        var extra = new Dictionary<string, object?>
+        {
+            ["optifine"] = of.IsChecked == true,
+            ["liteloader"] = ll.IsChecked == true,
+            ["skip_assets"] = skip.IsChecked == true,
+        };
+        if (!string.IsNullOrEmpty(lv)) extra["loader_version"] = lv;
+        var inst = InstanceBox.SelectedItem as string ?? "default";
+        try
+        {
+            await AppServices.Client.StartTaskAsync("install_game", new { version = info.Version, loader, loader_version = lv, instance = inst, extra });
+        }
+        catch (Exception ex) { AppServices.Toast?.Invoke("安装失败", ex.Message, InfoBarSeverity.Error); }
     }
 }

@@ -24,7 +24,7 @@ from mclauncher.ai.agent import AgentCancelled, run_agent
 from mclauncher.ai.client import AIClientError, HttpCancel
 from mclauncher.ai import store as chat_store
 from mclauncher.ai.defaults import DEFAULT_MODEL
-from ..pcl_chrome import PCL_GREEN, PCL_HOVER, PCL_LINE, PCL_MUTED, PCL_TEXT
+from ..pcl_chrome import Theme, PCL_GREEN, PCL_HOVER, PCL_LINE, PCL_MUTED, PCL_TEXT
 
 _STOP = {"已停止", "已取消"}
 _CHIPS = ("下一款游戏 1.20.1 Fabric", "装钠和光影", "启动闪退了帮我看")
@@ -147,11 +147,11 @@ class Bubble(QFrame):
         mine = role == "user"
         err = role == "error"
         if mine:
-            bg = "#E8F6EF"
+            bg = "#1E3A2E" if Theme.dark else "#E8F6EF"
         elif err:
-            bg = "#FDECEC"
+            bg = "#3A1E1E" if Theme.dark else "#FDECEC"
         else:
-            bg = "#FFFFFF"
+            bg = Theme.card
         self.setStyleSheet(
             "Bubble { background: %s; border: 1px solid %s; border-radius: 10px; }"
             % (bg, "#E07A7A" if err else PCL_LINE)
@@ -508,7 +508,7 @@ class AiPage(QWidget):
 
         box = QFrame()
         box.setStyleSheet(
-            f"QFrame {{ background: #FFFFFF; border: 1px solid {PCL_LINE}; border-radius: 10px; }}"
+            f"QFrame {{ background: {Theme.card}; border: 1px solid {Theme.line}; border-radius: 10px; }}"
         )
         row = QHBoxLayout(box)
         row.setContentsMargins(10, 8, 10, 8)

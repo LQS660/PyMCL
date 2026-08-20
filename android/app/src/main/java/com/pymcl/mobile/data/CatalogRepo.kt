@@ -35,6 +35,7 @@ object CatalogRepo {
     fun searchKind(kind: String, query: String): List<CatalogHit> {
         val q = query.trim()
         if (q.isEmpty()) return emptyList()
+        if (kind == "世界") return searchWorlds(q)
         val type = when (kind) {
             "整合包" -> "modpack"
             "资源包" -> "resourcepack"
@@ -57,6 +58,38 @@ object CatalogRepo {
                 source = "Modrinth",
                 author = o.optString("author"),
                 projectId = o.optString("project_id"),
+            )
+        }
+    }
+
+    fun searchWorlds(query: String): List<CatalogHit> {
+        val q = query.trim()
+        if (q.isEmpty()) return emptyList()
+        val enc = java.net.URLEncoder.encode(q, "UTF-8")
+        val urls = listOf(
+            "${Paths.MCIM}/curseforge/v1/mods/search?gameId=432&classId=17&pageSize=20&searchFilter=$enc",
+            "${Paths.BMCL}/curseforge/v1/mods/search?gameId=432&classId=17&pageSize=20&searchFilter=$enc",
+        )
+        var body = ""
+        for (url in urls) {
+            try {
+                body = Http.getText(url)
+                break
+            } catch (_: Exception) {
+            }
+        }
+        if (body.isEmpty()) return emptyList()
+        val hits = JSONObject(body).optJSONArray("data") ?: return emptyList()
+        return (0 until hits.length()).map { i ->
+            val o = hits.getJSONObject(i)
+            CatalogHit(
+                name = o.optString("name"),
+                slug = o.optString("slug"),
+                description = o.optString("summary"),
+                downloads = o.optLong("downloadCount"),
+                source = "CurseForge",
+                author = o.optJSONArray("authors")?.optJSONObject(0)?.optString("name").orEmpty(),
+                projectId = o.opt("id")?.toString().orEmpty(),
             )
         }
     }

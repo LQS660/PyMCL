@@ -50,7 +50,7 @@ public static class Motion
             To = to,
             Duration = dur,
             EasingFunction = ease,
-            EnableDependentAnimation = true,
+        EnableDependentAnimation = false,
         };
         Storyboard.SetTarget(a, target);
         Storyboard.SetTargetProperty(a, prop);
@@ -159,10 +159,30 @@ public static class Motion
         el.PointerReleased += (_, _) => _ = AnimateAsync(el, null, null, -7, scale, 120);
     }
 
-    public static void CardEnter(UIElement el, int delayMs = 0, double hoverScale = 1.045)
+    public static void ResetVisual(UIElement? el)
+    {
+        if (el is null) return;
+        var t = Tx(el);
+        el.Opacity = 1;
+        t.TranslateX = 0;
+        t.TranslateY = 0;
+        t.ScaleX = 1;
+        t.ScaleY = 1;
+    }
+
+    public static void CardEnter(UIElement el, int delayMs = 0, double hoverScale = 1.045, bool popIn = true)
     {
         EnableHoverLift(el, hoverScale);
-        PopIn(el, delayMs);
+        if (popIn)
+            PopIn(el, delayMs);
+        else
+        {
+            el.Opacity = 1;
+            var t = Tx(el);
+            t.TranslateY = 0;
+            t.ScaleX = 1;
+            t.ScaleY = 1;
+        }
     }
 
     public static async Task PulseOnceAsync(UIElement el)

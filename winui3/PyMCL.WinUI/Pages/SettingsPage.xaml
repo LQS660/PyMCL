@@ -29,6 +29,7 @@
                         <ComboBox x:Name="IsoBox" HorizontalAlignment="Left" Width="260">
                             <ComboBoxItem Content="关闭（共用实例目录）" Tag="none"/>
                             <ComboBoxItem Content="隔离存档" Tag="saves"/>
+                            <ComboBoxItem Content="隔离 Mod 与配置" Tag="mods"/>
                             <ComboBoxItem Content="隔离全部" Tag="all"/>
                         </ComboBox>
                     </StackPanel>
@@ -60,6 +61,52 @@
                             <TextBlock Text="×" VerticalAlignment="Center"/>
                             <NumberBox x:Name="HeightSpin" Minimum="240" Maximum="4320" Value="480" Width="100" SpinButtonPlacementMode="Compact"/>
                         </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <TextBlock Text="启动与下载" FontWeight="SemiBold"/>
+            <Border x:Name="CardLaunch" Style="{StaticResource FluentCard}" Padding="16" Translation="0,0,16">
+                <StackPanel Spacing="14">
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="启动器可见性"/>
+                        <ComboBox x:Name="VisBox" HorizontalAlignment="Left" Width="260">
+                            <ComboBoxItem Content="保持显示" Tag="keep"/>
+                            <ComboBoxItem Content="最小化" Tag="minimize"/>
+                            <ComboBoxItem Content="隐藏" Tag="hide"/>
+                            <ComboBoxItem Content="隐藏，退出后重开" Tag="hide_reopen"/>
+                            <ComboBoxItem Content="关闭启动器" Tag="close"/>
+                        </ComboBox>
+                    </StackPanel>
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="内存回收器"/>
+                        <ComboBox x:Name="GcBox" HorizontalAlignment="Left" Width="260">
+                            <ComboBoxItem Content="G1（推荐）" Tag="auto"/>
+                            <ComboBoxItem Content="G1" Tag="g1"/>
+                            <ComboBoxItem Content="调优 G1" Tag="g1_tuned"/>
+                            <ComboBoxItem Content="ZGC" Tag="zgc"/>
+                            <ComboBoxItem Content="不指定" Tag="none"/>
+                        </ComboBox>
+                    </StackPanel>
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="下载限速 (KB/s)"/>
+                        <TextBlock Text="0 表示不限制" Foreground="#888888" FontSize="12"/>
+                        <NumberBox x:Name="LimitSpin" Minimum="0" Maximum="102400" Value="0" HorizontalAlignment="Left" Width="140" SpinButtonPlacementMode="Compact"/>
+                    </StackPanel>
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="启动页主页"/>
+                        <ComboBox x:Name="HomeBox" HorizontalAlignment="Left" Width="260">
+                            <ComboBoxItem Content="Minecraft 新闻" Tag="news"/>
+                            <ComboBoxItem Content="本地 HTML" Tag="custom"/>
+                            <ComboBoxItem Content="空白" Tag="blank"/>
+                        </ComboBox>
+                    </StackPanel>
+                    <TextBox x:Name="HomePath" Header="自定义主页 HTML" PlaceholderText="本地 .html 路径"/>
+                    <StackPanel Spacing="4">
+                        <Grid>
+                            <TextBlock Text="启动时检查更新" VerticalAlignment="Center" Margin="0,0,120,0" TextWrapping="Wrap"/>
+                            <ToggleSwitch x:Name="AutoUpd" HorizontalAlignment="Right" IsOn="True"/>
+                        </Grid>
                     </StackPanel>
                 </StackPanel>
             </Border>
@@ -109,6 +156,7 @@
                 <Button Content="检查更新" Click="Update_Click"/>
                 <Button Content="清理文件" Click="Clean_Click"/>
                 <Button Content="全局 Mod" Click="GlobalMods_Click"/>
+                <Button Content="帮助" Click="Help_Click"/>
             </StackPanel>
             <TextBlock x:Name="RootLabel" Foreground="#888888" FontSize="12" TextWrapping="Wrap"/>
         </StackPanel>

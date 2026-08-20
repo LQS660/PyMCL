@@ -243,7 +243,11 @@ class DownloadDock(SimpleCardWidget):
             self.status.setText("✔ 全部完成" if success else (message or "已结束"))
             self.speed.setText("")
             self.progress.setValue(100 if success else self.progress.value())
-            self.hide()
+            parent = self.parent()
+            if parent and hasattr(parent, "_place_download_dock"):
+                parent._place_download_dock()
+            else:
+                self.hide()
             return
         self.title.setText(f"下载任务（{n}）")
         self._current = next(iter(self._active))

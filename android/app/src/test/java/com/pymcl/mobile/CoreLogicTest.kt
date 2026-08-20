@@ -100,6 +100,7 @@ class CoreLogicTest {
         assertEquals(emptyList<Any>(), CatalogRepo.searchKind("mod", ""))
         assertEquals(emptyList<Any>(), CatalogRepo.searchKind("整合包", "   "))
         assertEquals(emptyList<Any>(), CatalogRepo.searchKind("资源包", "\t"))
+        assertEquals(emptyList<Any>(), CatalogRepo.searchKind("世界", ""))
     }
 
     @Test

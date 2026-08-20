@@ -16,6 +16,7 @@
                 <SelectorBarItem Text="数据包" Tag="数据包"/>
                 <SelectorBarItem Text="资源包" Tag="资源包"/>
                 <SelectorBarItem Text="光影包" Tag="光影包"/>
+                <SelectorBarItem Text="世界" Tag="世界"/>
                 <SelectorBarItem Text="Java" Tag="Java"/>
             </SelectorBar>
         </ScrollViewer>

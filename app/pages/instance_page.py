@@ -47,13 +47,17 @@ class InstanceCard(SimpleCardWidget):
         delete_btn.setToolTip("删除实例")
         export_btn = TransparentToolButton(FIF.SHARE if hasattr(FIF, "SHARE") else FIF.DOWNLOAD)
         export_btn.setToolTip("导出为 .mrpack")
+        saves_btn = TransparentToolButton(FIF.PHOTO)
+        saves_btn.setToolTip("存档 / 截图")
         open_btn.clicked.connect(lambda: page.open_folder(info["name"]))
         java_btn.clicked.connect(lambda: page.pick_java(info["name"]))
         rename_btn.clicked.connect(lambda: page.rename(info["name"]))
         delete_btn.clicked.connect(lambda: page.delete(info["name"]))
         export_btn.clicked.connect(lambda: page.export_pack(info["name"]))
+        saves_btn.clicked.connect(lambda: page.open_saves(info["name"]))
         actions.addStretch(1)
         actions.addWidget(open_btn)
+        actions.addWidget(saves_btn)
         actions.addWidget(java_btn)
         actions.addWidget(rename_btn)
         actions.addWidget(export_btn)
@@ -214,6 +218,10 @@ class InstancePage(QWidget):
             self.backend.open_instance_folder(name)
         except Exception as e:
             MessageBox("无法打开", str(e), self).exec()
+
+    def open_saves(self, name: str):
+        from .saves_dialog import SavesDialog
+        SavesDialog(self.backend, name, "", self).exec()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

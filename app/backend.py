@@ -128,6 +128,8 @@ class BackendAPI(QObject):
     login_status = Signal(str)
     ui_changed = Signal()
     task_count_changed = Signal(int)
+    game_started = Signal()
+    game_exited = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -380,10 +382,18 @@ class BackendAPI(QObject):
     # 对外 API（异步任务）
     # ==================================================================
     def install_game(self, version: str, loader: str = "无", loader_version: str = "",
-                     instance: str = "") -> str:
+                     instance: str = "", extra: dict | None = None) -> str:
         inst = instance or CONFIG.get("default_instance", "default")
-        title = f"安装游戏 {version}" if loader in ("", "无") else f"安装游戏 {version} + {loader}"
-        return self.start_task(title, self._install_game_impl, version, loader, loader_version, inst)
+        extra = extra or {}
+        bits = [version]
+        if loader and loader not in ("", "无"):
+            bits.append(loader)
+        if extra.get("optifine"):
+            bits.append("OptiFine")
+        if extra.get("liteloader"):
+            bits.append("LiteLoader")
+        title = "安装游戏 " + " + ".join(bits)
+        return self.start_task(title, self._install_game_impl, version, loader, loader_version, inst, extra)
 
     def install_modpack(self, name: str, source: str = "Modrinth", extra: dict | None = None) -> str:
         return self.start_task(f"安装整合包 {Path(name).name}", self._install_modpack_impl,
@@ -404,6 +414,134 @@ class BackendAPI(QObject):
     def install_datapack(self, name: str, instance: str = "default", extra: dict | None = None) -> str:
         return self.start_task(f"安装数据包 {Path(str(name)).name}", self._install_content_impl,
                                "datapack", name, instance, extra or {})
+
+    def install_world(self, name: str, instance: str = "default", extra: dict | None = None) -> str:
+        return self.start_task(f"安装世界 {Path(str(name)).name}", self._install_world_impl,
+                               name, instance, extra or {})
+
+    def list_catalog_files(self, extra: dict | None = None) -> list[dict]:
+        from mclauncher.catalog_files import list_project_files
+        return list_project_files(DownloadManager(threads=2), extra or {})
+
+    def list_loader_versions(self, mc_version: str, loader: str) -> list[dict]:
+        from mclauncher.loader_meta import list_loader_versions
+        return list_loader_versions(DownloadManager(threads=2), mc_version, loader)
+
+    def search_worlds(self, query: str, source: str = "CurseForge", extra: dict | None = None) -> list[dict]:
+        from mclauncher import worlds as worlds_mod
+        extra = dict(extra or {})
+        extra.setdefault("source", source)
+        return worlds_mod.search_worlds(DownloadManager(threads=2), query, extra)
+
+    def rename_version(self, instance: str, version: str, new_id: str) -> str:
+        from mclauncher import version_ops as vops
+        out = vops.rename_version(self._instance(instance), version, new_id)
+        self.ui_changed.emit()
+        return out
+
+    def copy_version(self, instance: str, version: str, new_id: str) -> str:
+        from mclauncher import version_ops as vops
+        out = vops.copy_version(self._instance(instance), version, new_id)
+        self.ui_changed.emit()
+        return out
+
+    def hide_version(self, instance: str, version: str, hidden: bool = True) -> dict:
+        from mclauncher import version_ops as vops
+        out = vops.set_hidden(self._instance(instance), version, hidden)
+        self.ui_changed.emit()
+        return out
+
+    def open_version_folder(self, instance: str, version: str = "", which: str = "root") -> str:
+        from mclauncher import version_ops as vops
+        return vops.open_folder(self._instance(instance), version, which)
+
+    def export_launch_script(self, instance: str, version: str, dest: str = "") -> str:
+        return self.start_task(f"导出启动脚本 {version}", self._export_bat_impl, instance, version, dest)
+
+    def list_saves(self, instance: str, version: str = "") -> list[dict]:
+        from mclauncher import saves as saves_mod
+        return saves_mod.list_saves(self._instance(instance), version)
+
+    def delete_save(self, instance: str, name: str, version: str = ""):
+        from mclauncher import saves as saves_mod
+        saves_mod.delete_save(self._instance(instance), name, version)
+        self.ui_changed.emit()
+
+    def open_save(self, instance: str, name: str, version: str = "") -> str:
+        from mclauncher import saves as saves_mod
+        return saves_mod.open_save(self._instance(instance), name, version)
+
+    def install_datapack_into_save(self, instance: str, filename: str, save_name: str,
+                                   version: str = "") -> str:
+        from mclauncher import saves as saves_mod
+        return saves_mod.install_datapack_into_save(self._instance(instance), filename, save_name, version)
+
+    def list_media(self, instance: str, kind: str, version: str = "") -> list[dict]:
+        from mclauncher import saves as saves_mod
+        return saves_mod.list_media(self._instance(instance), kind, version)
+
+    def open_media(self, path: str) -> bool:
+        return bool(open_path(path))
+
+    def delete_modpack(self, instance: str, filename: str = ""):
+        inst = self._instance(instance)
+        meta = inst.meta() or {}
+        pack = meta.get("modpack")
+        if not isinstance(pack, dict) or not pack.get("name"):
+            raise InstanceError("该实例没有已安装整合包")
+        inst.delete()
+        self.ui_changed.emit()
+
+    def list_global_mods(self) -> list[dict]:
+        from mclauncher import global_mods as gm
+        return gm.list_entries()
+
+    def set_global_mod_enabled(self, filename: str, enabled: bool) -> str:
+        from mclauncher import global_mods as gm
+        name = gm.set_enabled(filename, enabled)
+        self.ui_changed.emit()
+        return name
+
+    def help_articles(self) -> list[dict]:
+        from mclauncher.help_content import list_articles
+        return list_articles()
+
+    def help_article(self, article_id: str) -> dict:
+        from mclauncher.help_content import get_article
+        return get_article(article_id)
+
+    def start_nide8_login(self, server_id: str, username: str, password: str) -> str:
+        return self.start_task("统一通行证登录", self._nide8_login_impl, server_id, username, password)
+
+    def catalog_favorites(self) -> list:
+        return list(CONFIG.get("catalog_favorites") or [])
+
+    def toggle_favorite(self, item: dict) -> list:
+        rows = list(CONFIG.get("catalog_favorites") or [])
+        key = (str(item.get("source") or ""), str(item.get("slug") or item.get("id") or item.get("name") or ""))
+        kept = []
+        found = False
+        for r in rows:
+            rk = (str(r.get("source") or ""), str(r.get("slug") or r.get("id") or r.get("name") or ""))
+            if rk == key:
+                found = True
+                continue
+            kept.append(r)
+        if not found:
+            kept.append({
+                "name": item.get("name"), "source": item.get("source"),
+                "slug": item.get("slug"), "id": item.get("id"),
+            })
+        CONFIG.set("catalog_favorites", kept)
+        CONFIG.save()
+        return kept
+
+    def set_game_dir(self, path: str):
+        p = Path(path).expanduser()
+        CONFIG.set("instances_dir", str(p) if p.is_absolute() else path)
+        CONFIG.save()
+        self.ui_changed.emit()
+        return str(CONFIG.instances_dir)
 
     def download_java(self, major: str) -> str:
         return self.start_task(f"下载 Java {major}", self._download_java_impl, major)
@@ -628,6 +766,19 @@ class BackendAPI(QObject):
             "ui_dark": bool(CONFIG.get("ui_dark", False)),
             "ui_background": CONFIG.get("ui_background") or "",
             "global_mods_dir": CONFIG.get("global_mods_dir") or "",
+            "launcher_visibility": CONFIG.get("launcher_visibility") or "keep",
+            "gc_preset": CONFIG.get("gc_preset") or "auto",
+            "download_limit_kbps": int(CONFIG.get("download_limit_kbps") or 0),
+            "auto_check_update": bool(CONFIG.get("auto_check_update", True)),
+            "custom_homepage": CONFIG.get("custom_homepage") or "",
+            "homepage_mode": CONFIG.get("homepage_mode") or "news",
+            "window_mode": CONFIG.get("window_mode") or "window",
+            "skip_assets": bool(CONFIG.get("skip_assets", False)),
+            "first_run": bool(CONFIG.get("first_run", True)),
+            "show_hidden_versions": bool(CONFIG.get("show_hidden_versions", False)),
+            "offline_skin": CONFIG.get("offline_skin") or "default",
+            "instances_dir": str(CONFIG.get("instances_dir") or ".minecraft"),
+            "game_dir": str(CONFIG.instances_dir),
             "root": str(utils.ROOT),
         }
 
@@ -666,7 +817,21 @@ class BackendAPI(QObject):
                               else CONFIG.get("ui_background") or ""),
             "global_mods_dir": (data.get("global_mods_dir") if "global_mods_dir" in data
                                 else CONFIG.get("global_mods_dir") or ""),
+            "launcher_visibility": data.get("launcher_visibility") or CONFIG.get("launcher_visibility") or "keep",
+            "gc_preset": data.get("gc_preset") or CONFIG.get("gc_preset") or "auto",
+            "download_limit_kbps": int(data.get("download_limit_kbps") or 0),
+            "auto_check_update": bool(data.get("auto_check_update", CONFIG.get("auto_check_update", True))),
+            "custom_homepage": data.get("custom_homepage") if "custom_homepage" in data else CONFIG.get("custom_homepage") or "",
+            "homepage_mode": data.get("homepage_mode") or CONFIG.get("homepage_mode") or "news",
+            "window_mode": data.get("window_mode") or CONFIG.get("window_mode") or "window",
+            "skip_assets": bool(data.get("skip_assets", False)),
+            "first_run": bool(data["first_run"]) if "first_run" in data else bool(CONFIG.get("first_run", False)),
+            "offline_skin": data.get("offline_skin") or CONFIG.get("offline_skin") or "default",
         })
+        if "show_hidden_versions" in data:
+            CONFIG.set("show_hidden_versions", bool(data.get("show_hidden_versions")))
+        if "instances_dir" in data and str(data.get("instances_dir") or "").strip():
+            CONFIG.set("instances_dir", str(data.get("instances_dir")).strip())
         if "feedback_url" in data:
             CONFIG.set("feedback_url", (data.get("feedback_url") or "").strip())
         if "feedback_heartbeat" in data:
@@ -739,8 +904,9 @@ class BackendAPI(QObject):
         self.ui_changed.emit()
         return self.accounts.active
 
-    def add_offline_account(self, username: str):
-        acc = self.accounts.offline_account(username)
+    def add_offline_account(self, username: str, skin: str = ""):
+        acc = self.accounts.offline_account(
+            username, skin=skin or CONFIG.get("offline_skin") or "default")
         self.accounts.add_account({**acc, "type": "offline"})
         self.ui_changed.emit()
         return acc["name"]
@@ -863,9 +1029,14 @@ class BackendAPI(QObject):
         rows.sort(key=lambda r: r["date"], reverse=True)
         return rows
 
-    def get_installed_versions(self, instance: str) -> list[str]:
+    def get_installed_versions(self, instance: str, include_hidden: bool = False) -> list[str]:
+        from mclauncher import version_settings as vs
         if instance:
-            return self._instance(instance).installed_ids()
+            ids = self._instance(instance).installed_ids()
+            if include_hidden or CONFIG.get("show_hidden_versions"):
+                return ids
+            inst = self._instance(instance)
+            return [vid for vid in ids if not vs.load(inst, vid).get("hidden")]
         out = []
         for name in list_instances():
             for vid in Instance(name).installed_ids():
@@ -978,7 +1149,7 @@ class BackendAPI(QObject):
         self._pack_cache = rows
         return rows
 
-    def search_mods(self, query: str, source: str) -> list[dict]:
+    def search_mods(self, query: str, source: str, extra: dict | None = None) -> list[dict]:
         src = self._catalog_source(source)
         q = (query or "").strip()
         if not q:
@@ -999,13 +1170,19 @@ class BackendAPI(QObject):
             self._mod_cache = rows
             return rows
         dm = DownloadManager(threads=2)
+        extra = extra or {}
+        gv = extra.get("game_version") or extra.get("version") or ""
+        if isinstance(gv, str) and gv.startswith("全部"):
+            gv = ""
+        from mclauncher.catalog_files import category_facets
+        cats = category_facets(extra.get("category") or extra.get("type") or "")
         try:
             if src == "curseforge":
                 hits = mods_mod.search_curseforge(
                     dm, q, limit=30, api_key=CONFIG.get("curseforge_api_key"),
-                    class_id=mods_mod.CF_CLASS_MOD)
+                    class_id=mods_mod.CF_CLASS_MOD, game_version=gv or None)
             else:
-                hits = mods_mod.search_mods(dm, q, limit=30)
+                hits = mods_mod.search_mods(dm, q, limit=30, game_version=gv or None, categories=cats)
         except Exception:
             hits = []
         rows = []
@@ -1038,8 +1215,9 @@ class BackendAPI(QObject):
             "updated": hit.get("updated") or "",
         }
 
-    def _search_content(self, kind: str, query: str, source: str) -> list[dict]:
+    def _search_content(self, kind: str, query: str, source: str, extra: dict | None = None) -> list[dict]:
         spec = mods_mod.CONTENT_KINDS[kind]
+        extra = extra or {}
         src = (source or "").lower()
         want_mr = src in ("", "全部", "all", "modrinth")
         want_cf = src in ("", "全部", "all") or src.startswith("curse")
@@ -1050,9 +1228,15 @@ class BackendAPI(QObject):
         dm = DownloadManager(threads=2)
         rows = []
         q = (query or "").strip()
+        gv = extra.get("game_version") or extra.get("version") or ""
+        if isinstance(gv, str) and gv.startswith("全部"):
+            gv = ""
+        from mclauncher.catalog_files import category_facets
+        cats = category_facets(extra.get("category") or extra.get("type") or "")
         if want_mr:
             try:
-                hits = mods_mod.search_modrinth_projects(dm, q, spec["mr"], limit=30)
+                hits = mods_mod.search_modrinth_projects(
+                    dm, q, spec["mr"], limit=30, game_version=gv or None, categories=cats)
                 rows.extend(self._content_row(h, "modrinth") for h in hits)
             except Exception:
                 pass
@@ -1062,6 +1246,7 @@ class BackendAPI(QObject):
                     dm, q or None, limit=30,
                     api_key=CONFIG.get("curseforge_api_key"),
                     class_id=spec["cf"],
+                    game_version=gv or None,
                 )
                 for h in hits:
                     row = self._content_row(h, "curseforge")
@@ -1071,14 +1256,14 @@ class BackendAPI(QObject):
                 pass
         return rows
 
-    def search_shaders(self, query: str, source: str) -> list[dict]:
-        return self._search_content("shader", query, source)
+    def search_shaders(self, query: str, source: str, extra: dict | None = None) -> list[dict]:
+        return self._search_content("shader", query, source, extra)
 
-    def search_resourcepacks(self, query: str, source: str) -> list[dict]:
-        return self._search_content("resourcepack", query, source)
+    def search_resourcepacks(self, query: str, source: str, extra: dict | None = None) -> list[dict]:
+        return self._search_content("resourcepack", query, source, extra)
 
-    def search_datapacks(self, query: str, source: str) -> list[dict]:
-        return self._search_content("datapack", query, source)
+    def search_datapacks(self, query: str, source: str, extra: dict | None = None) -> list[dict]:
+        return self._search_content("datapack", query, source, extra)
 
     def get_java_list(self, scan_system: bool = False) -> list[dict]:
         javas = java_mod.all_javas() if scan_system else java_mod.list_installed_javas()
@@ -1141,7 +1326,9 @@ class BackendAPI(QObject):
     # ==================================================================
     # 真实实现
     # ==================================================================
-    def _install_game_impl(self, progress, log, version, loader="无", loader_version="", instance=""):
+    def _install_game_impl(self, progress, log, version, loader="无", loader_version="", instance="", extra=None):
+        extra = dict(extra or {})
+        extra.setdefault("skip_assets", bool(CONFIG.get("skip_assets")))
         inst = self._instance(instance)
         dm = self._dm(progress, log)
         installer = Installer(
@@ -1150,29 +1337,9 @@ class BackendAPI(QObject):
             cancel=dm.cancel,
         )
         log(f"安装到实例 {inst.name}")
-        vid = version
-        if loader and loader != "无":
-            kind = loader.lower()
-            log(f"安装 {loader} （Minecraft {version}）")
-            if kind == "fabric":
-                vid = installer.install_fabric(version, loader_version or None)
-            elif kind == "quilt":
-                vid = installer.install_quilt(version, loader_version or None)
-            elif kind == "forge":
-                vid = installer.install_forge(version, loader_version or None)
-            elif kind == "neoforge":
-                vid = installer.install_neoforge(version, loader_version or None)
-            elif kind == "optifine":
-                vid = installer.install_optifine(version)
-            elif kind == "liteloader":
-                vid = installer.install_liteloader(version)
-            else:
-                raise InstallError(f"未知加载器: {loader}")
-            log(f"加载器安装完成: {vid}")
-        else:
-            log(f"安装原版 {version}")
-            installer.install_version(version)
-            vid = version
+        from mclauncher.game_install import install_game
+        vid = install_game(installer, version, loader, loader_version, extra)
+        log(f"版本安装完成: {vid}")
         self._last_installed = {"instance": inst.name, "version": vid, "loader": loader or "无"}
         iso = CONFIG.get("default_isolation") or "none"
         if iso and iso != "none":
@@ -1220,6 +1387,7 @@ class BackendAPI(QObject):
                 dm, addon_id, inst,
                 api_key=CONFIG.get("curseforge_api_key"),
                 on_progress=on_progress, cancel=dm.cancel, cf_slug=slug,
+                file_id=extra.get("file_id") or extra.get("version_id"),
             )
         else:
             hit = extra if extra.get("slug") else self._lookup_pack(name, source)
@@ -1227,7 +1395,8 @@ class BackendAPI(QObject):
             log(f"从 Modrinth 安装 {hit.get('name') or slug} ({slug})")
             log(f"实例: {inst.name}  路径: {inst.path}")
             meta = modpack_mod.install_mrpack_by_slug(
-                dm, slug, inst, on_progress=on_progress, cancel=dm.cancel)
+                dm, slug, inst, on_progress=on_progress, cancel=dm.cancel,
+                version_id=extra.get("version_id"))
         if isinstance(meta, dict) and meta.get("instance"):
             CONFIG.set("default_instance", meta["instance"])
             CONFIG.save()
@@ -1239,22 +1408,30 @@ class BackendAPI(QObject):
         dm = self._dm(progress, log)
         on_progress = dm.on_progress
         src_kind = (extra.get("source") or "").lower()
+        vid = extra.get("version_id")
+        fid = extra.get("file_id")
+        gv = extra.get("game_version") or extra.get("mc_version")
         if extra.get("path") or extra.get("url"):
             source = extra.get("path") or extra.get("url")
             log(f"安装模组: {source}")
-            mods_mod.install_mod_from_source(dm, str(source), inst, on_progress=on_progress)
+            mods_mod.install_mod_from_source(dm, str(source), inst, on_progress=on_progress,
+                                             version_id=vid)
         elif src_kind.startswith("curse") and extra.get("id"):
-            log(f"从 CurseForge 安装模组 id={extra.get('id')}")
-            mods_mod.install_curseforge_mod(dm, extra["id"], inst, on_progress=on_progress)
+            log(f"从 CurseForge 安装模组 id={extra.get('id')}" + (f" file={fid}" if fid else ""))
+            mods_mod.install_curseforge_mod(
+                dm, extra["id"], inst, mc_version=gv, on_progress=on_progress, file_id=fid)
         else:
             hit = extra if extra.get("slug") else self._lookup_mod(str(name), extra.get("source") or "Modrinth")
             if hit.get("id") and str(hit.get("source") or src_kind).lower().startswith("curse"):
                 log(f"从 CurseForge 安装模组 id={hit.get('id')}")
-                mods_mod.install_curseforge_mod(dm, hit["id"], inst, on_progress=on_progress)
+                mods_mod.install_curseforge_mod(
+                    dm, hit["id"], inst, mc_version=gv, on_progress=on_progress,
+                    file_id=fid or extra.get("version_id"))
             else:
                 slug = hit.get("slug") or name
-                log(f"从 Modrinth 安装模组 {slug}")
-                mods_mod.install_mod_from_source(dm, str(slug), inst, on_progress=on_progress)
+                log(f"从 Modrinth 安装模组 {slug}" + (f" @{vid}" if vid else ""))
+                mods_mod.install_mod_from_source(
+                    dm, str(slug), inst, mc_version=gv, on_progress=on_progress, version_id=vid)
         log("模组安装完成")
 
     def _install_content_impl(self, progress, log, kind, name, instance, extra=None):
@@ -1270,7 +1447,14 @@ class BackendAPI(QObject):
         files = (result or {}).get("files") or []
         log(f"完成: {', '.join(files) or name}")
         if kind == "datapack":
-            log("数据包已放到实例 datapacks 目录，请复制到对应存档的 datapacks 文件夹后进入世界。")
+            save_name = extra.get("save") or extra.get("world")
+            if save_name:
+                from mclauncher import saves as saves_mod
+                dest = saves_mod.install_datapack_into_save(
+                    inst, (files or [name])[0], save_name, extra.get("version") or "")
+                log(f"已放入存档: {dest}")
+            else:
+                log("数据包已放到实例 datapacks 目录。可在存档管理里选世界安装进去。")
 
     def _download_java_impl(self, progress, log, major):
         dm = self._dm(progress, log)
@@ -1294,6 +1478,8 @@ class BackendAPI(QObject):
             return "正版"
         if (props or {}).get("authlib_api") or (acc or {}).get("type") == "authlib":
             return "皮肤站"
+        if (props or {}).get("nide8_id") or (acc or {}).get("type") == "nide8":
+            return "统一通行证"
         return "离线"
 
     def _launch_game_impl(self, progress, log, instance, version, account,
@@ -1306,8 +1492,14 @@ class BackendAPI(QObject):
         log(f"实例 Java 设置: {inst.java_pref()}")
         CONFIG.set("default_instance", inst.name)
         CONFIG.save()
+        from mclauncher import launch_flow, version_settings as vs
+        bound = vs.load(inst, version).get("login_account") or ""
+        if bound:
+            account = bound
+            log(f"该版本绑定账号: {bound}")
         if account == "离线模式" or not account:
-            acc = self.accounts.offline_account(username or "Player")
+            acc = self.accounts.offline_account(
+                username or "Player", skin=CONFIG.get("offline_skin") or "default")
         else:
             acc = self.accounts.get_account(account)
             if not acc:
@@ -1335,7 +1527,9 @@ class BackendAPI(QObject):
             log(f"版本隔离: {prep['settings']['isolation']} → {game_dir}")
         if prep["global_mods"]:
             log(f"已应用 {prep['global_mods']} 个全局模组")
-        launch_flow.run_hook(prep["settings"].get("pre_launch") or "", game_dir, log=log)
+        launch_flow.run_hook(
+            prep["settings"].get("pre_launch") or "", game_dir, log=log,
+            wait=bool(prep.get("pre_launch_wait", True)))
 
         progress(1, 4, "检查 Java")
         vjson = inst.version_json(version) or {}
@@ -1373,6 +1567,17 @@ class BackendAPI(QObject):
             from mclauncher import authlib as authlib_mod
             authlib_mod.ensure_injector(self._dm(progress, log), on_note=log)
             log(f"皮肤站: {props.get('authlib_api')}")
+        if props.get("nide8_id") or prep.get("nide8_id"):
+            from mclauncher import nide8 as nide8_mod
+            nide8_mod.ensure_jar(self._dm(progress, log), on_note=log)
+            if prep.get("nide8_id") and not props.get("nide8_id"):
+                props = dict(props)
+                props["nide8_id"] = prep["nide8_id"]
+            log(f"统一通行证: {props.get('nide8_id')}")
+        mode = prep.get("window_mode") or "window"
+        if mode == "maximize":
+            width, height = max(width or 1280, 1280), max(height or 720, 720)
+            extra_game_args = list(extra_game_args or []) + ["--fullscreen"]
         cmd, _natives, _vdir, game_dir = build_launch_command(
             inst, version, props, java_exe,
             memory_mb=memory_mb, width=width, height=height,
@@ -1388,12 +1593,15 @@ class BackendAPI(QObject):
         proc = GameProcess(cmd, cwd=game_dir, on_line=log, priority=prep["priority"])
         with self._game_lock:
             self._game_proc = proc
+        self.game_started.emit()
+        code = None
         try:
             code = proc.wait()
         finally:
             with self._game_lock:
                 if self._game_proc is proc:
                     self._game_proc = None
+            self.game_exited.emit(code)
         if getattr(worker, "_cancelled", False):
             log("已停止游戏")
             return
@@ -1408,7 +1616,7 @@ class BackendAPI(QObject):
         if report.get("is_crash"):
             log(f"[崩溃分析] {report.get('summary') or report.get('headline')}")
             raise GameCrashError(report)
-        return "游戏已退出"
+        return "已正常退出"
 
     def _microsoft_login_impl(self, progress, log):
         client_id = CONFIG.get("microsoft_client_id") or "00000000402b5328"
@@ -1481,3 +1689,54 @@ class BackendAPI(QObject):
         msg = updater_mod.apply_exe(path)
         log(msg)
         return msg
+
+    def _nide8_login_impl(self, progress, log, server_id, username, password):
+        from mclauncher import nide8 as nide8_mod
+        progress(0, 0, "下载 nide8auth")
+        nide8_mod.ensure_jar(self._dm(progress, log), on_note=log)
+        progress(1, 2, "登录统一通行证")
+        account = nide8_mod.login(server_id, username, password)
+        self.accounts.add_account(account)
+        log(f"统一通行证登录成功：{account.get('name')}")
+        return f"已登录 {account.get('name')}"
+
+    def _install_world_impl(self, progress, log, name, instance, extra=None):
+        from mclauncher import worlds as worlds_mod
+        extra = dict(extra or {})
+        extra.setdefault("name", name)
+        inst = self._instance(instance or extra.get("instance"))
+        dm = self._dm(progress, log)
+        log(f"安装世界到 {inst.name}/saves")
+        result = worlds_mod.install_world(dm, extra, inst, on_progress=dm.on_progress)
+        files = (result or {}).get("files") or []
+        log(f"完成: {', '.join(files) or name}")
+        return f"已安装世界 {', '.join(files) or name}"
+
+    def _export_bat_impl(self, progress, log, instance, version, dest):
+        from mclauncher import launch_flow, version_ops as vops
+        inst = self._instance(instance)
+        acc = self.accounts.get_active() and self.accounts.get_account(self.accounts.active)
+        if not acc:
+            acc = self.accounts.offline_account("Player")
+        props = self.accounts.launch_props(acc)
+        prep = launch_flow.prepare(inst, version, memory_mb=int(CONFIG.get("memory_mb") or 4096))
+        java_exe = java_mod.resolve_launch_java(inst.version_json(version) or {}, on_note=log)
+        if props.get("authlib_api"):
+            from mclauncher import authlib as authlib_mod
+            authlib_mod.ensure_injector(self._dm(progress, log), on_note=log)
+        if props.get("nide8_id"):
+            from mclauncher import nide8 as nide8_mod
+            nide8_mod.ensure_jar(self._dm(progress, log), on_note=log)
+        cmd, _n, _v, gdir = build_launch_command(
+            inst, version, props, java_exe,
+            memory_mb=prep["memory_mb"] or 4096,
+            extra_game_args=prep["extra_game_args"],
+            extra_jvm_args=prep["jvm_args"],
+            game_directory=prep["game_dir"],
+            authlib_api=props.get("authlib_api"),
+        )
+        if not dest:
+            dest = str(utils.ROOT / "exports" / f"launch-{inst.name}-{version}.bat")
+        path = vops.export_launch_bat(Path(dest), cmd, gdir)
+        log(f"已写出 {path}")
+        return path

@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """启动页：渐变 Banner + 大启动按钮 + 配置 + 实时日志。"""
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QTextBrowser, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, ComboBox, FluentIcon as FIF,
     HeaderCardWidget, InfoBar, InfoBarPosition, LineEdit, PlainTextEdit,
@@ -126,6 +126,7 @@ class LaunchPage(QWidget):
 
         news_card = HeaderCardWidget(self)
         news_card.setTitle("Minecraft 新闻")
+        self.news_card = news_card
         self.news_host = QVBoxLayout()
         news_card.viewLayout.addLayout(self.news_host)
         middle.addWidget(news_card)
@@ -165,10 +166,34 @@ class LaunchPage(QWidget):
             item = self.news_host.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+        mode = CONFIG.get("homepage_mode") or "news"
+        if mode == "blank":
+            self.news_card.setTitle("主页")
+            self.news_host.addWidget(CaptionLabel("主页已设为空白"))
+            return
+        if mode == "custom":
+            from pathlib import Path
+            self.news_card.setTitle("自定义主页")
+            path = CONFIG.get("custom_homepage") or ""
+            browser = QTextBrowser()
+            browser.setOpenExternalLinks(True)
+            p = Path(path) if path else None
+            if p and p.is_file():
+                if p.suffix.lower() in (".html", ".htm"):
+                    browser.setSource(QUrl.fromLocalFile(str(p.resolve())))
+                else:
+                    browser.setPlainText(p.read_text(encoding="utf-8", errors="replace"))
+            else:
+                browser.setPlainText("未设置自定义主页。到设置 → 启动页主页 填写本地 HTML 路径。")
+            self.news_host.addWidget(browser)
+            return
+        self.news_card.setTitle("Minecraft 新闻")
         cached = self.backend.cached_news()
         self._fill_news(cached)
 
         def ok(rows):
+            if (CONFIG.get("homepage_mode") or "news") != "news":
+                return
             while self.news_host.count():
                 item = self.news_host.takeAt(0)
                 if item.widget():
@@ -189,6 +214,8 @@ class LaunchPage(QWidget):
             self.news_host.addWidget(d)
 
     def reload(self):
+        if self._task_id and not self.launch_btn.isEnabled():
+            return
         cur_inst = self.instance_box.currentText()
         self.instance_box.blockSignals(True)
         self.instance_box.clear()
@@ -379,8 +406,8 @@ class LaunchPage(QWidget):
         self.status_label.setText(message)
         if success:
             self.progress.setValue(100)
-            InfoBar.info("游戏已退出", message, parent=self,
-                         position=InfoBarPosition.TOP, duration=3000)
+            InfoBar.success("游戏已结束", message or "已正常退出", parent=self,
+                             position=InfoBarPosition.TOP, duration=3000)
             return
         if self._crash_shown or message == "已取消":
             if message == "已取消":

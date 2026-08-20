@@ -1,27 +1,109 @@
 # -*- coding: utf-8 -*-
-"""PCL 风格色板：细顶栏 + 左侧主导航。"""
+"""PCL 风格色板：细顶栏 + 左侧主导航。深浅色运行时切换。"""
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton, QStackedWidget,
-    QToolButton, QVBoxLayout, QWidget,
+    QToolButton, QVBoxLayout, QWidget, QGraphicsOpacityEffect,
 )
 from qframelesswindow import TitleBar
+
+
+class Theme:
+    """运行时色板。页面样式请读 Theme.xxx，不要缓存导入时的常量。"""
+
+    dark = False
+    green = "#2E9B6B"
+    green_deep = "#1E7A52"
+    bg = "#FFFFFF"
+    card = "#FFFFFF"
+    line = "#E6E6E6"
+    text = "#2B2B2B"
+    muted = "#888888"
+    title = "#1B7A54"
+    hover = "#F3F7F5"
+    chip = "#F0F4F8"
+    btn_bg = "#FFFFFF"
+    row_hover = "#F3F7F5"
+    row_line = "#EEF3F7"
+
+    @classmethod
+    def apply(cls, dark: bool):
+        cls.dark = bool(dark)
+        if cls.dark:
+            cls.bg = "#1B1B1B"
+            cls.card = "#242424"
+            cls.line = "#3A3A3A"
+            cls.text = "#E8E8E8"
+            cls.muted = "#9A9A9A"
+            cls.title = "#6FCF9A"
+            cls.hover = "#2A332F"
+            cls.chip = "#333333"
+            cls.btn_bg = "#2C2C2C"
+            cls.row_hover = "#2A332F"
+            cls.row_line = "#333333"
+        else:
+            cls.bg = "#FFFFFF"
+            cls.card = "#FFFFFF"
+            cls.line = "#E6E6E6"
+            cls.text = "#2B2B2B"
+            cls.muted = "#888888"
+            cls.title = "#1B7A54"
+            cls.hover = "#F3F7F5"
+            cls.chip = "#F0F4F8"
+            cls.btn_bg = "#FFFFFF"
+            cls.row_hover = "#F3F7F5"
+            cls.row_line = "#EEF3F7"
+        _sync_aliases()
+
+
+def _sync_aliases():
+    global PCL_BG, PCL_CARD, PCL_LINE, PCL_TEXT, PCL_MUTED, PCL_TITLE, PCL_HOVER
+    PCL_BG = Theme.bg
+    PCL_CARD = Theme.card
+    PCL_LINE = Theme.line
+    PCL_TEXT = Theme.text
+    PCL_MUTED = Theme.muted
+    PCL_TITLE = Theme.title
+    PCL_HOVER = Theme.hover
+
 
 PCL_GREEN = "#2E9B6B"
 PCL_GREEN_DEEP = "#1E7A52"
 PCL_BLUE = PCL_GREEN
 PCL_BLUE_DEEP = PCL_GREEN_DEEP
-PCL_BG = "#FFFFFF"
-PCL_CARD = "#FFFFFF"
-PCL_LINE = "#E6E6E6"
-PCL_TEXT = "#2B2B2B"
-PCL_MUTED = "#888888"
-PCL_TITLE = "#1B7A54"
-PCL_HOVER = "#F3F7F5"
+PCL_BG = Theme.bg
+PCL_CARD = Theme.card
+PCL_LINE = Theme.line
+PCL_TEXT = Theme.text
+PCL_MUTED = Theme.muted
+PCL_TITLE = Theme.title
+PCL_HOVER = Theme.hover
 TITLE_H = 40
 SIDE_W = 188
+
+
+def ghost_btn_qss() -> str:
+    return (
+        f"PushButton {{ border: 1px solid {Theme.green}; color: {Theme.green};"
+        f" background: {Theme.btn_bg}; border-radius: 4px; }}"
+        f"PushButton:hover {{ background: {Theme.hover}; }}"
+    )
+
+
+def row_qss(name: str = "pclRow") -> str:
+    return (
+        f"#{name} {{ background: transparent; border-bottom: 1px solid {Theme.row_line}; }}"
+        f"#{name}:hover {{ background: {Theme.row_hover}; }}"
+    )
+
+
+def chip_qss() -> str:
+    return (
+        f"color: {Theme.muted}; background: {Theme.chip}; border-radius: 3px;"
+        " padding: 1px 6px; font-size: 11px;"
+    )
 
 
 def _icon(fif, color: str, size: int = 18):
@@ -35,30 +117,33 @@ class PclTitleBar(TitleBar):
         super().__init__(parent)
         self.setFixedHeight(TITLE_H)
         self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet(
-            f"PclTitleBar {{ background-color: {PCL_BG}; border-bottom: 1px solid {PCL_LINE}; }}"
-            f"QLabel#pclBrand {{ color: {PCL_TEXT}; font-size: 16px; font-weight: 700;"
-            " background: transparent; padding-left: 16px; }"
-        )
-
         self.maxBtn.hide()
-        for btn in (self.minBtn, self.closeBtn):
-            btn.setFixedSize(46, TITLE_H)
-            btn.setNormalColor(QColor(43, 43, 43))
-            btn.setHoverColor(QColor(43, 43, 43))
-            btn.setPressedColor(QColor(43, 43, 43))
-            btn.setHoverBackgroundColor(QColor(0, 0, 0, 20))
-            btn.setPressedBackgroundColor(QColor(0, 0, 0, 40))
-        self.closeBtn.setHoverColor(QColor(255, 255, 255))
-        self.closeBtn.setPressedColor(QColor(255, 255, 255))
-        self.closeBtn.setHoverBackgroundColor(QColor(232, 17, 35))
-        self.closeBtn.setPressedBackgroundColor(QColor(241, 112, 122))
-
         self.hBoxLayout.setContentsMargins(0, 0, 0, 0)
         self.hBoxLayout.setSpacing(0)
         brand = QLabel("PyMCL")
         brand.setObjectName("pclBrand")
+        self._brand = brand
         self.hBoxLayout.insertWidget(0, brand, 0, Qt.AlignVCenter)
+        self.restyle()
+
+    def restyle(self):
+        self.setStyleSheet(
+            f"PclTitleBar {{ background-color: {Theme.bg}; border-bottom: 1px solid {Theme.line}; }}"
+            f"QLabel#pclBrand {{ color: {Theme.text}; font-size: 16px; font-weight: 700;"
+            " background: transparent; padding-left: 16px; }"
+        )
+        idle = QColor(Theme.text)
+        for btn in (self.minBtn, self.closeBtn):
+            btn.setFixedSize(46, TITLE_H)
+            btn.setNormalColor(idle)
+            btn.setHoverColor(idle)
+            btn.setPressedColor(idle)
+            btn.setHoverBackgroundColor(QColor(0, 0, 0, 40) if Theme.dark else QColor(0, 0, 0, 20))
+            btn.setPressedBackgroundColor(QColor(0, 0, 0, 70) if Theme.dark else QColor(0, 0, 0, 40))
+        self.closeBtn.setHoverColor(QColor(255, 255, 255))
+        self.closeBtn.setPressedColor(QColor(255, 255, 255))
+        self.closeBtn.setHoverBackgroundColor(QColor(232, 17, 35))
+        self.closeBtn.setPressedBackgroundColor(QColor(241, 112, 122))
 
 
 class PclNavButton(QPushButton):
@@ -69,23 +154,26 @@ class PclNavButton(QPushButton):
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedHeight(32 if indent else 36)
-        pad = 40 if indent else 14
-        size = 14 if indent else 16
-        self.setIcon(_icon(fif, PCL_MUTED if indent else PCL_TEXT, size))
-        fs = "12px" if indent else "13px"
+        self.toggled.connect(self._sync_icon)
+        self.restyle()
+
+    def restyle(self):
+        pad = 40 if self._indent else 14
+        fs = "12px" if self._indent else "13px"
+        idle = Theme.muted if self._indent else Theme.text
         self.setStyleSheet(
             f"PclNavButton {{ border: none; text-align: left; padding-left: {pad}px;"
-            f" color: {PCL_MUTED if indent else PCL_TEXT}; background: transparent; font-size: {fs}; }}"
-            "PclNavButton:hover { background: rgba(46,155,107,18); }"
-            f"PclNavButton:checked {{ color: {PCL_GREEN}; background: {PCL_HOVER}; font-weight: 600; }}"
-            f'PclNavButton[sectionOn="true"] {{ color: {PCL_GREEN}; font-weight: 600; }}'
+            f" color: {idle}; background: transparent; font-size: {fs}; }}"
+            f"PclNavButton:hover {{ background: {Theme.hover}; }}"
+            f"PclNavButton:checked {{ color: {Theme.green}; background: {Theme.hover}; font-weight: 600; }}"
+            f'PclNavButton[sectionOn="true"] {{ color: {Theme.green}; font-weight: 600; }}'
         )
-        self.toggled.connect(self._sync_icon)
+        self._sync_icon(self.isChecked())
 
     def _sync_icon(self, checked: bool):
         size = 14 if self._indent else 16
-        idle = PCL_MUTED if self._indent else PCL_TEXT
-        self.setIcon(_icon(self._fif, PCL_GREEN if checked else idle, size))
+        idle = Theme.muted if self._indent else Theme.text
+        self.setIcon(_icon(self._fif, Theme.green if checked else idle, size))
 
     def set_section_on(self, on: bool):
         self.setProperty("sectionOn", "true" if on else "false")
@@ -94,8 +182,8 @@ class PclNavButton(QPushButton):
         self.update()
         if not self.isCheckable() or not self.isChecked():
             size = 14 if self._indent else 16
-            idle = PCL_MUTED if self._indent else PCL_TEXT
-            self.setIcon(_icon(self._fif, PCL_GREEN if on else idle, size))
+            idle = Theme.muted if self._indent else Theme.text
+            self.setIcon(_icon(self._fif, Theme.green if on else idle, size))
 
 
 class PclSideBar(QFrame):
@@ -108,19 +196,19 @@ class PclSideBar(QFrame):
         self.setObjectName("pclSide")
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setFixedWidth(SIDE_W)
-        self.setStyleSheet(
-            f"#pclSide {{ background: {PCL_CARD}; border-right: 1px solid {PCL_LINE}; }}"
-        )
 
         sl = QVBoxLayout(self)
         sl.setContentsMargins(0, 8, 0, 8)
         sl.setSpacing(1)
+        self._root = sl
 
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self._buttons = {}
         self._groups = {}
         self._last_group_child = {}
+        self._headers = []
+        self._dividers = []
         self.header_download = None
 
         first = None
@@ -131,15 +219,13 @@ class PclSideBar(QFrame):
                 sl.addStretch(1)
                 line = QFrame()
                 line.setFixedHeight(1)
-                line.setStyleSheet(f"background: {PCL_LINE}; border: none;")
+                self._dividers.append(line)
                 sl.addWidget(line)
                 had_stretch = True
                 continue
             if kind == "header":
                 lab = QLabel(spec[1])
-                lab.setStyleSheet(
-                    f"color: {PCL_MUTED}; font-size: 11px; padding: 12px 14px 4px 14px;"
-                    " background: transparent;")
+                self._headers.append(lab)
                 sl.addWidget(lab)
                 continue
             if kind == "group":
@@ -150,8 +236,27 @@ class PclSideBar(QFrame):
                 first = spec[1]
         if not had_stretch:
             sl.addStretch(1)
+        self.restyle()
         if first:
             self.set_current(first, emit=False)
+
+    def restyle(self):
+        self.setStyleSheet(
+            f"#pclSide {{ background: {Theme.card}; border-right: 1px solid {Theme.line}; }}"
+        )
+        for lab in self._headers:
+            lab.setStyleSheet(
+                f"color: {Theme.muted}; font-size: 11px; padding: 12px 14px 4px 14px;"
+                " background: transparent;")
+        for line in self._dividers:
+            line.setStyleSheet(f"background: {Theme.line}; border: none;")
+        for btn in self._buttons.values():
+            btn.restyle()
+        for info in self._groups.values():
+            info["btn"].restyle()
+            info["chevron"].setStyleSheet(
+                f"QToolButton {{ border: none; color: {Theme.muted}; font-size: 11px; background: transparent; }}"
+            )
 
     def _add_leaf(self, spec, layout, indent=False):
         key, fif, title = spec[1], spec[2], spec[3]
@@ -180,9 +285,6 @@ class PclSideBar(QFrame):
         chevron.setAutoRaise(True)
         chevron.setCursor(Qt.PointingHandCursor)
         chevron.setFixedSize(22, 22)
-        chevron.setStyleSheet(
-            "QToolButton { border: none; color: #888888; font-size: 11px; background: transparent; }"
-        )
         hl.addWidget(gbtn, 1)
         hl.addWidget(chevron, 0, Qt.AlignVCenter)
 
@@ -260,7 +362,6 @@ class PclSideBar(QFrame):
         return info["btn"] if info else None
 
 
-# 兼容旧引用：分区壳仍可用于嵌套页
 PclSubButton = PclNavButton
 
 
@@ -269,7 +370,7 @@ class PclSectionShell(QWidget):
         super().__init__(parent)
         self.setObjectName("pclSectionShell")
         self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet(f"#pclSectionShell {{ background: {PCL_BG}; }}")
+        self.setStyleSheet(f"#pclSectionShell {{ background: {Theme.bg}; }}")
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -307,3 +408,64 @@ class PclSectionShell(QWidget):
                 page.reload()
             except TypeError:
                 pass
+
+
+def fade_stack_to(stack, widget, holder, duration: int = 180):
+    """主栈切页：抓当前帧叠在新页上淡出。holder 必须长期持有动画对象。"""
+    from PySide6.QtWidgets import QLabel
+
+    old = stack.currentWidget()
+    if widget is None or widget is old:
+        return
+    if old is None or stack.width() < 8:
+        _set_stack(stack, widget)
+        return
+    pix = old.grab()
+    if pix.isNull():
+        _set_stack(stack, widget)
+        return
+    _set_stack(stack, widget)
+    cover = QLabel(stack)
+    cover.setPixmap(pix)
+    cover.setScaledContents(True)
+    cover.setGeometry(0, 0, stack.width(), stack.height())
+    cover.show()
+    cover.raise_()
+    effect = QGraphicsOpacityEffect(cover)
+    cover.setGraphicsEffect(effect)
+    anim = QPropertyAnimation(effect, b"opacity", cover)
+    anim.setDuration(duration)
+    anim.setStartValue(1.0)
+    anim.setEndValue(0.0)
+    anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    def done():
+        cover.hide()
+        cover.deleteLater()
+        if getattr(holder, "_nav_fade", None) is anim:
+            holder._nav_fade = None
+
+    prev = getattr(holder, "_nav_cover", None)
+    if prev is not None:
+        try:
+            prev.hide()
+            prev.deleteLater()
+        except RuntimeError:
+            pass
+    holder._nav_cover = cover
+    holder._nav_fade = anim
+    anim.finished.connect(done)
+    anim.start()
+
+
+def _stack_popout(stack, widget) -> bool:
+    try:
+        stack.setCurrentWidget(widget, popOut=False)
+        return True
+    except TypeError:
+        stack.setCurrentWidget(widget)
+        return False
+
+
+def _set_stack(stack, widget):
+    _stack_popout(stack, widget)

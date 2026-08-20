@@ -7,20 +7,31 @@
             <TextBlock Text="账号" FontSize="20" FontWeight="SemiBold"/>
             <TextBlock Text="微软正版、离线、Little Skin / 自建 Yggdrasil 皮肤站" Opacity="0.7" TextWrapping="Wrap"/>
             <StackPanel x:Name="ListHost" Spacing="8"/>
-            <Button Content="微软设备码登录" Click="Ms_Click" Style="{StaticResource AccentButtonStyle}"/>
+            <Button Content="微软设备码 / 浏览器登录" Click="Ms_Click" Style="{StaticResource AccentButtonStyle}"/>
             <TextBlock Text="皮肤站" FontWeight="SemiBold"/>
             <TextBox x:Name="ApiBox" PlaceholderText="https://littleskin.cn/api/yggdrasil"/>
             <TextBox x:Name="UserBox" PlaceholderText="邮箱 / 用户名"/>
             <PasswordBox x:Name="PwBox" PlaceholderText="密码"/>
             <Button Content="登录皮肤站" Click="Authlib_Click"/>
+            <TextBlock Text="统一通行证（Nide8）" FontWeight="SemiBold"/>
+            <TextBox x:Name="Nide8Id" PlaceholderText="32 位服务器 ID 或链接"/>
+            <TextBox x:Name="Nide8User" PlaceholderText="用户名"/>
+            <PasswordBox x:Name="Nide8Pw" PlaceholderText="密码"/>
+            <Button Content="登录通行证" Click="Nide8_Click"/>
             <TextBlock Text="离线" FontWeight="SemiBold"/>
             <Grid ColumnSpacing="8">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <TextBox x:Name="OfflineBox" PlaceholderText="离线角色名"/>
-                <Button Grid.Column="1" Content="保存" Click="Offline_Click"/>
+                <ComboBox x:Name="SkinBox" Grid.Column="1" Width="100" SelectedIndex="0">
+                    <x:String>默认</x:String>
+                    <x:String>Steve</x:String>
+                    <x:String>Alex</x:String>
+                </ComboBox>
+                <Button Grid.Column="2" Content="保存" Click="Offline_Click"/>
             </Grid>
         </StackPanel>
     </ScrollViewer>

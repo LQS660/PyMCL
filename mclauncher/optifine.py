@@ -154,6 +154,30 @@ def _run_patcher(installer, opti_jar: Path, mc_version: str, vid: str) -> bool:
     return False
 
 
+def install_as_mod(installer, mc_version: str, dest_dir, typ: str = "", patch: str = "") -> str:
+    """把 OptiFine jar 放进 mods，供 Forge 版本加载。"""
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dm = installer.dm
+    rows = list_builds(dm, mc_version)
+    if typ or patch:
+        chosen = next(
+            (r for r in rows if (not typ or r["type"] == typ) and (not patch or r["patch"] == patch)),
+            None,
+        ) or _latest(rows)
+    else:
+        chosen = _latest(rows)
+    typ, patch = chosen["type"], chosen["patch"]
+    url = f"{BMCL}/optifine/{mc_version}/{typ}/{patch}"
+    dest = dest_dir / chosen["filename"]
+    installer._note(f"下载 OptiFine {typ}_{patch} 到 mods")
+    dm.download(url, dest, force=False)
+    if not dest.is_file() or dest.stat().st_size < 1024:
+        from .installer import InstallError
+        raise InstallError("OptiFine 下载失败或文件过小")
+    return dest.name
+
+
 def install(installer, mc_version: str, typ: str = "", patch: str = "",
             force: bool = False) -> str:
     from .installer import InstallError

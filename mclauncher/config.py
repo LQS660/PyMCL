@@ -66,6 +66,18 @@ DEFAULT_CONFIG = {
     "ui_dark": False,
     "ui_background": "",
     "global_mods_dir": "",
+    "launcher_visibility": "keep",
+    "gc_preset": "auto",
+    "download_limit_kbps": 0,
+    "auto_check_update": True,
+    "custom_homepage": "",
+    "homepage_mode": "news",
+    "window_mode": "window",
+    "skip_assets": False,
+    "first_run": True,
+    "show_hidden_versions": False,
+    "catalog_favorites": [],
+    "offline_skin": "default",
 }
 
 

@@ -4,9 +4,9 @@
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
-    BodyLabel, CaptionLabel, ComboBox, FluentIcon as FIF, InfoBar, InfoBarPosition,
-    MessageBox, Pivot, PushButton, CheckBox, ScrollArea, SearchLineEdit, SimpleCardWidget,
-    StrongBodyLabel, SubtitleLabel, TransparentToolButton,
+    Action, BodyLabel, CaptionLabel, ComboBox, FluentIcon as FIF, InfoBar, InfoBarPosition,
+    MessageBox, Pivot, PushButton, CheckBox, RoundMenu, ScrollArea, SearchLineEdit,
+    SimpleCardWidget, StrongBodyLabel, SubtitleLabel, TransparentToolButton,
 )
 
 from mclauncher.config import CONFIG
@@ -49,6 +49,8 @@ class VersionPage(QWidget):
         self._all_versions: list[dict] = []
         self._fetched = False
         self._cols = 0
+        self._limit = 80
+        self._show_hidden = bool(CONFIG.get("show_hidden_versions"))
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(self._refill)
@@ -71,18 +73,16 @@ class VersionPage(QWidget):
         self.pivot.setCurrentItem("all")
         self.instance_box = ComboBox()
         self.instance_box.setFixedWidth(140)
-        self.loader_box = ComboBox()
-        self.loader_box.addItems(["无", "Fabric", "Forge", "Quilt", "NeoForge", "OptiFine", "LiteLoader"])
-        self.loader_box.setFixedWidth(120)
         self.launch_after = CheckBox("完成后启动")
         self.launch_after.setChecked(True)
+        self.hidden_box = CheckBox("显示隐藏")
+        self.hidden_box.setChecked(self._show_hidden)
         bar.addWidget(self.search)
         bar.addWidget(self.pivot)
         bar.addStretch(1)
         bar.addWidget(BodyLabel("实例"))
         bar.addWidget(self.instance_box)
-        bar.addWidget(BodyLabel("加载器"))
-        bar.addWidget(self.loader_box)
+        bar.addWidget(self.hidden_box)
         bar.addWidget(self.launch_after)
         root.addLayout(bar)
 
@@ -119,6 +119,7 @@ class VersionPage(QWidget):
         self.uninstall_btn.clicked.connect(self._uninstall_selected)
         self.repair_btn.clicked.connect(self._repair_selected)
         self.instance_box.currentTextChanged.connect(self._reload_installed)
+        self.hidden_box.toggled.connect(self._toggle_hidden)
 
         self.reload()
 
@@ -184,8 +185,13 @@ class VersionPage(QWidget):
             return
         cols = max(1, self.width() // 240)
         self._cols = cols
-        for i, v in enumerate(rows[:80]):
+        shown = rows[: self._limit]
+        for i, v in enumerate(shown):
             self.grid.addWidget(VersionCard(v, self._install), i // cols, i % cols)
+        if len(rows) > self._limit:
+            more = PushButton(f"加载更多（还有 {len(rows) - self._limit}）")
+            more.clicked.connect(self._more)
+            self.grid.addWidget(more, (len(shown) + cols - 1) // cols, 0, 1, cols)
 
     def _reload_installed(self):
         while self.installed_area.count():
@@ -200,7 +206,7 @@ class VersionPage(QWidget):
 
         self._installed_checks = []
         instance = self.instance_box.currentText() or "default"
-        for v in self.backend.get_installed_versions(instance):
+        for v in self.backend.get_installed_versions(instance, include_hidden=self._show_hidden):
             row = QHBoxLayout()
             cb = CheckBox(v)
             low = v.lower()
@@ -219,22 +225,99 @@ class VersionPage(QWidget):
             setup = TransparentToolButton(FIF.SETTING)
             setup.setToolTip("版本设置")
             setup.clicked.connect(lambda _, vid=v, inst=instance: self._setup(inst, vid))
+            more = TransparentToolButton(getattr(FIF, "MORE", FIF.VIEW))
+            more.setToolTip("更多")
+            more.clicked.connect(lambda _, vid=v, inst=instance, btn=more: self._version_menu(inst, vid, btn))
             row.addWidget(setup)
+            row.addWidget(more)
             self.installed_area.addLayout(row)
             self._installed_checks.append((cb, f"{instance} / {v}"))
 
+    def _more(self):
+        self._limit += 80
+        self._refill()
+
+    def _toggle_hidden(self, on):
+        self._show_hidden = bool(on)
+        from mclauncher.config import CONFIG
+        CONFIG.set("show_hidden_versions", self._show_hidden)
+        CONFIG.save()
+        self._reload_installed()
+
     def _install(self, info: dict, source=None):
-        loader = self.loader_box.currentText()
         instance = self.instance_box.currentText() or "default"
+        from .install_wizard import InstallWizardDialog
+        dlg = InstallWizardDialog(self.backend, info["version"], instance, self)
+        if not dlg.exec():
+            return
+        payload = dlg.payload()
+        loader = payload.get("loader") or "无"
         win = self.window()
         if source is not None and hasattr(win, "fly_to_tasks"):
             win.fly_to_tasks(source, info["version"], "#2FA36B")
-        if loader == "无":
-            tid = self.backend.install_game(info["version"], instance=instance)
-        else:
-            tid = self.backend.install_game(info["version"], loader, instance=instance)
+        tid = self.backend.install_game(
+            info["version"], loader, payload.get("loader_version") or "",
+            instance=instance, extra=payload.get("extra") or {},
+        )
         if self.launch_after.isChecked() and hasattr(win, "queue_launch_after"):
             win.queue_launch_after(tid, instance, info["version"], loader)
+
+    def _version_menu(self, instance, version, btn):
+        menu = RoundMenu(parent=self)
+
+        def add(text, fn):
+            act = Action(text)
+            act.triggered.connect(fn)
+            menu.addAction(act)
+
+        add("打开游戏文件夹", lambda: self._open_folder(instance, version, "game"))
+        add("打开 mods", lambda: self._open_folder(instance, version, "mods"))
+        add("打开 saves", lambda: self._open_folder(instance, version, "saves"))
+        add("打开截图", lambda: self._open_folder(instance, version, "screenshots"))
+        add("存档管理…", lambda: self._saves(instance, version))
+        add("重命名", lambda: self._rename(instance, version))
+        add("复制", lambda: self._copy(instance, version))
+        add("隐藏 / 取消隐藏", lambda: self._hide(instance, version))
+        add("导出启动脚本", lambda: self.backend.export_launch_script(instance, version))
+        menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
+
+    def _open_folder(self, instance, version, which):
+        try:
+            self.backend.open_version_folder(instance, version, which)
+        except Exception as e:
+            MessageBox("无法打开", str(e), self).exec()
+
+    def _saves(self, instance, version):
+        from .saves_dialog import SavesDialog
+        SavesDialog(self.backend, instance, version, self).exec()
+
+    def _rename(self, instance, version):
+        from ..widgets import InputDialog
+        dlg = InputDialog("重命名版本", "新版本 ID", text=version, parent=self)
+        if dlg.exec() and dlg.value():
+            try:
+                self.backend.rename_version(instance, version, dlg.value())
+            except Exception as e:
+                MessageBox("重命名失败", str(e), self).exec()
+            self._reload_installed()
+
+    def _copy(self, instance, version):
+        from ..widgets import InputDialog
+        dlg = InputDialog("复制版本", "新版本 ID", text=version + "-copy", parent=self)
+        if dlg.exec() and dlg.value():
+            try:
+                self.backend.copy_version(instance, version, dlg.value())
+            except Exception as e:
+                MessageBox("复制失败", str(e), self).exec()
+            self._reload_installed()
+
+    def _hide(self, instance, version):
+        try:
+            data = self.backend.get_version_settings(instance, version)
+            self.backend.hide_version(instance, version, not bool(data.get("hidden")))
+        except Exception as e:
+            MessageBox("操作失败", str(e), self).exec()
+        self._reload_installed()
 
     def _uninstall_selected(self):
         selected = [v for rb, v in getattr(self, "_installed_checks", []) if rb.isChecked()]

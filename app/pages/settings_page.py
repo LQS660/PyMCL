@@ -2,7 +2,7 @@
 """设置页：WinUI 风格设置卡片组。"""
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, ComboBox, FluentIcon as FIF, InfoBar, InfoBarPosition,
     LineEdit, PasswordLineEdit, PrimaryPushButton, PushButton, ScrollArea, SettingCard,
@@ -87,6 +87,7 @@ class SettingsPage(QWidget):
         iso_map = {
             "none": "关闭（共用实例目录）",
             "saves": "隔离存档",
+            "mods": "隔离 Mod 与配置",
             "all": "隔离全部",
         }
         self._iso_keys = {v: k for k, v in iso_map.items()}
@@ -96,6 +97,16 @@ class SettingsPage(QWidget):
             list(iso_map.values()),
             iso_map.get(settings.get("default_isolation") or "none", iso_map["none"]))
         iso_group.addSettingCard(self.iso_card)
+        game_card = SettingCard(FIF.FOLDER, "游戏目录", "实例与版本所在文件夹")
+        self.game_dir = LineEdit(game_card)
+        self.game_dir.setText(settings.get("game_dir") or "")
+        self.game_dir.setFixedWidth(220)
+        browse = PushButton("浏览")
+        browse.clicked.connect(self._browse_game)
+        game_card.hBoxLayout.addWidget(self.game_dir, 0, Qt.AlignRight)
+        game_card.hBoxLayout.addWidget(browse, 0, Qt.AlignRight)
+        game_card.hBoxLayout.addSpacing(16)
+        iso_group.addSettingCard(game_card)
         root.addWidget(iso_group)
 
         ui_group = SettingCardGroup("界面", host)
@@ -115,9 +126,42 @@ class SettingsPage(QWidget):
         self.bg_card, self.bg_edit = _line_card(
             FIF.PHOTO, "背景图", "本地图片路径，留空为纯色")
         self.bg_edit.setText(settings.get("ui_background") or "")
+        vis_map = {
+            "keep": "保持显示",
+            "minimize": "最小化",
+            "hide": "隐藏",
+            "hide_reopen": "隐藏，退出后重开",
+            "close": "关闭启动器",
+        }
+        self._vis_keys = {v: k for k, v in vis_map.items()}
+        self.vis_card, self.vis_box = _combo_card(
+            FIF.VIEW, "启动器可见性",
+            "游戏启动后启动器窗口怎么处理。关闭不会杀掉游戏进程。",
+            list(vis_map.values()),
+            vis_map.get(settings.get("launcher_visibility") or "keep", vis_map["keep"]))
+        home_map = {"news": "Minecraft 新闻", "custom": "本地 HTML", "blank": "空白"}
+        self._home_keys = {v: k for k, v in home_map.items()}
+        self.home_card, self.home_box = _combo_card(
+            FIF.HOME if hasattr(FIF, "HOME") else FIF.VIEW, "启动页主页", "右侧栏显示新闻、自定义 HTML 或留空",
+            list(home_map.values()),
+            home_map.get(settings.get("homepage_mode") or "news", home_map["news"]))
+        self.hp_card, self.hp_edit = _line_card(
+            FIF.DOCUMENT if hasattr(FIF, "DOCUMENT") else FIF.EDIT, "自定义主页", "本地 .html 文件路径")
+        self.hp_edit.setText(settings.get("custom_homepage") or "")
+        win_map = {"window": "窗口", "maximize": "全屏"}
+        self._win_keys = {v: k for k, v in win_map.items()}
+        self.win_card, self.win_box = _combo_card(
+            FIF.FULL_SCREEN if hasattr(FIF, "FULL_SCREEN") else FIF.VIEW,
+            "默认游戏窗口", "可被版本设置覆盖",
+            list(win_map.values()),
+            win_map.get(settings.get("window_mode") or "window", win_map["window"]))
         ui_group.addSettingCard(self.dark_card)
         ui_group.addSettingCard(self.color_card)
         ui_group.addSettingCard(self.bg_card)
+        ui_group.addSettingCard(self.vis_card)
+        ui_group.addSettingCard(self.home_card)
+        ui_group.addSettingCard(self.hp_card)
+        ui_group.addSettingCard(self.win_card)
         root.addWidget(ui_group)
 
         perf_group = SettingCardGroup("下载与性能", host)
@@ -127,6 +171,21 @@ class SettingsPage(QWidget):
         self.memory_card, self.memory_spin = _spin_card(
             FIF.DEVELOPER_TOOLS, "默认内存 (MB)", "新实例的默认 JVM 内存",
             512, 32768, settings["default_memory_mb"])
+        gc_map = {
+            "auto": "G1（推荐）",
+            "g1": "G1",
+            "g1_tuned": "调优 G1",
+            "zgc": "ZGC",
+            "none": "不指定",
+        }
+        self._gc_keys = {v: k for k, v in gc_map.items()}
+        self.gc_card, self.gc_box = _combo_card(
+            FIF.SPEED_HIGH if hasattr(FIF, "SPEED_HIGH") else FIF.DEVELOPER_TOOLS, "内存回收器", "启动时写入 JVM。版本设置可覆盖。",
+            list(gc_map.values()),
+            gc_map.get(settings.get("gc_preset") or "auto", gc_map["auto"]))
+        self.limit_card, self.limit_spin = _spin_card(
+            FIF.CLOUD_DOWNLOAD, "下载限速 (KB/s)", "0 表示不限制",
+            0, 102400, int(settings.get("download_limit_kbps") or 0))
         src_map = {"auto": "自动（官方>4秒改 BMCLAPI）", "official": "仅官方", "bmclapi": "仅 BMCLAPI"}
         comm_map = {"auto": "自动", "official": "仅官方", "mcim": "仅 MCIM"}
         self._src_keys = {v: k for k, v in src_map.items()}
@@ -148,6 +207,8 @@ class SettingsPage(QWidget):
         perf_group.addSettingCard(self.comm_card)
         perf_group.addSettingCard(self.proxy_card)
         perf_group.addSettingCard(self.memory_card)
+        perf_group.addSettingCard(self.gc_card)
+        perf_group.addSettingCard(self.limit_card)
 
         self.jvm_card, self.jvm_edit = _line_card(
             FIF.DEVELOPER_TOOLS, "默认 JVM 参数", "所有版本都会带上，版本设置可再追加")
@@ -188,6 +249,10 @@ class SettingsPage(QWidget):
             "更新清单 URL", "JSON：version / url / notes")
         self.upd_url.setText(settings.get("update_url") or "")
         maint_group.addSettingCard(self.upd_card)
+        self.auto_upd_card, self.auto_upd = _switch_card(
+            FIF.SYNC, "启动时检查更新", "打开启动器后在后台检查自更新清单",
+            checked=bool(settings.get("auto_check_update", True)))
+        maint_group.addSettingCard(self.auto_upd_card)
         tool_card = SettingCard(FIF.DEVELOPER_TOOLS, "维护工具", "更新、清理、导出、全局 Mod")
         self.chk_upd = PrimaryPushButton("检查更新")
         self.clean_btn = PushButton("清理")
@@ -201,7 +266,7 @@ class SettingsPage(QWidget):
         self.chk_upd.clicked.connect(self._check_update)
         self.clean_btn.clicked.connect(self._clean)
         self.export_btn.clicked.connect(self._export)
-        self.global_btn.clicked.connect(self.backend.open_global_mods)
+        self.global_btn.clicked.connect(self._global_mods)
 
         ai_group = SettingCardGroup("AI 助手", host)
         mode_card = SettingCard(getattr(FIF, "CHAT", None) or FIF.HELP, "接入方式", "公益接口已内置，小白不用填密钥")
@@ -286,6 +351,26 @@ class SettingsPage(QWidget):
         win = self.window()
         if hasattr(win, "apply_theme"):
             win.apply_theme()
+        lp = getattr(win, "launch_page", None)
+        if lp is not None and hasattr(lp, "reload"):
+            lp.reload()
+
+    def _browse_game(self):
+        path = QFileDialog.getExistingDirectory(self, "选择游戏目录", self.game_dir.text())
+        if not path:
+            return
+        self.game_dir.setText(path)
+        try:
+            self.backend.set_game_dir(path)
+            InfoBar.success("已切换目录", path, parent=self,
+                            position=InfoBarPosition.TOP, duration=2500)
+        except Exception as e:
+            InfoBar.error("切换失败", str(e), parent=self,
+                          position=InfoBarPosition.TOP, duration=4000)
+
+    def _global_mods(self):
+        from .global_mods_dialog import GlobalModsDialog
+        GlobalModsDialog(self.backend, self).exec()
 
     def _check_update(self):
         def ok(info):
@@ -370,4 +455,11 @@ class SettingsPage(QWidget):
             "default_isolation": self._iso_keys.get(self.iso_box.currentText(), "none"),
             "default_jvm_args": self.jvm_edit.text().strip(),
             "update_url": self.upd_url.text().strip(),
+            "launcher_visibility": self._vis_keys.get(self.vis_box.currentText(), "keep"),
+            "gc_preset": self._gc_keys.get(self.gc_box.currentText(), "auto"),
+            "download_limit_kbps": self.limit_spin.value(),
+            "auto_check_update": self.auto_upd.isChecked(),
+            "homepage_mode": self._home_keys.get(self.home_box.currentText(), "news"),
+            "custom_homepage": self.hp_edit.text().strip(),
+            "window_mode": self._win_keys.get(self.win_box.currentText(), "window"),
         }

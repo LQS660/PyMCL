@@ -90,6 +90,7 @@ public sealed partial class MainWindow : Window
             NavView.SelectedItem = NavView.MenuItems[0];
             SwapPage(_launch);
             await _launch.ReloadAsync();
+            _ = BootExtras();
         }
         catch (Exception ex)
         {
@@ -161,11 +162,18 @@ public sealed partial class MainWindow : Window
             return;
         var gen = ++_navGen;
         ContentFrame.ContentTransitions.Clear();
-        if (ContentFrame.Content is UIElement old && !ReferenceEquals(old, page))
+        UIElement? old = ContentFrame.Content as UIElement;
+        if (old != null && !ReferenceEquals(old, page))
             await Motion.PageOutAsync(old);
-        if (gen != _navGen) return;
+        if (gen != _navGen)
+        {
+            Motion.ResetVisual(old);
+            return;
+        }
         ContentFrame.Content = page;
         await Motion.PageInAsync(page);
+        if (gen != _navGen)
+            Motion.ResetVisual(page);
     }
 
     private NavigationViewItem? FindNav(string key)
@@ -223,6 +231,10 @@ public sealed partial class MainWindow : Window
             }
             if (ev.Event == "ui_changed")
                 _ = ReloadCurrentAsync();
+            if (ev.Event == "game_started")
+                _ = ApplyLauncherVisibility(true);
+            if (ev.Event == "game_exited")
+                _ = ApplyLauncherVisibility(false);
             if (ev.Event == "finished")
             {
                 var title = ev.Title;
@@ -347,5 +359,58 @@ public sealed partial class MainWindow : Window
         }
         status = text;
         speed = "";
+    }
+
+    private async Task BootExtras()
+    {
+        if (AppServices.Client is null) return;
+        try
+        {
+            var s = await AppServices.Client.CallAsync<SettingsDto>("get_settings");
+            if (s?.AutoCheckUpdate != true) return;
+            var info = await AppServices.Client.CallAsync<Dictionary<string, object>>("check_update") ?? new();
+            var has = info.TryGetValue("has_update", out var h) && $"{h}".Equals("True", StringComparison.OrdinalIgnoreCase);
+            if (has)
+            {
+                var msg = info.TryGetValue("message", out var m) ? m?.ToString() ?? "" : "";
+                ShowToast("发现更新", string.IsNullOrEmpty(msg) ? "到设置里安装" : msg, InfoBarSeverity.Informational);
+            }
+        }
+        catch { }
+    }
+
+    private bool _quitOnExit;
+
+    private async Task ApplyLauncherVisibility(bool started)
+    {
+        if (AppServices.Client is null) return;
+        try
+        {
+            var s = await AppServices.Client.CallAsync<SettingsDto>("get_settings");
+            var vis = s?.LauncherVisibility ?? "keep";
+            var app = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(AppServices.WindowHandle));
+            if (started)
+            {
+                if (vis == "close")
+                {
+                    _quitOnExit = true;
+                    app.Hide();
+                }
+                else if (vis is "hide" or "hide_reopen") app.Hide();
+                else if (vis == "minimize" && app.Presenter is OverlappedPresenter p)
+                    p.Minimize();
+            }
+            else if (_quitOnExit)
+            {
+                _quitOnExit = false;
+                Close();
+            }
+            else if (vis == "hide_reopen")
+            {
+                app.Show();
+                Activate();
+            }
+        }
+        catch { }
     }
 }

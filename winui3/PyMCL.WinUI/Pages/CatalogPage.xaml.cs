@@ -84,21 +84,15 @@ public sealed partial class CatalogPage : UserControl
         ResultList.Children.Add(new TextBlock { Text = "正在搜索…", Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)), HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 40, 0, 0) });
         var query = NameEdit.Text?.Trim() ?? "";
         var source = SourceBox.SelectedItem as string ?? "全部";
+        if (!string.IsNullOrEmpty(_kind.DefaultSource)) source = _kind.DefaultSource;
         var typeF = TypeBox.SelectedItem as string ?? "全部";
+        var gv = VersionBox.SelectedItem as string ?? VersionBox.Text ?? "";
+        if (gv.StartsWith("全部")) gv = "";
         try
         {
-            var rows = await AppServices.Client.CallAsync<List<CatalogItem>>(_kind.SearchMethod, new { query, source }) ?? new();
+            var extra = new Dictionary<string, object?> { ["game_version"] = gv, ["category"] = typeF };
+            var rows = await AppServices.Client.CallAsync<List<CatalogItem>>(_kind.SearchMethod, new { query, source, extra }) ?? new();
             if (token != _token) return;
-            if (!string.IsNullOrEmpty(typeF) && typeF != "全部")
-            {
-                var q = typeF.ToLowerInvariant();
-                var filtered = rows.Where(r =>
-                {
-                    var blob = $"{r.Name} {r.Description} {string.Join(" ", r.Tags ?? new())}".ToLowerInvariant();
-                    return blob.Contains(q);
-                }).ToList();
-                if (filtered.Count > 0) rows = filtered;
-            }
             ResultList.Children.Clear();
             if (rows.Count == 0)
             {
@@ -109,8 +103,9 @@ public sealed partial class CatalogPage : UserControl
             foreach (var item in rows)
             {
                 var row = BuildRow(item);
-                Motion.CardEnter(row, Math.Min(i++, 16) * 26, 1.02);
+                Motion.CardEnter(row, i < 8 ? i * 24 : 0, 1.02, i < 8);
                 ResultList.Children.Add(row);
+                i++;
             }
         }
         catch (Exception ex)
@@ -148,7 +143,7 @@ public sealed partial class CatalogPage : UserControl
         });
         Grid.SetColumn(info, 1);
         g.Children.Add(info);
-        var btn = new Button { Content = "安装", Width = 72, Height = 30, Style = (Style)Application.Current.Resources["AccentButtonStyle"] };
+        var btn = new Button { Content = "选择版本", Width = 88, Height = 30, Style = (Style)Application.Current.Resources["AccentButtonStyle"] };
         btn.Click += (_, _) => _ = Install(item);
         Grid.SetColumn(btn, 2);
         g.Children.Add(btn);
@@ -180,6 +175,7 @@ public sealed partial class CatalogPage : UserControl
         var src = string.IsNullOrWhiteSpace(item.Source) || item.Source == "全部"
             ? (SourceBox.SelectedItem as string ?? "Modrinth")
             : item.Source;
+        if (!string.IsNullOrEmpty(_kind.DefaultSource)) src = _kind.DefaultSource;
         if (src == "全部") src = "Modrinth";
         var extra = new Dictionary<string, object?>
         {
@@ -190,6 +186,12 @@ public sealed partial class CatalogPage : UserControl
             ["instance"] = instance,
             ["game_version"] = gv,
         };
+        if (!string.IsNullOrWhiteSpace(item.Slug) || item.Id != null)
+        {
+            var pick = await PickCatalogFile(item, gv, src);
+            if (pick is null) return;
+            foreach (var kv in pick) extra[kv.Key] = kv.Value;
+        }
         try
         {
             if (_kind.IsModpack)
@@ -198,6 +200,64 @@ public sealed partial class CatalogPage : UserControl
                 await AppServices.Client.StartTaskAsync(_kind.InstallMethod, new { name = item.Name, instance, extra });
         }
         catch (Exception ex) { AppServices.Toast?.Invoke("安装失败", ex.Message, InfoBarSeverity.Error); }
+    }
+
+    private async Task<Dictionary<string, object?>?> PickCatalogFile(CatalogItem item, string gv, string src)
+    {
+        List<CatalogFile> files;
+        try
+        {
+            files = await AppServices.Client!.CallAsync<List<CatalogFile>>("list_catalog_files", new
+            {
+                extra = new Dictionary<string, object?>
+                {
+                    ["kind"] = _kind.FileKind,
+                    ["source"] = src,
+                    ["slug"] = item.Slug,
+                    ["id"] = item.Id,
+                    ["name"] = item.Name,
+                    ["game_version"] = gv,
+                },
+            }) ?? new();
+        }
+        catch (Exception ex)
+        {
+            AppServices.Toast?.Invoke("加载版本失败", ex.Message, InfoBarSeverity.Error);
+            return new Dictionary<string, object?>();
+        }
+        var list = new ListView { MaxHeight = 360, SelectionMode = ListViewSelectionMode.Single };
+        foreach (var f in files)
+        {
+            var label = $"{f.VersionNumber}  ·  {string.Join(", ", (f.GameVersions ?? new()).Take(3))}  ·  {string.Join(", ", f.Loaders ?? new())}  ·  {f.Date}  ·  {FmtDownloads(f.Downloads)}\n{f.Filename}";
+            list.Items.Add(new ListViewItem { Content = label, Tag = f });
+        }
+        if (list.Items.Count > 0) list.SelectedIndex = 0;
+        var dlg = new ContentDialog
+        {
+            Title = item.Name,
+            Content = list.Items.Count == 0 ? new TextBlock { Text = "没有可安装文件，将尝试安装最新。" } : list,
+            PrimaryButtonText = "安装所选",
+            SecondaryButtonText = "安装最新",
+            CloseButtonText = "取消",
+            XamlRoot = XamlRoot,
+        };
+        var result = await dlg.ShowAsync();
+        if (result == ContentDialogResult.None) return null;
+        if (result == ContentDialogResult.Secondary) return new Dictionary<string, object?>();
+        if (list.SelectedItem is ListViewItem li && li.Tag is CatalogFile cf)
+        {
+            var ids = new Dictionary<string, object?> { ["source"] = string.IsNullOrEmpty(cf.Source) ? src : cf.Source };
+            var sid = (ids["source"] as string ?? "").ToLowerInvariant();
+            if (sid.StartsWith("curse"))
+            {
+                ids["file_id"] = cf.Id;
+                ids["version_id"] = cf.Id;
+            }
+            else ids["version_id"] = cf.Id;
+            ids["filename"] = cf.Filename;
+            return ids;
+        }
+        return new Dictionary<string, object?>();
     }
 
     private async void Link_Click(object sender, RoutedEventArgs e)

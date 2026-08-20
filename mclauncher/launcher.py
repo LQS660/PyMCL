@@ -339,6 +339,11 @@ def build_launch_command(instance, version_id, account_props, java_exe,
         from . import authlib as authlib_mod
         agent = authlib_mod.javaagent_arg(authlib_api)
         jvm_args = [agent] + [a for a in jvm_args if not str(a).startswith("-javaagent:")]
+    nide8_id = (account_props or {}).get("nide8_id")
+    if nide8_id:
+        from . import nide8 as nide8_mod
+        agent = nide8_mod.javaagent_arg(nide8_id)
+        jvm_args = [agent] + [a for a in jvm_args if not str(a).startswith("-javaagent:")]
     cmd = [str(java_exe)] + jvm_args + [main_class] + game_args + extras
     major = java_mod.get_java_major(java_exe)
     if major is not None and major < 9 and any(a in ("-p", "--module-path", "--add-modules") for a in cmd):

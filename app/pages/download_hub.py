@@ -6,15 +6,15 @@ from PySide6.QtCore import (
     QPropertyAnimation, QRect, Qt, Signal,
 )
 from PySide6.QtWidgets import (
-    QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton, QStackedWidget,
-    QVBoxLayout, QWidget,
+    QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from ..pcl_chrome import PCL_GREEN, PCL_HOVER, PCL_LINE, PCL_MUTED, PCL_TEXT
+from ..pcl_chrome import Theme
 
 
 class SlideHStack(QStackedWidget):
-    """左右滑页：按索引方向把当前页推出、目标页推入。"""
+    """左右滑页：先盖住旧帧，切到真页后再抓新帧，动画层盖住切换。"""
 
     DURATION = 260
 
@@ -27,6 +27,7 @@ class SlideHStack(QStackedWidget):
             lab.setScaledContents(True)
             lab.hide()
         self._ani = None
+        self._pending = None
 
     def slide_to(self, widget):
         if widget is None:
@@ -35,30 +36,32 @@ class SlideHStack(QStackedWidget):
             return
         if self._ani and self._ani.state() == QAbstractAnimation.Running:
             self._ani.stop()
-            self._clear_slides()
-            super().setCurrentWidget(widget)
-            return
+            self._finish_now(self._pending or widget)
         old = self.currentWidget()
         if old is None or self.width() < 8:
             super().setCurrentWidget(widget)
             return
         direction = 1 if self.indexOf(widget) > self.indexOf(old) else -1
         w, h = self.width(), self.height()
-        widget.resize(w, h)
         pix_old = old.grab()
-        pix_new = widget.grab()
-        if pix_old.isNull() or pix_new.isNull():
+        if pix_old.isNull():
             super().setCurrentWidget(widget)
             return
         self._from.setPixmap(pix_old)
-        self._to.setPixmap(pix_new)
         self._from.setGeometry(0, 0, w, h)
-        self._to.setGeometry(direction * w, 0, w, h)
         self._from.show()
-        self._to.show()
         self._from.raise_()
-        self._to.raise_()
         super().setCurrentWidget(widget)
+        widget.resize(w, h)
+        pix_new = widget.grab()
+        if pix_new.isNull():
+            self._clear_slides()
+            return
+        self._to.setPixmap(pix_new)
+        self._to.setGeometry(direction * w, 0, w, h)
+        self._to.show()
+        self._to.raise_()
+        self._pending = widget
 
         group = QParallelAnimationGroup(self)
         a1 = QPropertyAnimation(self._from, b"pos", self)
@@ -74,17 +77,26 @@ class SlideHStack(QStackedWidget):
         self._ani = group
         group.start()
 
+    def _finish_now(self, widget):
+        self._clear_slides()
+        if widget is not None and self.indexOf(widget) >= 0:
+            super().setCurrentWidget(widget)
+
     def _clear_slides(self):
         self._from.hide()
         self._to.hide()
         self._from.clear()
         self._to.clear()
         self._ani = None
+        self._pending = None
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self._from.isVisible():
-            self._clear_slides()
+            target = self._pending or self.currentWidget()
+            if self._ani:
+                self._ani.stop()
+            self._finish_now(target)
 
 
 class DownloadCatBar(QFrame):
@@ -93,44 +105,75 @@ class DownloadCatBar(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("downloadCatBar")
-        self.setFixedHeight(44)
-        self.setStyleSheet(
-            f"#downloadCatBar {{ background: transparent; border-bottom: 1px solid {PCL_LINE}; }}"
-        )
-        self._layout = QHBoxLayout(self)
-        self._layout.setContentsMargins(20, 0, 20, 0)
+        self.setFixedHeight(48)
+        self._scroll = QScrollArea(self)
+        self._scroll.setObjectName("catScroll")
+        self._scroll.setWidgetResizable(False)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        self._scroll.setFixedHeight(48)
+
+        self._host = QWidget()
+        self._layout = QHBoxLayout(self._host)
+        self._layout.setContentsMargins(16, 0, 16, 4)
         self._layout.setSpacing(4)
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self._buttons = {}
         self._layout.addStretch(1)
+        self._scroll.setWidget(self._host)
 
-        self._indicator = QFrame(self)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(self._scroll)
+
+        self._indicator = QFrame(self._host)
         self._indicator.setObjectName("catIndicator")
-        self._indicator.setStyleSheet(
-            f"#catIndicator {{ background: {PCL_GREEN}; border: none; border-radius: 1px; }}"
-        )
         self._indicator.setFixedHeight(2)
         self._indicator.hide()
         self._ind_anim = QPropertyAnimation(self._indicator, b"geometry", self)
         self._ind_anim.setDuration(240)
         self._ind_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.restyle()
+
+    def restyle(self):
+        self.setStyleSheet(
+            f"#downloadCatBar {{ background: transparent; border-bottom: 1px solid {Theme.line}; }}"
+        )
+        self._scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollBar:horizontal { height: 6px; background: transparent; }"
+            f"QScrollBar::handle:horizontal {{ background: {Theme.line}; border-radius: 3px; min-width: 24px; }}"
+            "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
+        )
+        self._indicator.setStyleSheet(
+            f"#catIndicator {{ background: {Theme.green}; border: none; border-radius: 1px; }}"
+        )
+        for btn, _ in self._buttons.values():
+            self._style_btn(btn)
+
+    def _style_btn(self, btn):
+        btn.setStyleSheet(
+            f"QPushButton {{ border: none; background: transparent; color: {Theme.muted};"
+            " font-size: 14px; padding: 0 16px; }"
+            f"QPushButton:hover {{ color: {Theme.text}; background: {Theme.hover}; }}"
+            f"QPushButton:checked {{ color: {Theme.green}; font-weight: 700; }}"
+        )
 
     def add_item(self, title: str, page):
         btn = QPushButton(title)
         btn.setCheckable(True)
         btn.setCursor(Qt.PointingHandCursor)
-        btn.setFixedHeight(44)
-        btn.setStyleSheet(
-            f"QPushButton {{ border: none; background: transparent; color: {PCL_MUTED};"
-            " font-size: 14px; padding: 0 16px; }"
-            f"QPushButton:hover {{ color: {PCL_TEXT}; background: {PCL_HOVER}; }}"
-            f"QPushButton:checked {{ color: {PCL_GREEN}; font-weight: 700; }}"
-        )
+        btn.setFixedHeight(40)
+        self._style_btn(btn)
         self._group.addButton(btn)
         self._buttons[id(page)] = (btn, page)
         btn.clicked.connect(lambda _, p=page: self.currentChanged.emit(p))
         self._layout.insertWidget(self._layout.count() - 1, btn)
+        self._host.adjustSize()
+        self._host.setMinimumWidth(max(self._host.sizeHint().width(), self._layout.sizeHint().width()))
         if len(self._group.buttons()) == 1:
             btn.setChecked(True)
 
@@ -141,11 +184,12 @@ class DownloadCatBar(QFrame):
         btn, _ = hit
         btn.setChecked(True)
         self._move_indicator(btn, animate=animate)
+        self._scroll.ensureWidgetVisible(btn, 24, 0)
 
     def _indicator_rect(self, btn) -> QRect:
         r = btn.geometry()
         pad = 16
-        return QRect(r.x() + pad, self.height() - 2, max(16, r.width() - pad * 2), 2)
+        return QRect(r.x() + pad, self._host.height() - 6, max(16, r.width() - pad * 2), 2)
 
     def _move_indicator(self, btn, animate: bool = True):
         if btn is None:

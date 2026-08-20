@@ -112,35 +112,60 @@ def fly_to(window: QWidget, source: QWidget, letter: str, color: str,
            target_key: str = "tasksPage", on_landed=None, duration: int = 620,
            target=None):
     """从 source 控件中心抛物线飞一个小球到导航项 / 指定控件中心。"""
+    from .ui_alive import widget_alive
+    if not widget_alive(window) or not widget_alive(source):
+        return None
     start = source.mapTo(window, source.rect().center())
-    if target is not None:
+    if target is not None and widget_alive(target):
         end = target.mapTo(window, target.rect().center())
     else:
         nav = getattr(window, "navigationInterface", None)
         target_btn = nav.widget(target_key) if nav is not None else None
         if target_btn is None:
+            side = getattr(window, "side", None)
+            target_btn = side.button("tasks") if side is not None else None
+        if target_btn is None or not widget_alive(target_btn):
             end = QPoint(window.width() // 2, window.height() - 28)
         else:
             end = target_btn.mapTo(window, target_btn.rect().center())
 
-    # 控制点：起点终点连线上方，形成上抛弧线
     control = QPointF((start.x() + end.x()) / 2, min(start.y(), end.y()) - 150)
 
     ball = FlyBall(window, letter, color)
     ball.show()
     ball.raise_()
 
+    jobs = getattr(window, "_fly_jobs", None)
+    if jobs is None:
+        window._fly_jobs = []
+        jobs = window._fly_jobs
+    while len(jobs) >= 2:
+        old = jobs.pop(0)
+        try:
+            old.stop()
+        except RuntimeError:
+            pass
+
     anim = QVariantAnimation(window)
     anim.setStartValue(0.0)
     anim.setEndValue(1.0)
     anim.setDuration(duration)
+    jobs.append(anim)
 
     def step(t: float):
+        if not widget_alive(ball):
+            return
         ball.set_progress(_bezier(QPointF(start), control, QPointF(end), t), t)
 
     def done():
-        ball.deleteLater()
-        Ripple(window, end, color)
+        try:
+            jobs.remove(anim)
+        except ValueError:
+            pass
+        if widget_alive(ball):
+            ball.deleteLater()
+        if widget_alive(window):
+            Ripple(window, end, color)
         if on_landed:
             on_landed()
         anim.deleteLater()
