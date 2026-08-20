@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """启动游戏：构建 JVM/游戏参数并运行。"""
+import ctypes
 import os
 import subprocess
 import threading
@@ -7,6 +8,7 @@ import threading
 from . import APP_ID, LAUNCHER_NAME, LAUNCHER_VERSION
 from . import java as java_mod
 from . import manifest, utils
+from .argsplit import split_args
 from .config import CONFIG
 from .downloader import DownloadError
 from .installer import extract_natives, natives_present, select_native_classifier
@@ -154,11 +156,35 @@ def _client_jar_path(instance, version_id, vjson, resolved):
     return jar
 
 
+def _set_priority(pid: int, level: str):
+    if os.name != "nt" or not pid:
+        return
+    mapping = {
+        "low": 0x00000040,
+        "below": 0x00004000,
+        "normal": 0x00000020,
+        "high": 0x00000080,
+        "realtime": 0x00000100,
+    }
+    value = mapping.get(str(level or "normal").lower())
+    if value is None or value == 0x00000020:
+        return
+    PROCESS_SET_INFORMATION = 0x0200
+    handle = ctypes.windll.kernel32.OpenProcess(PROCESS_SET_INFORMATION, False, int(pid))
+    if not handle:
+        return
+    try:
+        ctypes.windll.kernel32.SetPriorityClass(handle, value)
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
 def build_launch_command(instance, version_id, account_props, java_exe,
                          memory_mb=4096, width=None, height=None,
-                         extra_game_args=None):
+                         extra_game_args=None, extra_jvm_args=None,
+                         game_directory=None, authlib_api=None):
     """
-    构建启动命令。返回 (cmd, natives_dir, version_dir)。
+    构建启动命令。返回 (cmd, natives_dir, version_dir, game_dir)。
     account_props: {'name', 'uuid', 'token', 'user_type', 'xuid'}
     """
     vjson = instance.version_json(version_id)
@@ -242,7 +268,7 @@ def build_launch_command(instance, version_id, account_props, java_exe,
         "clientid": CONFIG.get("microsoft_client_id") or APP_ID,
         "version_name": version_id,
         "version_type": _version_type(version_id, resolved),
-        "game_directory": str(instance.path),
+        "game_directory": str(game_directory or instance.path),
         "assets_root": str(assets_dir),
         "assets_index_name": assets_id,
         "game_assets": str(assets_dir / "virtual" / assets_id),
@@ -303,19 +329,29 @@ def build_launch_command(instance, version_id, account_props, java_exe,
             jvm_args.append(f"-Dlog4j.configurationFile={lp}")
 
     extras = [str(a) for a in (extra_game_args or []) if a not in (None, "")]
+    extra_jvm = []
+    if extra_jvm_args:
+        extra_jvm = list(extra_jvm_args) if isinstance(extra_jvm_args, (list, tuple)) else split_args(extra_jvm_args)
+    default_jvm = split_args(CONFIG.get("default_jvm_args") or "")
+    jvm_args = default_jvm + extra_jvm + jvm_args
+    jvm_args = _apply_memory(jvm_args, memory_mb)
+    if authlib_api:
+        from . import authlib as authlib_mod
+        agent = authlib_mod.javaagent_arg(authlib_api)
+        jvm_args = [agent] + [a for a in jvm_args if not str(a).startswith("-javaagent:")]
     cmd = [str(java_exe)] + jvm_args + [main_class] + game_args + extras
     major = java_mod.get_java_major(java_exe)
     if major is not None and major < 9 and any(a in ("-p", "--module-path", "--add-modules") for a in cmd):
         raise LaunchError(
             f"拒绝用 Java {major} 启动：命令含模块参数。请改用 Java 17。"
         )
-    return cmd, natives_dir, vdir
+    return cmd, natives_dir, vdir, game_directory or instance.path
 
 
 class GameProcess:
     """运行中的游戏进程，支持读取输出与终止。"""
 
-    def __init__(self, cmd, cwd, on_line=None):
+    def __init__(self, cmd, cwd, on_line=None, env=None, priority="normal"):
         import collections
         import time as _time
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if utils.IS_WINDOWS else 0
@@ -325,13 +361,14 @@ class GameProcess:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            env=os.environ.copy(),
+            env=env or os.environ.copy(),
             creationflags=creationflags,
             text=True,
             encoding="utf-8",
             errors="replace",
             bufsize=1,
         )
+        _set_priority(self.proc.pid, priority)
         self.on_line = on_line
         self.started_at = _time.time()
         self.lines = collections.deque(maxlen=200)

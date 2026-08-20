@@ -45,14 +45,18 @@ class InstanceCard(SimpleCardWidget):
         rename_btn.setToolTip("重命名")
         delete_btn = TransparentToolButton(FIF.DELETE)
         delete_btn.setToolTip("删除实例")
+        export_btn = TransparentToolButton(FIF.SHARE if hasattr(FIF, "SHARE") else FIF.DOWNLOAD)
+        export_btn.setToolTip("导出为 .mrpack")
         open_btn.clicked.connect(lambda: page.open_folder(info["name"]))
         java_btn.clicked.connect(lambda: page.pick_java(info["name"]))
         rename_btn.clicked.connect(lambda: page.rename(info["name"]))
         delete_btn.clicked.connect(lambda: page.delete(info["name"]))
+        export_btn.clicked.connect(lambda: page.export_pack(info["name"]))
         actions.addStretch(1)
         actions.addWidget(open_btn)
         actions.addWidget(java_btn)
         actions.addWidget(rename_btn)
+        actions.addWidget(export_btn)
         actions.addWidget(delete_btn)
         layout.addLayout(actions)
 
@@ -156,6 +160,9 @@ class InstancePage(QWidget):
             except Exception as e:
                 MessageBox("重命名失败", str(e), self).exec()
             self.reload()
+
+    def export_pack(self, name: str):
+        self.backend.export_modpack(name)
 
     def pick_java(self, name: str):
         if self._picking_java:

@@ -4,8 +4,8 @@
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
-    BodyLabel, CaptionLabel, ComboBox, FluentIcon as FIF, MessageBox, Pivot,
-    PushButton, CheckBox, ScrollArea, SearchLineEdit, SimpleCardWidget,
+    BodyLabel, CaptionLabel, ComboBox, FluentIcon as FIF, InfoBar, InfoBarPosition,
+    MessageBox, Pivot, PushButton, CheckBox, ScrollArea, SearchLineEdit, SimpleCardWidget,
     StrongBodyLabel, SubtitleLabel, TransparentToolButton,
 )
 
@@ -67,11 +67,12 @@ class VersionPage(QWidget):
         self.pivot.addItem("all", "全部")
         self.pivot.addItem("release", "正式版")
         self.pivot.addItem("snapshot", "快照")
+        self.pivot.addItem("old_alpha", "远古")
         self.pivot.setCurrentItem("all")
         self.instance_box = ComboBox()
         self.instance_box.setFixedWidth(140)
         self.loader_box = ComboBox()
-        self.loader_box.addItems(["无", "Fabric", "Forge", "Quilt", "NeoForge"])
+        self.loader_box.addItems(["无", "Fabric", "Forge", "Quilt", "NeoForge", "OptiFine", "LiteLoader"])
         self.loader_box.setFixedWidth(120)
         self.launch_after = CheckBox("完成后启动")
         self.launch_after.setChecked(True)
@@ -103,6 +104,9 @@ class VersionPage(QWidget):
         head.addStretch(1)
         self.uninstall_btn = TransparentToolButton(FIF.DELETE)
         self.uninstall_btn.setToolTip("卸载选中版本")
+        self.repair_btn = TransparentToolButton(FIF.SYNC)
+        self.repair_btn.setToolTip("修复选中版本（补全缺失文件）")
+        head.addWidget(self.repair_btn)
         head.addWidget(self.uninstall_btn)
         ic_layout.addLayout(head)
         self.installed_area = QVBoxLayout()
@@ -113,6 +117,7 @@ class VersionPage(QWidget):
         self.search.textChanged.connect(self._refill)
         self.pivot.currentItemChanged.connect(self._refill)
         self.uninstall_btn.clicked.connect(self._uninstall_selected)
+        self.repair_btn.clicked.connect(self._repair_selected)
         self.instance_box.currentTextChanged.connect(self._reload_installed)
 
         self.reload()
@@ -162,9 +167,16 @@ class VersionPage(QWidget):
 
         text = self.search.text().strip().lower()
         vtype = self.pivot.currentRouteKey()
-        rows = [v for v in self._all_versions
-                if (not text or text in v["version"].lower())
-                and (vtype == "all" or v["type"] == vtype)]
+        rows = []
+        for v in self._all_versions:
+            if text and text not in v["version"].lower():
+                continue
+            if vtype == "all":
+                rows.append(v)
+            elif vtype == "old_alpha" and v["type"] in ("old_alpha", "old_beta"):
+                rows.append(v)
+            elif v["type"] == vtype:
+                rows.append(v)
 
         if not rows:
             self.grid.addWidget(EmptyState(FIF.SEARCH, "没有匹配的版本"), 0, 0)
@@ -191,14 +203,23 @@ class VersionPage(QWidget):
         for v in self.backend.get_installed_versions(instance):
             row = QHBoxLayout()
             cb = CheckBox(v)
-            color = "#7C5CD6" if "fabric" in v.lower() else (
-                "#E8862E" if "forge" in v.lower() else "#4C8BF5")
-            label = "Fabric" if "fabric" in v.lower() else (
-                "Forge" if "forge" in v.lower() else (
-                    "Quilt" if "quilt" in v.lower() else (
-                        "NeoForge" if "neoforge" in v.lower() else "原版")))
+            low = v.lower()
+            color = "#7C5CD6" if "fabric" in low else (
+                "#E8862E" if "forge" in low and "neo" not in low else (
+                    "#2E9B6B" if "optifine" in low else (
+                        "#4C8BF5" if "liteloader" in low else "#4C8BF5")))
+            label = "Fabric" if "fabric" in low else (
+                "Forge" if "forge" in low and "neo" not in low else (
+                    "Quilt" if "quilt" in low else (
+                        "NeoForge" if "neoforge" in low or "neo" in low else (
+                            "OptiFine" if "optifine" in low else (
+                                "LiteLoader" if "liteloader" in low else "原版")))))
             row.addWidget(cb, 1)
             row.addWidget(Pill(label, color))
+            setup = TransparentToolButton(FIF.SETTING)
+            setup.setToolTip("版本设置")
+            setup.clicked.connect(lambda _, vid=v, inst=instance: self._setup(inst, vid))
+            row.addWidget(setup)
             self.installed_area.addLayout(row)
             self._installed_checks.append((cb, f"{instance} / {v}"))
 
@@ -229,6 +250,24 @@ class VersionPage(QWidget):
                 except Exception as e:
                     MessageBox("卸载失败", str(e), self).exec()
             self._reload_installed()
+
+    def _setup(self, instance, version):
+        from .version_setup import VersionSetupDialog
+        dlg = VersionSetupDialog(self.backend, instance, version, self)
+        if dlg.exec():
+            dlg.save()
+
+    def _repair_selected(self):
+        selected = [v for rb, v in getattr(self, "_installed_checks", []) if rb.isChecked()]
+        if not selected:
+            MessageBox("未选择", "请先勾选要修复的版本", self).exec()
+            return
+        for spec in selected:
+            inst, vid = spec.split(" / ", 1) if " / " in spec else (
+                self.instance_box.currentText() or "default", spec)
+            self.backend.repair_version(inst, vid)
+        InfoBar.success("已开始修复", f"{len(selected)} 个版本", parent=self,
+                        position=InfoBarPosition.TOP, duration=2500)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

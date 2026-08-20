@@ -211,7 +211,7 @@ def cmd_launch(args):
     print(f"账号: {props['name']} ({'正版' if props['user_type'] == 'msa' else '离线'})")
 
     try:
-        cmd, natives_dir, vdir = build_launch_command(
+        cmd, natives_dir, vdir, _gdir = build_launch_command(
             inst, args.version, props, java_exe,
             memory_mb=args.memory or CONFIG.get("memory_mb", 4096),
             width=args.width, height=args.height,

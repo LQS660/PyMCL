@@ -29,7 +29,7 @@ object McLaunch {
         DriverPlugin.init(app)
         val inst = Paths.instanceDir(instance)
         val jsonFile = File(inst, "versions/$version/$version.json")
-        val json = JSONObject(jsonFile.readText())
+        val json = LaunchPlanner.resolveJson(inst, version)
         val major = JavaRuntime.javaMajor(json, version)
         val jre = JavaRuntime.jreDirName(major)
         if (jre == "jre8" || jre == "jre25") {
@@ -40,9 +40,10 @@ object McLaunch {
         if (plan.missing.isNotEmpty()) {
             throw IllegalStateException("仍缺 ${plan.missing.size} 个文件：${plan.missing.first()}")
         }
-        val width = 1280
-        val height = 720
-        writeOptions(inst, width, height)
+        val dm = app.resources.displayMetrics
+        val width = maxOf(dm.widthPixels, dm.heightPixels).coerceAtLeast(1280)
+        val height = minOf(dm.widthPixels, dm.heightPixels).coerceAtLeast(720)
+        writeOptions(File(plan.gameDir.ifBlank { inst.absolutePath }), width, height)
         extractLog4j(app, inst, version, json)
         val args = LaunchArgs.build(app, json, plan, username, memoryMb, width, height)
         val javaHome = when (jre) {
@@ -73,11 +74,11 @@ object McLaunch {
         config.lwjglVersion = JavaRuntime.lwjglPack(json)
         onLog("JRE $jre  LWJGL ${config.lwjglVersion}  classpath ${plan.classpath.size}")
         val created = FCLauncher.launchMinecraft(config)
-        created.setGameDir(inst.absolutePath)
+        created.setGameDir(plan.gameDir.ifBlank { inst.absolutePath })
         created.setRenderer(renderer.name)
         created.setJava(jre)
         created.setScaleFactor(1.0)
-        created.setHasTouchController(true)
+        created.setHasTouchController(false)
         bridge = created
     }
 

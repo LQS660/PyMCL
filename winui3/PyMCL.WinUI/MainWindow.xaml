@@ -42,6 +42,16 @@
                         <FontIcon Glyph="&#xE80A;"/>
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
+                <NavigationViewItem Content="账号" Tag="account">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE77B;"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="联机" Tag="multiplayer">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE716;"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
                 <NavigationViewItem Content="下载" Tag="download">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE896;"/>

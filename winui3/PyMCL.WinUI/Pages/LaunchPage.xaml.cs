@@ -124,6 +124,37 @@ public sealed partial class LaunchPage : UserControl
         await ReloadJavaAsync(false);
         _ = ReloadJavaAsync(true);
         SyncBanner(insts);
+        _ = LoadNews();
+    }
+
+    private async Task LoadNews()
+    {
+        if (AppServices.Client is null || NewsHost is null) return;
+        try
+        {
+            var rows = await AppServices.Client.CallAsync<List<NewsRow>>("cached_news") ?? new();
+            FillNews(rows);
+            rows = await AppServices.Client.CallAsync<List<NewsRow>>("fetch_news") ?? rows;
+            FillNews(rows);
+        }
+        catch { }
+    }
+
+    private void FillNews(List<NewsRow> rows)
+    {
+        while (NewsHost.Children.Count > 1)
+            NewsHost.Children.RemoveAt(1);
+        if (rows.Count == 0)
+        {
+            NewsHost.Children.Add(new TextBlock { Text = "暂无新闻", FontSize = 12, Opacity = 0.7 });
+            return;
+        }
+        foreach (var row in rows.Take(4))
+        {
+            NewsHost.Children.Add(new TextBlock { Text = row.Title, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+            if (!string.IsNullOrEmpty(row.Body))
+                NewsHost.Children.Add(new TextBlock { Text = row.Body, FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap });
+        }
     }
 
     private async Task ReloadVersionsAsync()
@@ -247,6 +278,7 @@ public sealed partial class LaunchPage : UserControl
                 width = (int)WidthSpin.Value,
                 height = (int)HeightSpin.Value,
                 java = SelectedJava(),
+                extra_game_args = ExtraServerArgs(),
             });
         }
         catch (Exception ex)
@@ -262,6 +294,105 @@ public sealed partial class LaunchPage : UserControl
         if (_taskId is null || AppServices.Client is null) return;
         try { await AppServices.Client.CallAsync("cancel_task", new { task_id = _taskId }); }
         catch { }
+    }
+
+    private string[]? ExtraServerArgs()
+    {
+        var server = ServerEdit?.Text?.Trim();
+        if (string.IsNullOrEmpty(server)) return null;
+        if (server.Contains(':'))
+        {
+            var i = server.LastIndexOf(':');
+            return new[] { "--server", server[..i], "--port", server[(i + 1)..] };
+        }
+        return new[] { "--server", server, "--port", "25565" };
+    }
+
+    private async void VersionSetup_Click(object sender, RoutedEventArgs e)
+    {
+        var inst = InstanceBox.SelectedItem as string ?? "default";
+        var ver = VersionBox.SelectedItem as string;
+        if (string.IsNullOrEmpty(ver))
+        {
+            AppServices.Toast?.Invoke("未选择版本", "请先安装并选择一个版本", InfoBarSeverity.Warning);
+            return;
+        }
+        if (AppServices.Client is null) return;
+        VersionSettingsDto? data = null;
+        try { data = await AppServices.Client.CallAsync<VersionSettingsDto>("get_version_settings", new { instance = inst, version = ver }); }
+        catch (Exception ex)
+        {
+            AppServices.Toast?.Invoke("读取失败", ex.Message, InfoBarSeverity.Error);
+            return;
+        }
+        var iso = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch };
+        iso.Items.Add("关闭（共用实例目录）");
+        iso.Items.Add("隔离存档");
+        iso.Items.Add("隔离全部");
+        iso.SelectedIndex = data?.Isolation == "all" ? 2 : data?.Isolation == "saves" ? 1 : 0;
+        var jvm = new TextBox { Text = data?.JvmArgs ?? "", PlaceholderText = "JVM 参数" };
+        var server = new TextBox { Text = data?.Server ?? "", PlaceholderText = "直连服务器" };
+        var box = new StackPanel { Spacing = 8, MinWidth = 360 };
+        box.Children.Add(iso);
+        box.Children.Add(jvm);
+        box.Children.Add(server);
+        var dlg = new ContentDialog { Title = "版本设置 · " + ver, Content = box, PrimaryButtonText = "保存", CloseButtonText = "取消", XamlRoot = XamlRoot };
+        if (await dlg.ShowAsync() != ContentDialogResult.Primary) return;
+        try
+        {
+            await AppServices.Client.CallAsync("save_version_settings", new
+            {
+                instance = inst,
+                version = ver,
+                data = new
+                {
+                    isolation = iso.SelectedIndex == 2 ? "all" : iso.SelectedIndex == 1 ? "saves" : "none",
+                    jvm_args = jvm.Text ?? "",
+                    server = server.Text ?? "",
+                },
+            });
+            AppServices.Toast?.Invoke("已保存", "版本设置已写入", InfoBarSeverity.Success);
+        }
+        catch (Exception ex) { AppServices.Toast?.Invoke("保存失败", ex.Message, InfoBarSeverity.Error); }
+    }
+
+    private async void Authlib_Click(object sender, RoutedEventArgs e)
+    {
+        if (AppServices.Client is null) return;
+        var api = new TextBox { PlaceholderText = "https://littleskin.cn/api/yggdrasil" };
+        var user = new TextBox { PlaceholderText = "邮箱 / 用户名" };
+        var pw = new PasswordBox { PlaceholderText = "密码" };
+        var box = new StackPanel { Spacing = 8 };
+        box.Children.Add(new TextBlock { Text = "Yggdrasil API" });
+        box.Children.Add(api);
+        box.Children.Add(user);
+        box.Children.Add(pw);
+        try
+        {
+            var presets = await AppServices.Client.CallAsync<List<AuthlibPreset>>("authlib_presets") ?? new();
+            var first = presets.FirstOrDefault(p => !string.IsNullOrEmpty(p.Api));
+            if (first != null) api.Text = first.Api;
+        }
+        catch { }
+        var dlg = new ContentDialog
+        {
+            Title = "皮肤站登录",
+            Content = box,
+            PrimaryButtonText = "登录",
+            CloseButtonText = "取消",
+            XamlRoot = XamlRoot,
+        };
+        if (await dlg.ShowAsync() != ContentDialogResult.Primary) return;
+        try
+        {
+            await AppServices.Client.StartTaskAsync("start_authlib_login", new
+            {
+                api = api.Text?.Trim() ?? "",
+                username = user.Text?.Trim() ?? "",
+                password = pw.Password ?? "",
+            });
+        }
+        catch (Exception ex) { AppServices.Toast?.Invoke("登录失败", ex.Message, InfoBarSeverity.Error); }
     }
 
     private async void Login_Click(object sender, RoutedEventArgs e)

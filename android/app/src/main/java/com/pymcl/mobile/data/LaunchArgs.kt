@@ -11,6 +11,8 @@ import java.util.Locale
 import java.util.TimeZone
 
 object LaunchArgs {
+    val FEATURES = setOf("has_custom_resolution")
+
     fun build(
         context: Context,
         json: JSONObject,
@@ -21,6 +23,7 @@ object LaunchArgs {
         height: Int,
     ): Array<String> {
         val inst = Paths.instanceDir(plan.instance)
+        val gameDir = if (plan.gameDir.isNotBlank()) File(plan.gameDir) else inst
         val javaMajor = JavaRuntime.javaMajor(json, plan.version)
         val lwjgl = JavaRuntime.lwjglPack(json)
         val useX = JavaRuntime.needsLwjglX(json)
@@ -73,7 +76,7 @@ object LaunchArgs {
         out += "-Dfml.earlyprogresswindow=false"
         out += "-Dglfwstub.initEgl=false"
         out += "-Dloader.disable_forked_guis=true"
-        out += "-Duser.home=${inst.absolutePath}"
+        out += "-Duser.home=${gameDir.absolutePath}"
         out += "-Duser.language=${Locale.getDefault().language}"
         out += "-Duser.country=${Locale.getDefault().country}"
         out += "-Duser.timezone=${TimeZone.getDefault().id}"
@@ -97,7 +100,7 @@ object LaunchArgs {
             "\${version_name}" to plan.version,
             "\${profile_name}" to "PyMCL",
             "\${version_type}" to json.optString("type", "release"),
-            "\${game_directory}" to inst.absolutePath,
+            "\${game_directory}" to gameDir.absolutePath,
             "\${user_type}" to "legacy",
             "\${assets_index_name}" to assetsId,
             "\${assets_root}" to assetsRoot,
@@ -221,7 +224,7 @@ object LaunchArgs {
         val game = json.optJSONObject("arguments")?.optJSONArray("game")
         val old = json.optString("minecraftArguments")
         if (game != null) {
-            flattenArgs(game, hasCustomRes = true).forEach { out += fill(it, vars) }
+            extractGameArgs(json).forEach { out += fill(it, vars) }
             out += "--width"
             out += width.toString()
             out += "--height"
@@ -239,20 +242,25 @@ object LaunchArgs {
         out += height.toString()
     }
 
-    private fun flattenArgs(arr: JSONArray, hasCustomRes: Boolean): List<String> {
+    fun extractGameArgs(json: JSONObject, enabled: Set<String> = FEATURES): List<String> {
+        val game = json.optJSONObject("arguments")?.optJSONArray("game") ?: return emptyList()
+        return flattenArgs(game, enabled).filterNot { isQuickPlayToken(it) }
+    }
+
+    private fun flattenArgs(arr: JSONArray, enabled: Set<String>): List<String> {
         val out = mutableListOf<String>()
         for (i in 0 until arr.length()) {
             val v = arr.opt(i) ?: continue
             when (v) {
-                is String -> out += v
+                is String -> if (!isQuickPlayToken(v)) out += v
                 is JSONObject -> {
-                    if (!ruleAllows(v, hasCustomRes)) continue
+                    if (!ruleAllows(v, enabled)) continue
                     when (val value = v.opt("value")) {
-                        is String -> out += value
+                        is String -> if (!isQuickPlayToken(value)) out += value
                         is JSONArray -> {
                             for (j in 0 until value.length()) {
                                 val s = value.optString(j)
-                                if (s.isNotBlank()) out += s
+                                if (s.isNotBlank() && !isQuickPlayToken(s)) out += s
                             }
                         }
                     }
@@ -262,7 +270,12 @@ object LaunchArgs {
         return out
     }
 
-    private fun ruleAllows(obj: JSONObject, hasCustomRes: Boolean): Boolean {
+    private fun flattenArgs(arr: JSONArray, hasCustomRes: Boolean): List<String> {
+        val enabled = if (hasCustomRes) FEATURES else emptySet()
+        return flattenArgs(arr, enabled)
+    }
+
+    internal fun ruleAllows(obj: JSONObject, enabled: Set<String> = FEATURES): Boolean {
         val rules = obj.optJSONArray("rules") ?: return true
         var allow = false
         for (i in 0 until rules.length()) {
@@ -270,21 +283,28 @@ object LaunchArgs {
             val os = rule.optJSONObject("os")
             if (os != null) {
                 val name = os.optString("name")
-                if (name.isNotBlank() && !name.equals("linux", true)) {
-                    if (rule.optString("action") == "disallow") continue
-                    continue
-                }
+                if (name.isNotBlank() && !name.equals("linux", ignoreCase = true)) continue
             }
-            val features = rule.optJSONObject("features")
-            if (features != null) {
-                if (features.has("has_custom_resolution") && features.optBoolean("has_custom_resolution") != hasCustomRes) {
-                    continue
-                }
-                if (features.has("is_demo_user") && features.optBoolean("is_demo_user")) continue
-            }
+            if (!featuresMatch(rule.optJSONObject("features"), enabled)) continue
             allow = rule.optString("action", "allow") == "allow"
         }
         return allow
+    }
+
+    private fun featuresMatch(features: JSONObject?, enabled: Set<String>): Boolean {
+        if (features == null) return true
+        val keys = features.keys()
+        while (keys.hasNext()) {
+            val key = keys.next() as String
+            if (features.optBoolean(key) != (key in enabled)) return false
+        }
+        return true
+    }
+
+    private fun isQuickPlayToken(token: String): Boolean {
+        return token.startsWith("--quickPlay") ||
+            token.contains("\${quickPlay") ||
+            token.contains("\${quick_play")
     }
 
     private fun fill(raw: String, vars: Map<String, String>): String {

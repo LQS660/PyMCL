@@ -75,6 +75,7 @@ public sealed partial class InstancePage : UserControl
         actions.Children.Add(IconBtn("📁", () => _ = Open(info.Name)));
         actions.Children.Add(IconBtn("☕", () => _ = PickJava(info.Name)));
         actions.Children.Add(IconBtn("✎", () => _ = Rename(info.Name)));
+        actions.Children.Add(IconBtn("⇪", () => _ = Export(info.Name)));
         actions.Children.Add(IconBtn("🗑", () => _ = Delete(info.Name)));
         Grid.SetRow(actions, 4);
         root.Children.Add(actions);
@@ -148,6 +149,16 @@ public sealed partial class InstancePage : UserControl
     {
         try { await AppServices.Client.CallAsync("open_instance_folder", new { name }); }
         catch (Exception ex) { AppServices.Toast?.Invoke("无法打开", ex.Message, InfoBarSeverity.Error); }
+    }
+
+    private async Task Export(string name)
+    {
+        try
+        {
+            await AppServices.Client.StartTaskAsync("export_modpack", new { instance = name });
+            AppServices.Toast?.Invoke("开始导出", name + " → exports/", InfoBarSeverity.Success);
+        }
+        catch (Exception ex) { AppServices.Toast?.Invoke("导出失败", ex.Message, InfoBarSeverity.Error); }
     }
 
     private async Task PickJava(string name)

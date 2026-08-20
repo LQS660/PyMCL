@@ -84,6 +84,18 @@ class SettingsPage(QWidget):
             checked=settings["share_assets"])
         iso_group.addSettingCard(self.share_libs_card)
         iso_group.addSettingCard(self.share_assets_card)
+        iso_map = {
+            "none": "关闭（共用实例目录）",
+            "saves": "隔离存档",
+            "all": "隔离全部",
+        }
+        self._iso_keys = {v: k for k, v in iso_map.items()}
+        self.iso_card, self.iso_box = _combo_card(
+            FIF.FOLDER, "新版本默认隔离",
+            "安装新版本时写入该版本的隔离模式，可稍后在版本设置改",
+            list(iso_map.values()),
+            iso_map.get(settings.get("default_isolation") or "none", iso_map["none"]))
+        iso_group.addSettingCard(self.iso_card)
         root.addWidget(iso_group)
 
         ui_group = SettingCardGroup("界面", host)
@@ -93,6 +105,19 @@ class SettingsPage(QWidget):
             "点击安装时，图标抛物线飞入侧栏「下载任务」",
             checked=bool(settings.get("ui_fly_animation", True)))
         ui_group.addSettingCard(self.fly_card)
+        self.dark_card, self.dark_sw = _switch_card(
+            FIF.BRIGHTNESS, "深色模式", "立即生效，接近 PCL 夜间主题",
+            checked=bool(settings.get("ui_dark")))
+        self.color_card, self.color_edit = _line_card(
+            FIF.PALETTE if hasattr(FIF, "PALETTE") else FIF.EDIT,
+            "主题色", "例如 #2E9B6B")
+        self.color_edit.setText(settings.get("theme_color") or "#2E9B6B")
+        self.bg_card, self.bg_edit = _line_card(
+            FIF.PHOTO, "背景图", "本地图片路径，留空为纯色")
+        self.bg_edit.setText(settings.get("ui_background") or "")
+        ui_group.addSettingCard(self.dark_card)
+        ui_group.addSettingCard(self.color_card)
+        ui_group.addSettingCard(self.bg_card)
         root.addWidget(ui_group)
 
         perf_group = SettingCardGroup("下载与性能", host)
@@ -124,6 +149,11 @@ class SettingsPage(QWidget):
         perf_group.addSettingCard(self.proxy_card)
         perf_group.addSettingCard(self.memory_card)
 
+        self.jvm_card, self.jvm_edit = _line_card(
+            FIF.DEVELOPER_TOOLS, "默认 JVM 参数", "所有版本都会带上，版本设置可再追加")
+        self.jvm_edit.setText(settings.get("default_jvm_args") or "")
+        perf_group.addSettingCard(self.jvm_card)
+
         res_card = SettingCard(FIF.VIEW, "默认分辨率", "游戏窗口的默认宽高")
         res_row = QHBoxLayout()
         self.width_spin = SpinBox(res_card)
@@ -151,6 +181,27 @@ class SettingsPage(QWidget):
         acc_group.addSettingCard(self.ms_card)
         acc_group.addSettingCard(self.curse_card)
         root.addWidget(acc_group)
+
+        maint_group = SettingCardGroup("维护", host)
+        self.upd_card, self.upd_url = _line_card(
+            FIF.UPDATE if hasattr(FIF, "UPDATE") else FIF.SYNC,
+            "更新清单 URL", "JSON：version / url / notes")
+        self.upd_url.setText(settings.get("update_url") or "")
+        maint_group.addSettingCard(self.upd_card)
+        tool_card = SettingCard(FIF.DEVELOPER_TOOLS, "维护工具", "更新、清理、导出、全局 Mod")
+        self.chk_upd = PrimaryPushButton("检查更新")
+        self.clean_btn = PushButton("清理")
+        self.export_btn = PushButton("导出实例")
+        self.global_btn = PushButton("全局 Mod")
+        for b in (self.chk_upd, self.clean_btn, self.export_btn, self.global_btn):
+            tool_card.hBoxLayout.addWidget(b, 0, Qt.AlignRight)
+        tool_card.hBoxLayout.addSpacing(8)
+        maint_group.addSettingCard(tool_card)
+        root.addWidget(maint_group)
+        self.chk_upd.clicked.connect(self._check_update)
+        self.clean_btn.clicked.connect(self._clean)
+        self.export_btn.clicked.connect(self._export)
+        self.global_btn.clicked.connect(self.backend.open_global_mods)
 
         ai_group = SettingCardGroup("AI 助手", host)
         mode_card = SettingCard(getattr(FIF, "CHAT", None) or FIF.HELP, "接入方式", "公益接口已内置，小白不用填密钥")
@@ -232,6 +283,46 @@ class SettingsPage(QWidget):
             fb.stop_heartbeat(send_offline=False)
         InfoBar.success("已保存", "设置已写入 config.json", parent=self,
                         position=InfoBarPosition.TOP, duration=2500)
+        win = self.window()
+        if hasattr(win, "apply_theme"):
+            win.apply_theme()
+
+    def _check_update(self):
+        def ok(info):
+            info = info or {}
+            if info.get("has_update"):
+                self.backend.start_self_update()
+                InfoBar.success("发现更新", info.get("message") or "", parent=self,
+                                position=InfoBarPosition.TOP, duration=4000)
+            else:
+                InfoBar.info("检查更新", info.get("message") or "已是最新", parent=self,
+                             position=InfoBarPosition.TOP, duration=3000)
+
+        def err(exc):
+            InfoBar.error("检查失败", str(exc), parent=self,
+                          position=InfoBarPosition.TOP, duration=4000)
+
+        self.backend.call_async(self.backend.check_update, ok, err)
+
+    def _clean(self):
+        info = self.backend.cleaner_preview()
+        n = info.get("count") or 0
+        from mclauncher.utils import format_size
+        box_msg = f"将删除 {n} 个未引用库 / 残留 .part / 更新缓存，约 {format_size(info.get('bytes') or 0)}"
+        from qfluentwidgets import MessageBox
+        box = MessageBox("清理文件", box_msg, self)
+        if not box.exec():
+            return
+        result = self.backend.cleaner_apply()
+        InfoBar.success("清理完成", f"删除 {result.get('removed')} 个文件", parent=self,
+                        position=InfoBarPosition.TOP, duration=3000)
+
+    def _export(self):
+        from mclauncher.config import CONFIG
+        name = CONFIG.get("default_instance") or "default"
+        self.backend.export_modpack(name)
+        InfoBar.success("开始导出", f"实例 {name} → exports/", parent=self,
+                        position=InfoBarPosition.TOP, duration=3000)
 
     def _test_ai(self):
         self.backend.save_settings(self.collect())
@@ -273,4 +364,10 @@ class SettingsPage(QWidget):
             "feedback_heartbeat": self.fb_hb.isChecked(),
             "feedback_consent": self.fb_consent.isChecked(),
             "ui_fly_animation": self.fly_sw.isChecked(),
+            "ui_dark": self.dark_sw.isChecked(),
+            "theme_color": self.color_edit.text().strip() or "#2E9B6B",
+            "ui_background": self.bg_edit.text().strip(),
+            "default_isolation": self._iso_keys.get(self.iso_box.currentText(), "none"),
+            "default_jvm_args": self.jvm_edit.text().strip(),
+            "update_url": self.upd_url.text().strip(),
         }

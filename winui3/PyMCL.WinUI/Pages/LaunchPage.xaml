@@ -100,7 +100,11 @@
                             <TextBlock Text="×" VerticalAlignment="Center" Margin="8,0"/>
                             <NumberBox x:Name="HeightSpin" Minimum="240" Maximum="4320" Value="480" Width="100" SpinButtonPlacementMode="Compact"/>
                         </StackPanel>
+                        <TextBlock Text="直连服务器" Style="{ThemeResource CaptionTextBlockStyle}"/>
+                        <TextBox x:Name="ServerEdit" PlaceholderText="host 或 host:port" Margin="0,4,0,10"/>
+                        <HyperlinkButton Content="此版本设置…" Click="VersionSetup_Click"/>
                         <HyperlinkButton Content="使用微软账户登录…" Click="Login_Click"/>
+                        <HyperlinkButton Content="皮肤站登录…" Click="Authlib_Click"/>
                     </StackPanel>
                 </ScrollViewer>
             </Border>
@@ -109,11 +113,15 @@
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
                     <TextBlock Text="实时日志" Style="{ThemeResource SubtitleTextBlockStyle}" Margin="0,0,0,8"/>
                     <TextBox x:Name="LogEdit" Grid.Row="1" IsReadOnly="True" AcceptsReturn="True"
                              TextWrapping="Wrap" PlaceholderText="启动日志将输出到这里…" FontSize="12"
                              MinHeight="140" HorizontalAlignment="Stretch"/>
+                    <StackPanel x:Name="NewsHost" Grid.Row="2" Margin="0,10,0,0" Spacing="4">
+                        <TextBlock Text="Minecraft 新闻" FontWeight="SemiBold"/>
+                    </StackPanel>
                 </Grid>
             </Border>
         </Grid>

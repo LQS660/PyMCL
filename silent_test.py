@@ -174,6 +174,27 @@ def main():
     check("rename 写回 meta.name", 'set_meta("name"' in inst_src)
     check("测试入口指向包而非遗留脚本", "mclauncher.launcher" in Path(__file__).read_text(encoding="utf-8"))
 
+    from mclauncher.argsplit import split_args
+    check("argsplit 引号", any("a b" in a for a in split_args('-Xmx4G -Dfoo="a b"')))
+    from mclauncher.authlib import normalize_api
+    check("authlib API 去尾斜杠", normalize_api("https://littleskin.cn/api/yggdrasil/") == "https://littleskin.cn/api/yggdrasil")
+    from mclauncher.updater import newer
+    check("updater 版本比较", newer("1.2.0", "1.0.1") and not newer("1.0.0", "1.0.1"))
+    from mclauncher.optifine import _profile
+    of = _profile("1.20.1", "HD_U", "I6", "net.minecraft:launchwrapper:2.3")
+    check("optifine 继承原版", of["inheritsFrom"] == "1.20.1" and of["jar"] == "1.20.1")
+    check("optifine 1.13+ tweak", "--tweakClass" in str(of.get("arguments")))
+    check("加载器含 OptiFine", "OptiFine" in vp)
+    check("账号页存在", (ROOT / "app" / "pages" / "account_page.py").is_file())
+    check("已装模组开关 UI", "已安装" in (ROOT / "app" / "pages" / "catalog_page.py").read_text(encoding="utf-8"))
+    check("启动页直连服务器", "server_edit" in lp)
+    mw = (ROOT / "app" / "main_window.py").read_text(encoding="utf-8")
+    check("侧栏有账号", '"account"' in mw)
+    be = inspect.getsource(BackendAPI)
+    check("backend 有 repair_version", "def repair_version" in be)
+    check("backend 有 authlib 登录", "def start_authlib_login" in be)
+    check("build_launch_command 返回 game_dir", "return cmd, natives_dir, vdir, game_directory" in src)
+
     if FAILED:
         sys.stderr.write("FAIL " + " | ".join(FAILED) + "\n")
         return 1

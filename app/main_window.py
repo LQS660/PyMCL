@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """主窗口：细顶栏 + 左侧 5 项导航。"""
 
-from qfluentwidgets import FluentIcon as FIF, InfoBar, InfoBarPosition, setThemeColor
+from qfluentwidgets import FluentIcon as FIF, InfoBar, InfoBarPosition, setTheme, setThemeColor, Theme
 from qfluentwidgets.window.fluent_window import FluentWindowBase
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QLabel
@@ -11,6 +11,7 @@ from .backend import BackendAPI
 from .fly_anim import fly_to
 from .pcl_chrome import PCL_BG, PCL_GREEN, PclSideBar, PclTitleBar, TITLE_H
 from .widgets import pick_color
+from .pages.account_page import AccountPage
 from .pages.ai_page import AiPage
 from .pages.catalog_page import DatapackPage, ModPage, ModpackPage, ResourcePackPage, ShaderPage
 from .pages.download_hub import DownloadSection
@@ -34,6 +35,7 @@ class MainWindow(FluentWindowBase):
         setThemeColor(PCL_GREEN, save=False)
 
         self.backend = BackendAPI(self)
+        self.apply_theme()
 
         self.launch_page = LaunchPage(self.backend, self)
         self.settings_page = SettingsPage(self.backend, self)
@@ -45,6 +47,7 @@ class MainWindow(FluentWindowBase):
         self.shader_page = ShaderPage(self.backend, self)
         self.java_page = JavaPage(self.backend, self)
         self.instance_page = InstancePage(self.backend, self)
+        self.account_page = AccountPage(self.backend, self)
         self.multiplayer_page = MultiplayerPage(self.backend, self)
         self.ai_page = AiPage(self.backend, self)
         self.feedback_page = FeedbackPage(self.backend, self)
@@ -63,6 +66,7 @@ class MainWindow(FluentWindowBase):
         self._pages = {
             "launch": self.launch_page,
             "instance": self.instance_page,
+            "account": self.account_page,
             "multiplayer": self.multiplayer_page,
             "download": self.download_section,
             "ai": self.ai_page,
@@ -77,6 +81,7 @@ class MainWindow(FluentWindowBase):
         self.side = PclSideBar([
             ("item", "launch", FIF.PLAY, "启动"),
             ("item", "instance", FIF.TILES, "实例"),
+            ("item", "account", FIF.PEOPLE, "账号"),
             ("item", "multiplayer", FIF.PEOPLE, "联机"),
             ("item", "download", FIF.DOWNLOAD, "下载"),
             ("item", "ai", getattr(FIF, "CHAT", None) or FIF.HELP, "AI 助手"),
@@ -119,6 +124,22 @@ class MainWindow(FluentWindowBase):
         self.backend.task_count_changed.connect(self._update_task_badge)
         self.stackedWidget.currentChanged.connect(lambda *_: self._place_download_dock())
         QTimer.singleShot(700, self._ask_feedback_consent)
+
+    def apply_theme(self):
+        color = self.backend.get_setting("theme_color", "#2E9B6B") or "#2E9B6B"
+        dark = bool(self.backend.get_setting("ui_dark", False))
+        setThemeColor(color, save=False)
+        setTheme(Theme.DARK if dark else Theme.LIGHT, save=False)
+        bg = "#1B1B1B" if dark else "#FFFFFF"
+        self.setCustomBackgroundColor(bg, "#1B1B1B")
+        image = self.backend.get_setting("ui_background", "") or ""
+        if image:
+            path = str(image).replace("\\", "/")
+            self.stackedWidget.setStyleSheet(
+                f"QStackedWidget {{ border-image: url('{path}') 0 0 0 0 stretch stretch; }}"
+            )
+        else:
+            self.stackedWidget.setStyleSheet("")
 
     def _ask_feedback_consent(self):
         from mclauncher import feedback as fb

@@ -100,6 +100,15 @@ class LaunchPage(QWidget):
         cfg.addRow("Java（本实例）", self.java_box)
         cfg.addRow("内存", mem_row)
         cfg.addRow("分辨率", res_row)
+        self.server_edit = LineEdit()
+        self.server_edit.setPlaceholderText("直连服务器 host 或 host:port")
+        cfg.addRow("服务器", self.server_edit)
+        setup_btn = TransparentPushButton(FIF.SETTING, "此版本设置…")
+        setup_btn.clicked.connect(self._version_setup)
+        news_btn = TransparentPushButton(FIF.SYNC, "刷新新闻")
+        news_btn.clicked.connect(self._load_news)
+        cfg.addRow("", setup_btn)
+        cfg.addRow("", news_btn)
 
         ms_btn = TransparentPushButton(FIF.PEOPLE, "使用微软账户登录…")
         ms_btn.clicked.connect(self._login)
@@ -114,6 +123,12 @@ class LaunchPage(QWidget):
         self.log_edit.setPlaceholderText("启动日志将输出到这里…")
         log_card.viewLayout.addWidget(self.log_edit)
         middle.addWidget(log_card, 1)
+
+        news_card = HeaderCardWidget(self)
+        news_card.setTitle("Minecraft 新闻")
+        self.news_host = QVBoxLayout()
+        news_card.viewLayout.addLayout(self.news_host)
+        middle.addWidget(news_card)
         root.addLayout(middle, 1)
 
         self.launch_btn.clicked.connect(self._on_launch)
@@ -129,6 +144,49 @@ class LaunchPage(QWidget):
         backend.login_status.connect(self._on_login_status)
 
         self.reload()
+        self._load_news()
+
+    def _version_setup(self):
+        from .version_setup import VersionSetupDialog
+        inst = self.instance_box.currentText() or "default"
+        ver = self.version_box.currentText()
+        if not ver:
+            InfoBar.info("未选择版本", "请先安装并选择一个版本", parent=self,
+                         position=InfoBarPosition.TOP, duration=2500)
+            return
+        dlg = VersionSetupDialog(self.backend, inst, ver, self)
+        if dlg.exec():
+            dlg.save()
+            InfoBar.success("已保存", "版本设置已写入", parent=self,
+                            position=InfoBarPosition.TOP, duration=2000)
+
+    def _load_news(self):
+        while self.news_host.count():
+            item = self.news_host.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        cached = self.backend.cached_news()
+        self._fill_news(cached)
+
+        def ok(rows):
+            while self.news_host.count():
+                item = self.news_host.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            self._fill_news(rows or [])
+
+        self.backend.call_async(self.backend.fetch_news, ok, lambda *_: None)
+
+    def _fill_news(self, rows):
+        if not rows:
+            self.news_host.addWidget(CaptionLabel("暂无新闻"))
+            return
+        for row in rows[:6]:
+            t = StrongBodyLabel(row.get("title") or "")
+            d = CaptionLabel((row.get("body") or row.get("version") or "")[:80])
+            d.setWordWrap(True)
+            self.news_host.addWidget(t)
+            self.news_host.addWidget(d)
 
     def reload(self):
         cur_inst = self.instance_box.currentText()
@@ -146,8 +204,15 @@ class LaunchPage(QWidget):
         accounts = self.backend.get_accounts()
         self.account_box.clear()
         self.account_box.addItems(accounts)
+        active = None
+        for row in self.backend.get_account_rows():
+            if row.get("active"):
+                active = row.get("name")
+                break
         if cur_acc in accounts:
             self.account_box.setCurrentText(cur_acc)
+        elif active in accounts:
+            self.account_box.setCurrentText(active)
 
         self._reload_versions()
         self._reload_java_box()
@@ -237,6 +302,14 @@ class LaunchPage(QWidget):
         self.launch_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self._crash_shown = False
+        extra = []
+        server = self.server_edit.text().strip()
+        if server:
+            if ":" in server:
+                host, port = server.rsplit(":", 1)
+                extra = ["--server", host, "--port", port]
+            else:
+                extra = ["--server", server, "--port", "25565"]
         self._task_id = self.backend.launch_game(
             instance=self.instance_box.currentText() or "default",
             version=self.version_box.currentText(),
@@ -246,6 +319,7 @@ class LaunchPage(QWidget):
             width=self.width_spin.value(),
             height=self.height_spin.value(),
             java=self._selected_java(),
+            extra_game_args=extra or None,
         )
 
     def _on_stop(self):

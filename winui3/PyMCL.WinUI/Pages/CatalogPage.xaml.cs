@@ -244,4 +244,59 @@ public sealed partial class CatalogPage : UserControl
         }
         catch (Exception ex) { AppServices.Toast?.Invoke("导入失败", ex.Message, InfoBarSeverity.Error); }
     }
+
+    private async void Installed_Click(object sender, RoutedEventArgs e)
+    {
+        if (AppServices.Client is null) return;
+        ResultList.Children.Clear();
+        var inst = InstanceBox.SelectedItem as string ?? "default";
+        try
+        {
+            if (_kind.Title == "Mod")
+            {
+                var rows = await AppServices.Client.CallAsync<List<ModEntry>>("get_installed_mod_entries", new { instance = inst }) ?? new();
+                if (rows.Count == 0)
+                {
+                    ResultList.Children.Add(new TextBlock { Text = "还没有安装模组", Margin = new Thickness(12), Opacity = 0.7 });
+                    return;
+                }
+                foreach (var row in rows)
+                {
+                    var g = new Grid { Padding = new Thickness(12, 8, 12, 8) };
+                    g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                    g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                    g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                    g.Children.Add(new TextBlock { Text = row.Filename, VerticalAlignment = VerticalAlignment.Center });
+                    var sw = new ToggleSwitch { IsOn = row.Enabled, OnContent = "开", OffContent = "关" };
+                    var name = row.Filename;
+                    sw.Toggled += async (_, _) =>
+                    {
+                        try
+                        {
+                            if (sw.IsOn) await AppServices.Client.CallAsync("enable_mod", new { instance = inst, filename = name });
+                            else await AppServices.Client.CallAsync("disable_mod", new { instance = inst, filename = name });
+                        }
+                        catch { Installed_Click(sender, e); }
+                    };
+                    var del = new Button { Content = "删除" };
+                    del.Click += async (_, _) =>
+                    {
+                        try { await AppServices.Client.CallAsync("delete_mod", new { instance = inst, filename = name }); Installed_Click(sender, e); }
+                        catch (Exception ex) { AppServices.Toast?.Invoke("删除失败", ex.Message, InfoBarSeverity.Error); }
+                    };
+                    Grid.SetColumn(sw, 1);
+                    Grid.SetColumn(del, 2);
+                    g.Children.Add(sw);
+                    g.Children.Add(del);
+                    ResultList.Children.Add(g);
+                }
+                return;
+            }
+            ResultList.Children.Add(new TextBlock { Text = "此分类请在实例文件夹中管理", Margin = new Thickness(12), Opacity = 0.7 });
+        }
+        catch (Exception ex)
+        {
+            ResultList.Children.Add(new TextBlock { Text = ex.Message, Margin = new Thickness(12) });
+        }
+    }
 }

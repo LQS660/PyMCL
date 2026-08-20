@@ -3,6 +3,7 @@ package com.pymcl.mobile.data
 import com.pymcl.mobile.model.AccountInfo
 import com.pymcl.mobile.model.DeviceCode
 import okhttp3.FormBody
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.Request
 import org.json.JSONObject
 
@@ -16,6 +17,7 @@ object AuthRepo {
                 uuid = it.optString("uuid"),
                 accessToken = it.optString("access_token"),
                 refreshToken = it.optString("refresh_token"),
+                api = it.optString("api"),
             )
         }
         return listOf(offline) + saved
@@ -69,5 +71,48 @@ object AuthRepo {
                 .put("refresh_token", refresh),
         )
         InstanceStore.saveAccounts(list)
+    }
+
+    fun loginAuthlib(api: String, username: String, password: String): JSONObject {
+        val base = api.trim().trimEnd('/')
+        if (base.isBlank()) throw HttpException("请填写皮肤站 API")
+        val payload = JSONObject()
+            .put("agent", JSONObject().put("name", "Minecraft").put("version", 1))
+            .put("username", username.trim())
+            .put("password", password)
+            .put("requestUser", true)
+        val body = okhttp3.RequestBody.create(
+            "application/json; charset=utf-8".toMediaTypeOrNull(),
+            payload.toString(),
+        )
+        val req = Request.Builder()
+            .url("$base/authserver/authenticate")
+            .header("User-Agent", Paths.UA)
+            .post(body)
+            .build()
+        Http.client.newCall(req).execute().use { resp ->
+            val text = resp.body?.string().orEmpty()
+            val o = runCatching { JSONObject(text) }.getOrNull() ?: JSONObject()
+            if (!resp.isSuccessful) {
+                throw HttpException(o.optString("errorMessage", o.optString("error", text.take(160))))
+            }
+            val profile = o.optJSONObject("selectedProfile")
+                ?: o.optJSONArray("availableProfiles")?.optJSONObject(0)
+                ?: JSONObject()
+            val name = profile.optString("name")
+            if (name.isBlank()) throw HttpException("皮肤站没有可用角色")
+            val list = InstanceStore.loadAccounts().toMutableList()
+            list.removeAll { it.optString("name") == name }
+            list.add(
+                JSONObject()
+                    .put("name", name)
+                    .put("type", "authlib")
+                    .put("uuid", profile.optString("id"))
+                    .put("access_token", o.optString("accessToken"))
+                    .put("api", base),
+            )
+            InstanceStore.saveAccounts(list)
+            return profile
+        }
     }
 }

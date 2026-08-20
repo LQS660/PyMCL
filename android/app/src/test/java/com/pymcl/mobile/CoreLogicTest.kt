@@ -5,6 +5,7 @@ import com.pymcl.mobile.data.CatalogRepo
 import com.pymcl.mobile.data.Http
 import com.pymcl.mobile.data.Installer
 import com.pymcl.mobile.data.JavaRuntime
+import com.pymcl.mobile.data.LaunchArgs
 import com.pymcl.mobile.data.LaunchPlanner
 import com.pymcl.mobile.data.ManifestRepo
 import com.pymcl.mobile.data.Names
@@ -160,6 +161,37 @@ class CoreLogicTest {
     }
 
     @Test
+    fun inheritsFromMergesLibrariesAndParentJar() {
+        val root = kotlin.io.path.createTempDirectory("pymcl-inh").toFile()
+        try {
+            File(root, "versions/1.20.1").mkdirs()
+            File(root, "versions/1.20.1/1.20.1.jar").writeText("jar")
+            File(root, "versions/1.20.1/1.20.1.json").writeText(
+                """{"id":"1.20.1","mainClass":"net.minecraft.client.main.Main","libraries":[{"name":"com.mojang:patchy:1.1","downloads":{"artifact":{"path":"com/mojang/patchy/1.1/patchy-1.1.jar"}}}]}""",
+            )
+            File(root, "versions/1.20.1-fabric").mkdirs()
+            File(root, "versions/1.20.1-fabric/1.20.1-fabric.json").writeText(
+                """{"id":"1.20.1-fabric","inheritsFrom":"1.20.1","mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient","libraries":[{"name":"net.fabricmc:fabric-loader:0.16.0","downloads":{"artifact":{"path":"net/fabricmc/fabric-loader/0.16.0/fabric-loader-0.16.0.jar"}}}]}""",
+            )
+            File(root, "libraries/com/mojang/patchy/1.1").mkdirs()
+            File(root, "libraries/com/mojang/patchy/1.1/patchy-1.1.jar").writeText("a")
+            File(root, "libraries/net/fabricmc/fabric-loader/0.16.0").mkdirs()
+            File(root, "libraries/net/fabricmc/fabric-loader/0.16.0/fabric-loader-0.16.0.jar").writeText("b")
+            File(root, "versions/1.20.1-fabric/pymcl.json").writeText("""{"isolation":"all"}""")
+
+            val plan = LaunchPlanner.plan("t", "1.20.1-fabric", "Player", 2048, instDir = root)
+            assertEquals("net.fabricmc.loader.impl.launch.knot.KnotClient", plan.mainClass)
+            assertTrue(plan.classpath.any { it.replace('\\', '/').endsWith("patchy-1.1.jar") })
+            assertTrue(plan.classpath.any { it.replace('\\', '/').endsWith("fabric-loader-0.16.0.jar") })
+            assertTrue(plan.classpath.any { it.replace('\\', '/').endsWith("1.20.1.jar") })
+            assertTrue(plan.missing.isEmpty())
+            assertTrue(plan.gameDir.replace('\\', '/').endsWith("versions/1.20.1-fabric"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun publicAiUsesHttpLowercaseHost() {
         assertEquals("http://new.s.3q.hair/v1", AiRepo.PUBLIC_BASE)
         assertEquals("deepseek-v4-flash", AiRepo.MODEL)
@@ -207,5 +239,24 @@ class CoreLogicTest {
         assertTrue(JavaRuntime.isLwjglLibraryPath("libraries/org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3.jar"))
         assertFalse(JavaRuntime.isLwjglLibraryPath("libraries/com/mojang/patchy/1.1/patchy-1.1.jar"))
         assertEquals(36, JavaRuntime.offlineUuid("Player").length)
+    }
+
+    @Test
+    fun gameArgsSkipQuickPlayKeepResolution() {
+        val json = JSONObject(
+            """
+            {"arguments":{"game":[
+              "--username","Player",
+              {"rules":[{"action":"allow","features":{"has_custom_resolution":true}}],"value":["--width","${'$'}{resolution_width}"]},
+              {"rules":[{"action":"allow","features":{"is_quick_play_singleplayer":true}}],"value":["--quickPlaySingleplayer","${'$'}{quickPlaySingleplayer}"]},
+              {"rules":[{"action":"allow","features":{"is_demo_user":true}}],"value":"--demo"}
+            ]}}
+            """.trimIndent(),
+        )
+        val args = LaunchArgs.extractGameArgs(json)
+        assertTrue(args.contains("--username"))
+        assertTrue(args.contains("--width"))
+        assertFalse(args.any { it.contains("quickPlay") })
+        assertFalse(args.contains("--demo"))
     }
 }

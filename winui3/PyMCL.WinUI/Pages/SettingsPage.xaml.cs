@@ -52,6 +52,11 @@ public sealed partial class SettingsPage : UserControl
         AiModel.Text = s.AiModel;
         AiModeBox.SelectedIndex = s.AiMode == "custom" ? 1 : 0;
         SyncAiMode();
+        if (IsoBox != null)
+        {
+            IsoBox.SelectedIndex = s.DefaultIsolation == "all" ? 2 : s.DefaultIsolation == "saves" ? 1 : 0;
+        }
+        if (JvmEdit != null) JvmEdit.Text = s.DefaultJvmArgs ?? "";
         RootLabel.Text = "启动器主目录: " + s.Root;
     }
 
@@ -76,6 +81,8 @@ public sealed partial class SettingsPage : UserControl
                     ai_base_url = AiBase.Text?.Trim() ?? "",
                     ai_api_key = AiKey.Password?.Trim() ?? "",
                     ai_model = string.IsNullOrWhiteSpace(AiModel.Text) ? "deepseek-v4-flash" : AiModel.Text.Trim(),
+                    default_isolation = (IsoBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "none",
+                    default_jvm_args = JvmEdit?.Text?.Trim() ?? "",
                 },
             });
             AppServices.Toast?.Invoke("已保存", "设置已写入 config.json", InfoBarSeverity.Success);
@@ -123,5 +130,52 @@ public sealed partial class SettingsPage : UserControl
         {
             AppServices.Toast?.Invoke("AI 连接失败", ex.Message, InfoBarSeverity.Error);
         }
+    }
+
+    private async void Update_Click(object sender, RoutedEventArgs e)
+    {
+        if (AppServices.Client is null) return;
+        try
+        {
+            var info = await AppServices.Client.CallAsync<Dictionary<string, object>>("check_update") ?? new();
+            var has = info.TryGetValue("has_update", out var h) && h is bool b && b;
+            var msg = info.TryGetValue("message", out var m) ? m?.ToString() ?? "" : "";
+            if (has)
+            {
+                await AppServices.Client.StartTaskAsync("start_self_update");
+                AppServices.Toast?.Invoke("发现更新", msg, InfoBarSeverity.Success);
+            }
+            else AppServices.Toast?.Invoke("检查更新", string.IsNullOrEmpty(msg) ? "已是最新" : msg, InfoBarSeverity.Informational);
+        }
+        catch (Exception ex) { AppServices.Toast?.Invoke("检查失败", ex.Message, InfoBarSeverity.Error); }
+    }
+
+    private async void Clean_Click(object sender, RoutedEventArgs e)
+    {
+        if (AppServices.Client is null) return;
+        try
+        {
+            var preview = await AppServices.Client.CallAsync<Dictionary<string, object>>("cleaner_preview") ?? new();
+            var n = preview.TryGetValue("count", out var c) ? c?.ToString() : "0";
+            var dlg = new ContentDialog
+            {
+                Title = "清理文件",
+                Content = "将删除未引用库 / .part / 更新缓存，共 " + n + " 个",
+                PrimaryButtonText = "清理",
+                CloseButtonText = "取消",
+                XamlRoot = XamlRoot,
+            };
+            if (await dlg.ShowAsync() != ContentDialogResult.Primary) return;
+            var result = await AppServices.Client.CallAsync<Dictionary<string, object>>("cleaner_apply") ?? new();
+            AppServices.Toast?.Invoke("清理完成", "删除 " + (result.TryGetValue("removed", out var r) ? r : 0) + " 个文件", InfoBarSeverity.Success);
+        }
+        catch (Exception ex) { AppServices.Toast?.Invoke("清理失败", ex.Message, InfoBarSeverity.Error); }
+    }
+
+    private async void GlobalMods_Click(object sender, RoutedEventArgs e)
+    {
+        if (AppServices.Client is null) return;
+        try { await AppServices.Client.CallAsync("open_global_mods"); }
+        catch (Exception ex) { AppServices.Toast?.Invoke("打开失败", ex.Message, InfoBarSeverity.Error); }
     }
 }

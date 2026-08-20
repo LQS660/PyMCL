@@ -24,6 +24,7 @@ from mclauncher import modpack as modpack_mod
 from mclauncher import mods as mods_mod
 from mclauncher.crash import GameCrashError, analyze_launch, export_report, open_path
 from mclauncher.launcher import LaunchError, build_launch_command, GameProcess
+from mclauncher import terracotta as terracotta_mod
 
 _tls = threading.local()
 
@@ -335,12 +336,44 @@ class BackendAPI:
     def download_java(self, major: str) -> str:
         return self.start_task(f"下载 Java {major}", self._download_java_impl, major)
 
+    def terracotta_player(self) -> str:
+        acc = self.accounts.get_active()
+        if acc and acc.get("name"):
+            return str(acc["name"])
+        return "Player"
+
+    def terracotta_snapshot(self) -> dict:
+        game_on = bool(self._game_proc and getattr(self._game_proc, "poll", lambda: 0)() is None)
+        return terracotta_mod.snapshot(self.terracotta_player(), game_running=game_on)
+
+    def terracotta_prepare(self) -> str:
+        return self.start_task("准备陶瓦联机", self._terracotta_prepare_impl)
+
+    def terracotta_host(self):
+        terracotta_mod.set_scanning(self.terracotta_player())
+
+    def terracotta_join(self, room: str):
+        terracotta_mod.set_guesting(room, self.terracotta_player())
+
+    def terracotta_idle(self):
+        terracotta_mod.set_waiting()
+
+    def terracotta_allow_firewall(self) -> str:
+        return terracotta_mod.allow_firewall()
+
+    def terracotta_open_firewall_settings(self):
+        terracotta_mod.open_firewall_settings()
+
+    def terracotta_shutdown(self):
+        terracotta_mod.stop()
+
     def launch_game(self, instance: str, version: str, account: str,
                     username: str, memory_mb: int, width: int, height: int,
-                    java: str = "自动选择") -> str:
+                    java: str = "自动选择", extra_game_args=None) -> str:
         task_id = self.start_task(
             f"启动游戏 {version}", self._launch_game_impl,
             instance, version, account, username, memory_mb, width, height, java,
+            extra_game_args,
         )
         self._launch_task_id = task_id
         return task_id
@@ -377,9 +410,29 @@ class BackendAPI:
         else:
             subprocess.Popen(["xdg-open", str(path)])
 
-    def delete_mod(self, instance: str, filename: str):
-        mods_mod.delete_mod(self._instance(instance), filename)
+    def delete_mod(self, instance: str, filename: str, version: str = ""):
+        inst = self._instance(instance)
+        folder = self._mods_folder(inst, version)
+        mods_mod.delete_mod(inst, filename, mods_dir=folder)
         self._emit("ui_changed", {})
+
+    def disable_mod(self, instance: str, filename: str, version: str = "") -> str:
+        inst = self._instance(instance)
+        name = mods_mod.set_mod_enabled(inst, filename, False, mods_dir=self._mods_folder(inst, version))
+        self._emit("ui_changed", {})
+        return name
+
+    def enable_mod(self, instance: str, filename: str, version: str = "") -> str:
+        inst = self._instance(instance)
+        name = mods_mod.set_mod_enabled(inst, filename, True, mods_dir=self._mods_folder(inst, version))
+        self._emit("ui_changed", {})
+        return name
+
+    def _mods_folder(self, inst, version: str = ""):
+        if version:
+            from mclauncher import version_settings as vs
+            return vs.mods_dir(inst, version)
+        return inst.path / "mods"
 
     def get_installed_mods(self, instance: str) -> list[str]:
         return [p.name for p in mods_mod.list_instance_mods(self._instance(instance))]
@@ -446,6 +499,12 @@ class BackendAPI:
             "feedback_url": CONFIG.get("feedback_url") or DEFAULT_FEEDBACK_URL or "",
             "feedback_heartbeat": bool(CONFIG.get("feedback_heartbeat", True)),
             "feedback_consent": CONFIG.get("feedback_consent") is True,
+            "default_isolation": CONFIG.get("default_isolation") or "none",
+            "default_jvm_args": CONFIG.get("default_jvm_args") or "",
+            "update_url": CONFIG.get("update_url") or "",
+            "download_source": CONFIG.get("download_source") or "auto",
+            "community_source": CONFIG.get("community_source") or "auto",
+            "use_system_proxy": bool(CONFIG.get("use_system_proxy", True)),
         }
 
     def save_settings(self, data: dict):
@@ -474,6 +533,18 @@ class BackendAPI:
             patch["feedback_heartbeat"] = bool(data.get("feedback_heartbeat"))
         if "feedback_consent" in data:
             patch["feedback_consent"] = bool(data.get("feedback_consent"))
+        if "default_isolation" in data:
+            patch["default_isolation"] = data.get("default_isolation") or "none"
+        if "default_jvm_args" in data:
+            patch["default_jvm_args"] = data.get("default_jvm_args") or ""
+        if "update_url" in data:
+            patch["update_url"] = data.get("update_url") or ""
+        if "download_source" in data:
+            patch["download_source"] = data.get("download_source") or "auto"
+        if "community_source" in data:
+            patch["community_source"] = data.get("community_source") or "auto"
+        if "use_system_proxy" in data:
+            patch["use_system_proxy"] = bool(data.get("use_system_proxy"))
         CONFIG.update(patch)
         CONFIG.save()
 
@@ -503,9 +574,108 @@ class BackendAPI:
     def get_accounts(self) -> list[str]:
         names = ["离线模式"]
         for acc in self.accounts.accounts:
-            if acc.get("type") == "microsoft" and acc.get("name"):
-                names.append(acc["name"])
+            name = acc.get("name")
+            if name and name not in names:
+                names.append(name)
         return names
+
+    def get_account_rows(self) -> list[dict]:
+        from mclauncher import skin as skin_mod
+        rows = []
+        for acc in self.accounts.accounts:
+            rows.append({
+                "name": acc.get("name") or "",
+                "type": acc.get("type") or "offline",
+                "uuid": acc.get("uuid") or "",
+                "api": acc.get("api") or "",
+                "avatar": skin_mod.avatar_url(acc),
+                "body": skin_mod.body_url(acc),
+                "active": acc.get("name") == self.accounts.active,
+            })
+        return rows
+
+    def remove_account(self, name: str):
+        self.accounts.remove_account(name)
+        self._emit("ui_changed", {})
+
+    def set_active_account(self, name: str):
+        self.accounts.set_active(name)
+        self._emit("ui_changed", {})
+        return self.accounts.active
+
+    def add_offline_account(self, username: str):
+        acc = self.accounts.offline_account(username)
+        self.accounts.add_account({**acc, "type": "offline"})
+        self._emit("ui_changed", {})
+        return acc["name"]
+
+    def start_authlib_login(self, api: str, username: str, password: str) -> str:
+        return self.start_task("皮肤站登录", self._authlib_login_impl, api, username, password)
+
+    def get_version_settings(self, instance: str, version: str) -> dict:
+        from mclauncher import version_settings as vs
+        return vs.load(self._instance(instance), version)
+
+    def save_version_settings(self, instance: str, version: str, data: dict) -> dict:
+        from mclauncher import version_settings as vs
+        out = vs.save(self._instance(instance), version, data or {})
+        self._emit("ui_changed", {})
+        return out
+
+    def repair_version(self, instance: str, version: str) -> str:
+        return self.start_task(f"修复 {version}", self._repair_impl, instance, version)
+
+    def export_modpack(self, instance: str, dest: str = "") -> str:
+        return self.start_task(f"导出整合包 {instance}", self._export_pack_impl, instance, dest)
+
+    def start_mod_updates(self, instance: str) -> str:
+        return self.start_task(f"检查模组更新 {instance}", self._mod_update_impl, instance)
+
+    def cleaner_preview(self) -> dict:
+        from mclauncher import cleaner as cleaner_mod
+        return cleaner_mod.preview()
+
+    def cleaner_apply(self, kinds=None) -> dict:
+        from mclauncher import cleaner as cleaner_mod
+        return cleaner_mod.apply(kinds)
+
+    def check_update(self) -> dict:
+        from mclauncher import updater as updater_mod
+        return updater_mod.check()
+
+    def fetch_news(self) -> list:
+        from mclauncher import news as news_mod
+        return news_mod.fetch()
+
+    def cached_news(self) -> list:
+        from mclauncher import news as news_mod
+        return news_mod.load_cached()
+
+    def lan_hint(self, port: int = 25565) -> str:
+        from mclauncher import lan as lan_mod
+        return lan_mod.lan_hint(port)
+
+    def authlib_presets(self) -> list:
+        from mclauncher.authlib import PRESETS
+        return [{"name": a, "api": b} for a, b in PRESETS]
+
+    def get_installed_mod_entries(self, instance: str, version: str = "") -> list:
+        inst = self._instance(instance)
+        if version:
+            return mods_mod.list_mod_entries_at(self._mods_folder(inst, version))
+        return mods_mod.list_instance_mod_entries(inst)
+
+    def open_global_mods(self):
+        from mclauncher import global_mods as gm
+        path = gm.root()
+        utils.ensure_dir(path)
+        if os.name == "nt":
+            os.startfile(path)
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+
+    def start_self_update(self) -> str:
+        return self.start_task("更新启动器", self._self_update_impl)
 
     def get_version_list(self) -> list[dict]:
         cached = utils.read_json(utils.ROOT / "cache" / "version_manifest.json", None) or {}
@@ -817,6 +987,10 @@ class BackendAPI:
                 vid = installer.install_forge(version, loader_version or None)
             elif kind == "neoforge":
                 vid = installer.install_neoforge(version, loader_version or None)
+            elif kind == "optifine":
+                vid = installer.install_optifine(version)
+            elif kind == "liteloader":
+                vid = installer.install_liteloader(version)
             else:
                 raise InstallError(f"未知加载器: {loader}")
             log(f"加载器安装完成: {vid}")
@@ -924,8 +1098,16 @@ class BackendAPI:
         )
         log(f"Java {major} 就绪: {exe}")
 
+    def _terracotta_prepare_impl(self, progress, log):
+        dm = self._dm(progress, log)
+        terracotta_mod.install(dm, log=log)
+        progress(1, 1, "启动内核")
+        terracotta_mod.start(log=log)
+        return "陶瓦联机已就绪"
+
     def _launch_game_impl(self, progress, log, instance, version, account,
-                          username, memory_mb, width, height, java="自动选择"):
+                          username, memory_mb, width, height, java="自动选择",
+                          extra_game_args=None):
         if not version:
             raise LaunchError("请先选择版本（到「版本」页安装）")
         inst = self._instance(instance)
@@ -941,16 +1123,15 @@ class BackendAPI:
                 raise LaunchError(f"账号不存在: {account}")
             acc = self.accounts.ensure_valid(acc)
         props = self.accounts.launch_props(acc)
-        log(f"账号: {props.get('name')} ({'正版' if props.get('user_type') == 'msa' else '离线'})")
+        log(f"账号: {props.get('name')} ({'正版' if props.get('user_type') == 'msa' else ('皮肤站' if props.get('authlib_api') else '离线')})")
         log(f"内存: {memory_mb} MB | 分辨率: {width}x{height}")
 
-        mods_dir = inst.path / "mods"
-        jar_count = 0
-        if mods_dir.is_dir():
-            jar_count = sum(1 for p in mods_dir.iterdir() if p.suffix.lower() == ".jar")
-        looks_loader = any(tok in version.lower() for tok in ("forge", "fabric", "quilt", "neoforge"))
-        if jar_count and not looks_loader:
-            log(f"警告: mods 里有 {jar_count} 个 jar，但当前版本是原版，不会加载模组")
+        from mclauncher import launch_flow
+        prep = launch_flow.prepare(inst, version, extra_game_args=extra_game_args, memory_mb=memory_mb)
+        memory_mb = prep["memory_mb"] or memory_mb
+        extra_game_args = prep["extra_game_args"]
+        game_dir = prep["game_dir"]
+        launch_flow.run_hook(prep["settings"].get("pre_launch") or "", game_dir, log=log)
 
         progress(1, 4, "检查 Java")
         vjson = inst.version_json(version) or {}
@@ -960,6 +1141,8 @@ class BackendAPI:
             resolved = vjson
         prefer = None
         java_choice = java
+        if prep["settings"].get("java") and prep["settings"]["java"] != JAVA_AUTO:
+            java_choice = prep["settings"]["java"]
         if not java_choice or java_choice == JAVA_AUTO:
             java_choice = inst.java_pref()
         if java_choice and java_choice != JAVA_AUTO:
@@ -982,15 +1165,22 @@ class BackendAPI:
         log(f"Java -version: {ver_line}")
         log(f"使用 Java {java_mod.get_java_major(java_exe) or '?'}: {java_exe}")
         progress(2, 4, "构建启动参数")
-        cmd, _natives, _vdir = build_launch_command(
+        if props.get("authlib_api"):
+            from mclauncher import authlib as authlib_mod
+            authlib_mod.ensure_injector(self._dm(progress, log), on_note=log)
+        cmd, _natives, _vdir, game_dir = build_launch_command(
             inst, version, props, java_exe,
             memory_mb=memory_mb, width=width, height=height,
+            extra_game_args=extra_game_args,
+            extra_jvm_args=prep["jvm_args"],
+            game_directory=game_dir,
+            authlib_api=props.get("authlib_api"),
         )
         log(f"实际启动: {cmd[0]}")
         log("正在启动游戏进程…")
         progress(3, 4, "游戏启动中")
         worker = getattr(_tls, "worker", None)
-        proc = GameProcess(cmd, cwd=inst.path, on_line=log)
+        proc = GameProcess(cmd, cwd=game_dir, on_line=log, priority=prep["priority"])
         with self._game_lock:
             self._game_proc = proc
         try:
@@ -1003,10 +1193,12 @@ class BackendAPI:
             log("已停止游戏")
             return
         log(f"游戏已退出，退出码 {code}")
+        launch_flow.run_hook(prep["settings"].get("post_launch") or "", game_dir, log=log)
         report = analyze_launch(
             inst, exit_code=code, output_lines=proc.last_lines(),
             started_at=getattr(proc, "started_at", None),
             cancelled=False, version=version,
+            extra_roots=[game_dir],
         )
         if report.get("is_crash"):
             log(f"[崩溃分析] {report.get('summary') or report.get('headline')}")
@@ -1033,6 +1225,51 @@ class BackendAPI:
         self.accounts.add_account(account)
         log(f"登录成功：{account.get('name')}")
         return f"已登录 {account.get('name')}"
+
+    def _authlib_login_impl(self, progress, log, api, username, password):
+        from mclauncher import authlib as authlib_mod
+        authlib_mod.ensure_injector(self._dm(progress, log), on_note=log)
+        account = authlib_mod.login(api, username, password)
+        self.accounts.add_account(account)
+        log(f"皮肤站登录成功：{account.get('name')}")
+        return f"已登录 {account.get('name')}"
+
+    def _repair_impl(self, progress, log, instance, version):
+        from mclauncher.repair import repair
+        inst = self._instance(instance)
+        dm = self._dm(progress, log)
+        installer = Installer(inst, dm, on_progress=dm.on_progress, cancel=dm.cancel)
+        return repair(installer, version)
+
+    def _export_pack_impl(self, progress, log, instance, dest):
+        from mclauncher.export_pack import export_mrpack
+        inst = self._instance(instance)
+        if not dest:
+            dest = str(utils.ROOT / "exports" / f"{inst.name}.mrpack")
+        dm = self._dm(progress, log)
+        return export_mrpack(inst, dest, dm=dm, on_note=lambda m, a, b: progress(a, b, m))
+
+    def _mod_update_impl(self, progress, log, instance):
+        from mclauncher.mod_update import apply_update, check_updates
+        inst = self._instance(instance)
+        dm = self._dm(progress, log)
+        rows = check_updates(inst, dm=dm)
+        if not rows:
+            return "没有可更新的模组"
+        for i, row in enumerate(rows):
+            apply_update(inst, row, dm=dm)
+            progress(i + 1, len(rows), row.get("name") or "")
+        return f"已更新 {len(rows)} 个模组"
+
+    def _self_update_impl(self, progress, log):
+        from mclauncher import updater as updater_mod
+        info = updater_mod.check()
+        if not info.get("has_update"):
+            return info.get("message") or "已是最新"
+        log(info.get("message") or "下载更新")
+        path = updater_mod.download(info)
+        log(updater_mod.apply_exe(path))
+        return "更新包已就绪，重启后生效"
 
     def test_ai_connection(self) -> str:
         from mclauncher.ai.client import test_connection

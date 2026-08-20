@@ -58,6 +58,14 @@ DEFAULT_CONFIG = {
     "feedback_heartbeat": True,
     "feedback_consent": None,
     "device_id": "",
+    "default_isolation": "none",
+    "default_jvm_args": "",
+    "default_priority": "normal",
+    "update_url": "https://pymcl.dev/update.json",
+    "theme_color": "#2E9B6B",
+    "ui_dark": False,
+    "ui_background": "",
+    "global_mods_dir": "",
 }
 
 

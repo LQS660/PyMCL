@@ -62,6 +62,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var aiOut by mutableStateOf("公益助手已接通，直接发消息。")
     var aiUrl by mutableStateOf("")
     var roomCode by mutableStateOf("")
+    var skinApi by mutableStateOf("https://littleskin.cn/api/yggdrasil")
+    var skinUser by mutableStateOf("")
+    var skinPw by mutableStateOf("")
     var device by mutableStateOf<DeviceCode?>(null)
     var error by mutableStateOf<String?>(null)
     var runtimePkg by mutableStateOf<String?>(null)
@@ -306,6 +309,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 aiOut += "\n助手: 失败 ${e.message}"
             } finally {
                 aiBusy = false
+            }
+        }
+    }
+
+    fun loginAuthlib() {
+        viewModelScope.launch {
+            try {
+                val name = withContext(Dispatchers.IO) {
+                    AuthRepo.loginAuthlib(skinApi, skinUser, skinPw).optString("name")
+                }
+                append("皮肤站已登录 $name")
+                refreshLocal()
+            } catch (e: Exception) {
+                error = e.message
+                append("皮肤站登录失败: ${e.message}")
             }
         }
     }

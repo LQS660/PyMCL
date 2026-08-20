@@ -55,7 +55,12 @@ class MultiplayerPage(QWidget):
         head.addWidget(CaptionLabel(
             "输入邀请码即可加入。陶瓦是 EasyTier P2P 打洞，不是 FRP 隧道；"
             "会和 HMCL 一样传官方节点，并带上本机 HMCL 用过的自定义会合节点。"
+            "官方 PCL 联机大厅协议未开放，PCL 房间号无法互通；局域网请用下面地址。"
         ))
+        self.lan_hint = CaptionLabel(self.backend.lan_hint())
+        self.lan_hint.setWordWrap(True)
+        self.lan_hint.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        head.addWidget(self.lan_hint)
         root.addLayout(head)
 
         self.status = BodyLabel("正在检查联机内核…")

@@ -320,6 +320,24 @@ class PclCatalogPage(QWidget):
         result_card = PclCard()
         rc = QVBoxLayout(result_card)
         rc.setContentsMargins(8, 6, 8, 8)
+        mode_row = QHBoxLayout()
+        self.mode_search = PushButton("浏览")
+        self.mode_installed = PushButton("已安装")
+        for b in (self.mode_search, self.mode_installed):
+            b.setFixedHeight(28)
+            b.setCheckable(True)
+        self.mode_search.setChecked(True)
+        self.update_btn = TransparentPushButton(FIF.SYNC, "检查更新")
+        self.installed_ver_box = ComboBox()
+        self.installed_ver_box.setFixedWidth(160)
+        self.installed_ver_box.addItem("实例目录")
+        self.installed_ver_box.setVisible(False)
+        mode_row.addWidget(self.mode_search)
+        mode_row.addWidget(self.mode_installed)
+        mode_row.addWidget(self.installed_ver_box)
+        mode_row.addStretch(1)
+        mode_row.addWidget(self.update_btn)
+        rc.addLayout(mode_row)
         scroll = ScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("ScrollArea { background: transparent; border: none; }")
@@ -337,9 +355,15 @@ class PclCatalogPage(QWidget):
         self.link_btn.clicked.connect(self._install_from_link)
         self.local_btn.clicked.connect(self._import_local)
         self.instance_box.currentTextChanged.connect(self.reload_installed)
+        self.installed_ver_box.currentTextChanged.connect(self.reload_installed)
+        self.mode_search.clicked.connect(lambda: self._set_mode("search"))
+        self.mode_installed.clicked.connect(lambda: self._set_mode("installed"))
+        self.update_btn.clicked.connect(self._check_updates)
+        self.update_btn.setVisible(self.spec.get("list_installed") == "get_installed_mods")
 
         self._search_token = 0
         self._popular_loaded = False
+        self._mode = "search"
         self._reload_instances()
         self._show_idle()
 
@@ -454,11 +478,126 @@ class PclCatalogPage(QWidget):
             self.list_layout.addWidget(PclResultRow(row, self._install))
         self.list_layout.addStretch(1)
 
+    def _set_mode(self, mode: str):
+        self._mode = mode
+        self.mode_search.setChecked(mode == "search")
+        self.mode_installed.setChecked(mode == "installed")
+        show_ver = mode == "installed" and self.spec.get("list_installed") == "get_installed_mods"
+        self.installed_ver_box.setVisible(show_ver)
+        if mode == "installed":
+            self.reload_installed()
+        else:
+            self._search()
+
+    def _installed_version(self) -> str:
+        if self.spec.get("list_installed") != "get_installed_mods":
+            return ""
+        text = self.installed_ver_box.currentText()
+        if not text or text == "实例目录":
+            return ""
+        return text
+
+    def _fill_installed_versions(self):
+        if self.spec.get("list_installed") != "get_installed_mods":
+            return
+        inst = self._current_instance()
+        getter = getattr(self.backend, "get_installed_versions", None)
+        ids = getter(inst) if callable(getter) else []
+        cur = self.installed_ver_box.currentText()
+        self.installed_ver_box.blockSignals(True)
+        self.installed_ver_box.clear()
+        self.installed_ver_box.addItem("实例目录")
+        self.installed_ver_box.addItems(ids)
+        if cur and cur in ["实例目录", *ids]:
+            self.installed_ver_box.setCurrentText(cur)
+        self.installed_ver_box.blockSignals(False)
+
     def reload_installed(self):
         self._reload_instances()
-        if not self._popular_loaded:
-            self._popular_loaded = True
-            self._search()
+        self._fill_installed_versions()
+        if self._mode != "installed":
+            if not self._popular_loaded:
+                self._popular_loaded = True
+                self._search()
+            return
+        self._clear_list()
+        inst = self._current_instance()
+        version = self._installed_version()
+        getter = getattr(self.backend, "get_installed_mod_entries", None)
+        rows = []
+        list_fn = getattr(self.backend, self.spec.get("list_installed") or "", None)
+        if self.spec.get("list_installed") == "get_installed_mods" and callable(getter):
+            try:
+                rows = getter(inst, version) or []
+            except TypeError:
+                rows = getter(inst) or []
+        elif callable(list_fn):
+            names = list_fn(inst) or []
+            rows = [{"filename": n} for n in names]
+        else:
+            rows = []
+        if not rows:
+            self.list_layout.addWidget(EmptyState(self.spec["icon"], self.spec["empty_installed"]))
+            self.list_layout.addStretch(1)
+            return
+        for row in rows:
+            self.list_layout.addWidget(self._installed_row(row))
+        self.list_layout.addStretch(1)
+
+    def _installed_row(self, row):
+        from PySide6.QtWidgets import QHBoxLayout
+        from qfluentwidgets import SwitchButton, TransparentToolButton
+        host = QFrame()
+        host.setObjectName("pclRow")
+        host.setStyleSheet(
+            "#pclRow { background: transparent; border-bottom: 1px solid #EEF3F7; }"
+        )
+        host.setFixedHeight(52)
+        lay = QHBoxLayout(host)
+        lay.setContentsMargins(12, 6, 12, 6)
+        name = row.get("filename") or row.get("name") or "?"
+        lab = QLabel(name)
+        lab.setStyleSheet("font-size: 13px; background: transparent;")
+        lay.addWidget(lab, 1)
+        if "enabled" in row:
+            sw = SwitchButton()
+            sw.setChecked(bool(row.get("enabled")))
+            sw.checkedChanged.connect(lambda on, n=name: self._toggle(n, on))
+            lay.addWidget(sw)
+        btn = TransparentToolButton(FIF.DELETE)
+        btn.clicked.connect(lambda _, n=name: self._delete_installed(n))
+        lay.addWidget(btn)
+        return host
+
+    def _toggle(self, filename, enabled):
+        inst = self._current_instance()
+        ver = self._installed_version()
+        try:
+            if enabled:
+                self.backend.enable_mod(inst, filename, ver)
+            else:
+                self.backend.disable_mod(inst, filename, ver)
+        except Exception:
+            self.reload_installed()
+
+    def _delete_installed(self, filename):
+        inst = self._current_instance()
+        kind = self.spec.get("list_installed") or ""
+        fn = {
+            "get_installed_mods": "delete_mod",
+            "get_installed_shaders": "delete_shader",
+            "get_installed_resourcepacks": "delete_resourcepack",
+            "get_installed_datapacks": "delete_datapack",
+        }.get(kind)
+        if fn == "delete_mod":
+            self.backend.delete_mod(inst, filename, self._installed_version())
+        elif fn:
+            getattr(self.backend, fn)(inst, filename)
+        self.reload_installed()
+
+    def _check_updates(self):
+        inst = self._current_instance()
+        self.backend.start_mod_updates(inst)
 
     def _install(self, item, tile=None):
         if isinstance(item, str):

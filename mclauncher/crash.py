@@ -215,8 +215,8 @@ def _fresh(path: Path, started_at: float | None) -> bool:
 # 收集
 # ---------------------------------------------------------------------------
 
-def collect_files(instance_path: Path, started_at: float | None = None, loose: bool = False) -> list[Path]:
-    root = Path(instance_path)
+def collect_files(instance_path: Path, started_at: float | None = None, loose: bool = False,
+                 extra_roots=None) -> list[Path]:
     found: list[Path] = []
 
     def add(p: Path):
@@ -229,26 +229,30 @@ def collect_files(instance_path: Path, started_at: float | None = None, loose: b
     def want(p: Path) -> bool:
         return loose or _fresh(p, started_at)
 
-    crashes = root / "crash-reports"
-    if crashes.is_dir():
-        for p in crashes.rglob("*"):
-            if p.suffix.lower() in (".txt", ".log") and want(p):
+    roots = [Path(instance_path)]
+    for extra in extra_roots or []:
+        if extra and str(Path(extra).resolve()) != str(Path(instance_path).resolve()):
+            roots.append(Path(extra))
+    for root in roots:
+        crashes = root / "crash-reports"
+        if crashes.is_dir():
+            for p in crashes.rglob("*"):
+                if p.suffix.lower() in (".txt", ".log") and want(p):
+                    add(p)
+        logs = root / "logs"
+        for name in ("latest.log", "debug.log"):
+            p = logs / name
+            if want(p):
                 add(p)
-    logs = root / "logs"
-    for name in ("latest.log", "debug.log"):
-        p = logs / name
-        if want(p):
-            add(p)
-    for p in root.glob("hs_err_pid*.log"):
-        if want(p):
-            add(p)
-    for p in root.glob("replay_pid*.log"):
-        if want(p):
-            add(p)
-    for p in root.glob("*.log"):
-        if want(p):
-            add(p)
-    # 去重，保持顺序
+        for p in root.glob("hs_err_pid*.log"):
+            if want(p):
+                add(p)
+        for p in root.glob("replay_pid*.log"):
+            if want(p):
+                add(p)
+        for p in root.glob("*.log"):
+            if want(p):
+                add(p)
     seen, out = set(), []
     for p in found:
         key = str(p.resolve()) if p.exists() else str(p)
@@ -1040,10 +1044,10 @@ def _title_of(reasons: dict) -> str:
 
 
 def _run(instance, *, output_lines=None, exit_code=None, started_at=None,
-         cancelled=False, manual=False, version="") -> dict:
+         cancelled=False, manual=False, version="", extra_roots=None) -> dict:
     path = _inst_path(instance)
     an = _Analyzer()
-    files = collect_files(path, started_at, loose=manual)
+    files = collect_files(path, started_at, loose=manual, extra_roots=extra_roots)
     an.prepare(files, list(output_lines or []))
     an.analyze()
     crashed = looks_like_crash(exit_code, an, cancelled) if not manual else True
@@ -1078,10 +1082,11 @@ def _run(instance, *, output_lines=None, exit_code=None, started_at=None,
 
 
 def analyze_launch(instance, *, exit_code, output_lines=None, started_at=None,
-                   cancelled=False, version="") -> dict:
+                   cancelled=False, version="", extra_roots=None) -> dict:
     return _run(
         instance, output_lines=output_lines, exit_code=exit_code,
         started_at=started_at, cancelled=cancelled, manual=False, version=version,
+        extra_roots=extra_roots,
     )
 
 

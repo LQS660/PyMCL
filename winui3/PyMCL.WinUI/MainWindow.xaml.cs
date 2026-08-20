@@ -17,6 +17,8 @@ public sealed partial class MainWindow : Window
 {
     private LaunchPage? _launch;
     private InstancePage? _instance;
+    private AccountPage? _account;
+    private MultiplayerPage? _multiplayer;
     private DownloadHubPage? _download;
     private AiPage? _ai;
     private SettingsPage? _settings;
@@ -79,6 +81,8 @@ public sealed partial class MainWindow : Window
             AppServices.Client.EventReceived += OnBridgeEvent;
             _launch = new LaunchPage();
             _instance = new InstancePage();
+            _account = new AccountPage();
+            _multiplayer = new MultiplayerPage();
             _download = new DownloadHubPage();
             _ai = new AiPage();
             _settings = new SettingsPage();
@@ -130,6 +134,8 @@ public sealed partial class MainWindow : Window
         {
             "launch" => _launch,
             "instance" => _instance,
+            "account" => _account,
+            "multiplayer" => _multiplayer,
             "download" => _download,
             "ai" => _ai,
             "settings" => _settings,
@@ -185,6 +191,8 @@ public sealed partial class MainWindow : Window
         {
             if (_current == "launch") await (_launch?.ReloadAsync() ?? Task.CompletedTask);
             else if (_current == "instance") await (_instance?.ReloadAsync() ?? Task.CompletedTask);
+            else if (_current == "account") await (_account?.ReloadAsync() ?? Task.CompletedTask);
+            else if (_current == "multiplayer") await (_multiplayer?.ReloadAsync() ?? Task.CompletedTask);
             else if (_current == "download") _download?.ReloadCurrent();
             else if (_current == "ai") await (_ai?.ReloadAsync() ?? Task.CompletedTask);
             else if (_current == "settings") await (_settings?.ReloadAsync() ?? Task.CompletedTask);

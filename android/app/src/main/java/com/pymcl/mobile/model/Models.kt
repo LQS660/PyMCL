@@ -30,6 +30,7 @@ data class AccountInfo(
     val uuid: String = "",
     val accessToken: String = "",
     val refreshToken: String = "",
+    val api: String = "",
 )
 
 data class TaskInfo(
@@ -52,6 +53,7 @@ data class LaunchPlan(
     val jvmArgs: List<String>,
     val missing: List<String>,
     val nativesMissing: Boolean,
+    val gameDir: String = "",
 )
 
 data class DeviceCode(

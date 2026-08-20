@@ -54,6 +54,7 @@
                     <Button Content="搜索" MinWidth="88" Height="32" Click="Search_Click"
                             Style="{StaticResource AccentButtonStyle}"/>
                     <Button Content="重置条件" MinWidth="88" Height="32" Click="Reset_Click"/>
+                    <Button x:Name="InstalledBtn" Content="已安装" MinWidth="88" Height="32" Click="Installed_Click"/>
                 </StackPanel>
             </StackPanel>
         </Border>

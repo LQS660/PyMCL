@@ -231,6 +231,31 @@ fun LaunchScreen(vm: AppViewModel) {
             vm.device?.let {
                 Text("打开 ${it.uri} 输入 ${it.userCode}", color = PclGreen, fontWeight = FontWeight.SemiBold)
             }
+            OutlinedTextField(
+                value = vm.skinApi,
+                onValueChange = { vm.skinApi = it },
+                label = { Text("皮肤站 API") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                colors = FieldColors(),
+            )
+            OutlinedTextField(
+                value = vm.skinUser,
+                onValueChange = { vm.skinUser = it },
+                label = { Text("皮肤站账号") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                colors = FieldColors(),
+            )
+            OutlinedTextField(
+                value = vm.skinPw,
+                onValueChange = { vm.skinPw = it },
+                label = { Text("皮肤站密码") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                colors = FieldColors(),
+            )
+            TextButton(onClick = { vm.loginAuthlib() }) { Text("登录皮肤站", color = PclGreen) }
         }
         Column(
             Modifier
@@ -329,7 +354,8 @@ fun MultiplayerScreen(vm: AppViewModel) {
     ) {
         CardBox {
             Text("陶瓦联机", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
-            Text("官方陶瓦无 Android 包。房间码可记下，PC 开房后下一里程碑再打洞。", color = PclMuted, fontSize = 13.sp)
+            Text("局域网：房主在游戏里对局域网开放后，把本机 IP:端口发给好友。陶瓦 P2P 目前仅桌面端。", color = PclMuted, fontSize = 13.sp)
+            Text(remember { com.pymcl.mobile.data.Lan.hint() }, color = PclGreen, fontSize = 12.sp)
         }
         OutlinedTextField(
             value = vm.roomCode,

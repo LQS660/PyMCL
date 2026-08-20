@@ -32,6 +32,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:screenOrientation="sensorPortrait"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.PyMCL">
             <intent-filter>

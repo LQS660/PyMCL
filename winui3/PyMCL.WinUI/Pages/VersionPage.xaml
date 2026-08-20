@@ -13,10 +13,11 @@
         <TextBlock Text="版本" FontSize="20" FontWeight="SemiBold" Margin="0,0,0,14"/>
         <StackPanel Grid.Row="1" Spacing="8" Margin="0,0,0,12">
             <TextBox x:Name="SearchBox" PlaceholderText="搜索版本号…" TextChanged="Filter_Changed" HorizontalAlignment="Stretch"/>
-            <RadioButtons x:Name="TypePivot" MaxColumns="3" SelectedIndex="0" SelectionChanged="Filter_Changed">
+            <RadioButtons x:Name="TypePivot" MaxColumns="4" SelectedIndex="0" SelectionChanged="Filter_Changed">
                 <RadioButton Content="全部" Tag="all"/>
                 <RadioButton Content="正式版" Tag="release"/>
                 <RadioButton Content="快照" Tag="snapshot"/>
+                <RadioButton Content="远古" Tag="old_alpha"/>
             </RadioButtons>
             <Grid ColumnSpacing="8">
                 <Grid.ColumnDefinitions>
@@ -34,6 +35,8 @@
                     <x:String>Forge</x:String>
                     <x:String>Quilt</x:String>
                     <x:String>NeoForge</x:String>
+                    <x:String>OptiFine</x:String>
+                    <x:String>LiteLoader</x:String>
                 </ComboBox>
             </Grid>
         </StackPanel>
@@ -52,8 +55,11 @@
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <Grid>
-                    <TextBlock Text="已安装版本" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,88,0"/>
-                    <Button Content="卸载选中" HorizontalAlignment="Right" Click="Uninstall_Click" Background="Transparent" BorderThickness="0"/>
+                    <TextBlock Text="已安装版本" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,168,0"/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+                        <Button Content="修复选中" Click="Repair_Click" Background="Transparent" BorderThickness="0"/>
+                        <Button Content="卸载选中" Click="Uninstall_Click" Background="Transparent" BorderThickness="0"/>
+                    </StackPanel>
                 </Grid>
                 <ScrollViewer Grid.Row="1" Margin="0,8,0,0">
                     <StackPanel x:Name="InstalledList"/>

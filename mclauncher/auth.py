@@ -390,13 +390,28 @@ class AccountManager:
                 return acc
         return None
 
+    def set_active(self, name):
+        if name and self.get_account(name):
+            self.active = name
+            self.save()
+        return self.active
+
     def offline_account(self, username):
         username = username.strip() or "Player"
         return {"type": "offline", "name": username, "uuid": utils.offline_uuid(username)}
 
     def ensure_valid(self, account):
-        """正版账号若令牌过期则刷新；失败则抛 AuthError，禁止带过期 token 启动。"""
-        if not account or account.get("type") != "microsoft":
+        """正版 / 皮肤站令牌过期则刷新；失败则抛 AuthError。"""
+        if not account:
+            return account
+        if account.get("type") == "authlib":
+            expired = time.time() > float(account.get("expires_at") or 0)
+            if not expired and account.get("access_token"):
+                return account
+            from . import authlib as authlib_mod
+            account = authlib_mod.refresh(account)
+            return self.add_account(account)
+        if account.get("type") != "microsoft":
             return account
         expired = time.time() > float(account.get("expires_at") or 0)
         if not expired and account.get("access_token"):
@@ -417,6 +432,15 @@ class AccountManager:
                 "token": account.get("access_token") or "0",
                 "user_type": "msa",
                 "xuid": account.get("xuid") or "",
+            }
+        if account.get("type") == "authlib":
+            return {
+                "name": account.get("name", "Player"),
+                "uuid": utils.dashed_uuid(account.get("uuid") or ""),
+                "token": account.get("access_token") or "0",
+                "user_type": "mojang",
+                "xuid": "",
+                "authlib_api": account.get("api") or "",
             }
         name = account.get("name", "Player")
         return {

@@ -1,0 +1,27 @@
+<UserControl
+    x:Class="PyMCL.Pages.AccountPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Padding="28,20" Spacing="14">
+            <TextBlock Text="账号" FontSize="20" FontWeight="SemiBold"/>
+            <TextBlock Text="微软正版、离线、Little Skin / 自建 Yggdrasil 皮肤站" Opacity="0.7" TextWrapping="Wrap"/>
+            <StackPanel x:Name="ListHost" Spacing="8"/>
+            <Button Content="微软设备码登录" Click="Ms_Click" Style="{StaticResource AccentButtonStyle}"/>
+            <TextBlock Text="皮肤站" FontWeight="SemiBold"/>
+            <TextBox x:Name="ApiBox" PlaceholderText="https://littleskin.cn/api/yggdrasil"/>
+            <TextBox x:Name="UserBox" PlaceholderText="邮箱 / 用户名"/>
+            <PasswordBox x:Name="PwBox" PlaceholderText="密码"/>
+            <Button Content="登录皮肤站" Click="Authlib_Click"/>
+            <TextBlock Text="离线" FontWeight="SemiBold"/>
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="OfflineBox" PlaceholderText="离线角色名"/>
+                <Button Grid.Column="1" Content="保存" Click="Offline_Click"/>
+            </Grid>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

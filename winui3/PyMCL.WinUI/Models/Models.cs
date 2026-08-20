@@ -62,6 +62,63 @@ public sealed class SettingsDto
     [JsonPropertyName("ai_api_key")] public string AiApiKey { get; set; } = "";
     [JsonPropertyName("ai_model")] public string AiModel { get; set; } = "deepseek-v4-flash";
     public string Root { get; set; } = "";
+    [JsonPropertyName("default_isolation")] public string DefaultIsolation { get; set; } = "none";
+    [JsonPropertyName("default_jvm_args")] public string DefaultJvmArgs { get; set; } = "";
+    [JsonPropertyName("update_url")] public string UpdateUrl { get; set; } = "";
+    [JsonPropertyName("download_source")] public string DownloadSource { get; set; } = "auto";
+}
+
+public sealed class VersionSettingsDto
+{
+    public string Isolation { get; set; } = "none";
+    [JsonPropertyName("memory_mb")] public int? MemoryMb { get; set; }
+    [JsonPropertyName("jvm_args")] public string JvmArgs { get; set; } = "";
+    public string Server { get; set; } = "";
+    public string Port { get; set; } = "";
+    [JsonPropertyName("pre_launch")] public string PreLaunch { get; set; } = "";
+    [JsonPropertyName("post_launch")] public string PostLaunch { get; set; } = "";
+}
+
+public sealed class NewsRow
+{
+    public string Title { get; set; } = "";
+    public string Body { get; set; } = "";
+    public string Version { get; set; } = "";
+}
+
+public sealed class AuthlibPreset
+{
+    public string Name { get; set; } = "";
+    public string Api { get; set; } = "";
+}
+
+public sealed class AccountRow
+{
+    public string Name { get; set; } = "";
+    public string Type { get; set; } = "";
+    public string Uuid { get; set; } = "";
+    public string Api { get; set; } = "";
+    public string Avatar { get; set; } = "";
+    public string Body { get; set; } = "";
+    public bool Active { get; set; }
+}
+
+public sealed class TerracottaSnap
+{
+    public bool Supported { get; set; }
+    public bool Installed { get; set; }
+    public bool Running { get; set; }
+    public string State { get; set; } = "";
+    public string Label { get; set; } = "";
+    public string Room { get; set; } = "";
+    public string Url { get; set; } = "";
+    public string Error { get; set; } = "";
+}
+
+public sealed class ModEntry
+{
+    public string Filename { get; set; } = "";
+    public bool Enabled { get; set; } = true;
 }
 
 public sealed class AiStoreDto

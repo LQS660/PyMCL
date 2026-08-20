@@ -407,14 +407,22 @@ class Installer:
 
         resolved = manifest.resolve_inherits(vjson, self._load_parent_json)
 
-        # 客户端 jar
+        # 客户端 jar。OptiFine / LiteLoader 复用原版 jar，不重复下 50MB。
+        own_client = ((vjson.get("downloads") or {}).get("client") or {}).get("url")
+        reuse = vjson.get("jar") or (None if own_client else vjson.get("inheritsFrom"))
+        reuse_jar = inst.versions_dir() / reuse / f"{reuse}.jar" if reuse else None
         client = (resolved.get("downloads") or {}).get("client")
-        if not client or not client.get("url"):
+        dest_jar = vdir / f"{version_id}.jar"
+        if reuse_jar and reuse_jar.is_file():
+            if self.on_progress:
+                self.on_progress(f"复用客户端 jar {reuse}", 1, 1)
+        elif client and client.get("url"):
+            if self.on_progress:
+                self.on_progress(f"下载客户端 jar {version_id}", 0, 1)
+            self.dm.download(client["url"], dest_jar,
+                             sha1=client.get("sha1"), size=client.get("size"), force=force)
+        else:
             raise InstallError(f"版本 {version_id} 缺少客户端 jar 下载信息")
-        if self.on_progress:
-            self.on_progress(f"下载客户端 jar {version_id}", 0, 1)
-        self.dm.download(client["url"], vdir / f"{version_id}.jar",
-                         sha1=client.get("sha1"), size=client.get("size"), force=force)
 
         # 依赖库 + natives
         self._install_libraries(resolved, version_id, force=force)
@@ -1312,6 +1320,14 @@ class Installer:
             return (int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0)
         except (IndexError, ValueError):
             return (0, 0, 0)
+
+    def install_optifine(self, mc_version, typ="", patch="", force=False):
+        from . import optifine as optifine_mod
+        return optifine_mod.install(self, mc_version, typ=typ, patch=patch, force=force)
+
+    def install_liteloader(self, mc_version, force=False):
+        from . import liteloader as liteloader_mod
+        return liteloader_mod.install(self, mc_version, force=force)
 
     # ================================================================ 卸载
 

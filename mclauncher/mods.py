@@ -338,54 +338,58 @@ def detect_mc_version(instance: Instance):
 
 def list_instance_mods(instance: Instance):
     """列出实例 mods 目录中的 .jar。"""
-    mods_dir = instance.path / "mods"
-    if not mods_dir.is_dir():
-        return []
-    return sorted(mods_dir.glob("*.jar"))
+    return [Path(r["path"]) for r in list_mod_entries_at(instance.path / "mods") if r.get("enabled")]
 
 
 def list_instance_mod_entries(instance: Instance) -> list:
     """已装模组，含 .jar.disabled。"""
-    mods_dir = instance.path / "mods"
-    if not mods_dir.is_dir():
+    return list_mod_entries_at(instance.path / "mods")
+
+
+def list_mod_entries_at(mods_dir) -> list:
+    folder = Path(mods_dir)
+    if not folder.is_dir():
         return []
     rows = []
-    for p in sorted(mods_dir.iterdir()):
+    for p in sorted(folder.iterdir()):
         if not p.is_file():
             continue
         low = p.name.lower()
         if low.endswith(".jar"):
-            rows.append({"filename": p.name, "enabled": True, "bytes": p.stat().st_size})
+            rows.append({"filename": p.name, "enabled": True, "bytes": p.stat().st_size, "path": str(p)})
         elif low.endswith(".jar.disabled") or low.endswith(".disabled"):
-            rows.append({"filename": p.name, "enabled": False, "bytes": p.stat().st_size})
+            rows.append({"filename": p.name, "enabled": False, "bytes": p.stat().st_size, "path": str(p)})
     return rows
 
 
-def _mod_file(instance: Instance, filename: str) -> Path:
-    mods_dir = (instance.path / "mods").resolve()
-    p = (mods_dir / filename).resolve()
-    if p.parent != mods_dir:
+def _mod_file_at(mods_dir, filename: str) -> Path:
+    folder = Path(mods_dir).resolve()
+    p = (folder / filename).resolve()
+    if p.parent != folder:
         raise ModError(f"非法模组路径: {filename}")
     return p
 
 
-def delete_mod(instance: Instance, filename: str):
-    p = _mod_file(instance, filename)
+def _mod_file(instance: Instance, filename: str) -> Path:
+    return _mod_file_at(instance.path / "mods", filename)
+
+
+def delete_mod(instance: Instance, filename: str, mods_dir=None):
+    p = _mod_file_at(mods_dir or (instance.path / "mods"), filename)
     if not p.is_file():
         raise ModError(f"模组文件不存在: {filename}")
     p.unlink()
 
 
-def set_mod_enabled(instance: Instance, filename: str, enabled: bool) -> str:
+def set_mod_enabled(instance: Instance, filename: str, enabled: bool, mods_dir=None) -> str:
     """启用/禁用模组：foo.jar <-> foo.jar.disabled。"""
-    p = _mod_file(instance, filename)
+    folder = Path(mods_dir) if mods_dir else instance.path / "mods"
+    p = _mod_file_at(folder, filename)
     if not p.is_file():
-        # 允许只传逻辑名
-        alt = _mod_file(instance, filename + ("" if filename.lower().endswith(".disabled") else ".disabled"))
+        alt_name = filename + ("" if filename.lower().endswith(".disabled") else ".disabled")
+        alt = _mod_file_at(folder, alt_name)
         if enabled and alt.is_file():
             p = alt
-        elif not enabled:
-            raise ModError(f"模组文件不存在: {filename}")
         else:
             raise ModError(f"模组文件不存在: {filename}")
     name = p.name

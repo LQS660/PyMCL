@@ -183,7 +183,7 @@ class BackendAPI(QObject):
     @staticmethod
     def is_download_title(title: str) -> bool:
         t = str(title or "")
-        return not (t.startswith("启动游戏") or t.startswith("微软登录"))
+        return not (t.startswith("启动游戏") or t.startswith("微软登录") or t.startswith("皮肤站登录"))
 
     def _download_task_count(self) -> int:
         n = 0
@@ -524,22 +524,39 @@ class BackendAPI(QObject):
         else:
             subprocess.Popen(["xdg-open", str(path)])
 
-    def delete_mod(self, instance: str, filename: str):
-        mods_mod.delete_mod(self._instance(instance), filename)
+    def delete_mod(self, instance: str, filename: str, version: str = ""):
+        inst = self._instance(instance)
+        folder = self._mods_folder(inst, version)
+        mods_mod.delete_mod(inst, filename, mods_dir=folder)
         self.ui_changed.emit()
 
-    def disable_mod(self, instance: str, filename: str) -> str:
-        name = mods_mod.set_mod_enabled(self._instance(instance), filename, False)
-        self.ui_changed.emit()
-        return name
-
-    def enable_mod(self, instance: str, filename: str) -> str:
-        name = mods_mod.set_mod_enabled(self._instance(instance), filename, True)
+    def disable_mod(self, instance: str, filename: str, version: str = "") -> str:
+        inst = self._instance(instance)
+        name = mods_mod.set_mod_enabled(inst, filename, False, mods_dir=self._mods_folder(inst, version))
         self.ui_changed.emit()
         return name
 
-    def get_installed_mods(self, instance: str) -> list[str]:
-        return [p.name for p in mods_mod.list_instance_mods(self._instance(instance))]
+    def enable_mod(self, instance: str, filename: str, version: str = "") -> str:
+        inst = self._instance(instance)
+        name = mods_mod.set_mod_enabled(inst, filename, True, mods_dir=self._mods_folder(inst, version))
+        self.ui_changed.emit()
+        return name
+
+    def _mods_folder(self, inst, version: str = ""):
+        if version:
+            from mclauncher import version_settings as vs
+            return vs.mods_dir(inst, version)
+        return inst.path / "mods"
+
+    def get_installed_mods(self, instance: str, version: str = "") -> list[str]:
+        inst = self._instance(instance)
+        return [r["filename"] for r in mods_mod.list_mod_entries_at(self._mods_folder(inst, version)) if r.get("enabled")]
+
+    def get_installed_mod_entries(self, instance: str, version: str = "") -> list[dict]:
+        inst = self._instance(instance)
+        if version:
+            return mods_mod.list_mod_entries_at(self._mods_folder(inst, version))
+        return mods_mod.list_instance_mod_entries(inst)
 
     def get_installed_shaders(self, instance: str) -> list[str]:
         return [p.name for p in mods_mod.list_content_files(self._instance(instance), "shaderpacks")]
@@ -549,6 +566,16 @@ class BackendAPI(QObject):
 
     def get_installed_datapacks(self, instance: str) -> list[str]:
         return [p.name for p in mods_mod.list_content_files(self._instance(instance), "datapacks")]
+
+    def get_installed_modpacks(self, instance: str) -> list[str]:
+        meta = self._instance(instance).meta() or {}
+        pack = meta.get("modpack")
+        if isinstance(pack, dict) and pack.get("name"):
+            label = pack.get("name")
+            if pack.get("version"):
+                label = f"{label} {pack.get('version')}"
+            return [label]
+        return []
 
     def delete_shader(self, instance: str, filename: str):
         mods_mod.delete_content_file(self._instance(instance), "shaderpacks", filename)
@@ -593,6 +620,14 @@ class BackendAPI(QObject):
             "feedback_consent": CONFIG.get("feedback_consent") is True,
             "ui_fly_animation": bool(CONFIG.get("ui_fly_animation", True)),
             "ui_fly_duration_ms": int(CONFIG.get("ui_fly_duration_ms", 620)),
+            "default_isolation": CONFIG.get("default_isolation") or "none",
+            "default_jvm_args": CONFIG.get("default_jvm_args") or "",
+            "default_priority": CONFIG.get("default_priority") or "normal",
+            "update_url": CONFIG.get("update_url") or "",
+            "theme_color": CONFIG.get("theme_color") or "#2E9B6B",
+            "ui_dark": bool(CONFIG.get("ui_dark", False)),
+            "ui_background": CONFIG.get("ui_background") or "",
+            "global_mods_dir": CONFIG.get("global_mods_dir") or "",
             "root": str(utils.ROOT),
         }
 
@@ -619,6 +654,18 @@ class BackendAPI(QObject):
             "use_system_proxy": bool(data.get("use_system_proxy", True)),
             "ui_fly_animation": bool(data.get("ui_fly_animation", True)),
             "ui_fly_duration_ms": int(data.get("ui_fly_duration_ms") or 620),
+            "default_isolation": (data.get("default_isolation") or CONFIG.get("default_isolation") or "none"),
+            "default_jvm_args": (data.get("default_jvm_args") if "default_jvm_args" in data
+                                 else CONFIG.get("default_jvm_args") or ""),
+            "default_priority": (data.get("default_priority") or CONFIG.get("default_priority") or "normal"),
+            "update_url": (data.get("update_url") if "update_url" in data
+                           else CONFIG.get("update_url") or ""),
+            "theme_color": (data.get("theme_color") or CONFIG.get("theme_color") or "#2E9B6B"),
+            "ui_dark": bool(data.get("ui_dark", CONFIG.get("ui_dark", False))),
+            "ui_background": (data.get("ui_background") if "ui_background" in data
+                              else CONFIG.get("ui_background") or ""),
+            "global_mods_dir": (data.get("global_mods_dir") if "global_mods_dir" in data
+                                else CONFIG.get("global_mods_dir") or ""),
         })
         if "feedback_url" in data:
             CONFIG.set("feedback_url", (data.get("feedback_url") or "").strip())
@@ -663,9 +710,124 @@ class BackendAPI(QObject):
     def get_accounts(self) -> list[str]:
         names = ["离线模式"]
         for acc in self.accounts.accounts:
-            if acc.get("type") == "microsoft" and acc.get("name"):
-                names.append(acc["name"])
+            name = acc.get("name")
+            if name and name not in names:
+                names.append(name)
         return names
+
+    def get_account_rows(self) -> list[dict]:
+        from mclauncher import skin as skin_mod
+        rows = []
+        for acc in self.accounts.accounts:
+            rows.append({
+                "name": acc.get("name") or "",
+                "type": acc.get("type") or "offline",
+                "uuid": acc.get("uuid") or "",
+                "api": acc.get("api") or "",
+                "avatar": skin_mod.avatar_url(acc),
+                "body": skin_mod.body_url(acc),
+                "active": acc.get("name") == self.accounts.active,
+            })
+        return rows
+
+    def remove_account(self, name: str):
+        self.accounts.remove_account(name)
+        self.ui_changed.emit()
+
+    def set_active_account(self, name: str):
+        self.accounts.set_active(name)
+        self.ui_changed.emit()
+        return self.accounts.active
+
+    def add_offline_account(self, username: str):
+        acc = self.accounts.offline_account(username)
+        self.accounts.add_account({**acc, "type": "offline"})
+        self.ui_changed.emit()
+        return acc["name"]
+
+    def start_authlib_login(self, api: str, username: str, password: str) -> str:
+        return self.start_task("皮肤站登录", self._authlib_login_impl, api, username, password)
+
+    def get_version_settings(self, instance: str, version: str) -> dict:
+        from mclauncher import version_settings as vs
+        return vs.load(self._instance(instance), version)
+
+    def save_version_settings(self, instance: str, version: str, data: dict) -> dict:
+        from mclauncher import version_settings as vs
+        out = vs.save(self._instance(instance), version, data or {})
+        self.ui_changed.emit()
+        return out
+
+    def repair_version(self, instance: str, version: str) -> str:
+        return self.start_task(f"修复 {version}", self._repair_impl, instance, version)
+
+    def export_modpack(self, instance: str, dest: str = "") -> str:
+        return self.start_task(f"导出整合包 {instance}", self._export_pack_impl, instance, dest)
+
+    def check_mod_updates(self, instance: str) -> list:
+        from mclauncher.mod_update import check_updates
+        return check_updates(self._instance(instance))
+
+    def start_mod_updates(self, instance: str) -> str:
+        return self.start_task(f"检查模组更新 {instance}", self._mod_update_impl, instance)
+
+    def apply_mod_update(self, instance: str, row: dict) -> str:
+        from mclauncher.mod_update import apply_update
+        name = apply_update(self._instance(instance), row)
+        self.ui_changed.emit()
+        return name
+
+    def cleaner_preview(self) -> dict:
+        from mclauncher import cleaner as cleaner_mod
+        return cleaner_mod.preview()
+
+    def cleaner_apply(self, kinds=None) -> dict:
+        from mclauncher import cleaner as cleaner_mod
+        return cleaner_mod.apply(kinds)
+
+    def check_update(self) -> dict:
+        from mclauncher import updater as updater_mod
+        return updater_mod.check()
+
+    def start_self_update(self) -> str:
+        return self.start_task("更新启动器", self._self_update_impl)
+
+    def fetch_news(self) -> list:
+        from mclauncher import news as news_mod
+        return news_mod.fetch()
+
+    def cached_news(self) -> list:
+        from mclauncher import news as news_mod
+        return news_mod.load_cached()
+
+    def skin_urls(self, account_name: str = "") -> dict:
+        from mclauncher import skin as skin_mod
+        if not account_name or account_name == "离线模式":
+            acc = {"type": "offline", "name": "Steve"}
+        else:
+            acc = self.accounts.get_account(account_name) or {"type": "offline", "name": account_name}
+        return {"avatar": skin_mod.avatar_url(acc), "body": skin_mod.body_url(acc)}
+
+    def lan_hint(self, port: int = 25565) -> str:
+        from mclauncher import lan as lan_mod
+        return lan_mod.lan_hint(port)
+
+    def local_ips(self) -> list:
+        from mclauncher import lan as lan_mod
+        return lan_mod.local_ips()
+
+    def authlib_presets(self) -> list:
+        from mclauncher.authlib import PRESETS
+        return [{"name": a, "api": b} for a, b in PRESETS]
+
+    def open_global_mods(self):
+        from mclauncher import global_mods as gm
+        path = gm.root()
+        utils.ensure_dir(path)
+        if os.name == "nt":
+            os.startfile(path)
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
 
     # ==================================================================
     # 对外 API（同步数据查询）
@@ -1000,6 +1162,10 @@ class BackendAPI(QObject):
                 vid = installer.install_forge(version, loader_version or None)
             elif kind == "neoforge":
                 vid = installer.install_neoforge(version, loader_version or None)
+            elif kind == "optifine":
+                vid = installer.install_optifine(version)
+            elif kind == "liteloader":
+                vid = installer.install_liteloader(version)
             else:
                 raise InstallError(f"未知加载器: {loader}")
             log(f"加载器安装完成: {vid}")
@@ -1008,6 +1174,11 @@ class BackendAPI(QObject):
             installer.install_version(version)
             vid = version
         self._last_installed = {"instance": inst.name, "version": vid, "loader": loader or "无"}
+        iso = CONFIG.get("default_isolation") or "none"
+        if iso and iso != "none":
+            from mclauncher import version_settings as vs
+            vs.save(inst, vid, {"isolation": iso})
+            log(f"已套用默认隔离: {iso}")
         log(f"版本 {vid} 安装完成")
         return f"已安装 {vid}"
 
@@ -1117,6 +1288,14 @@ class BackendAPI(QObject):
         terracotta_mod.start(log=log)
         return "陶瓦联机已就绪"
 
+    @staticmethod
+    def _account_kind(props, acc=None):
+        if (props or {}).get("user_type") == "msa":
+            return "正版"
+        if (props or {}).get("authlib_api") or (acc or {}).get("type") == "authlib":
+            return "皮肤站"
+        return "离线"
+
     def _launch_game_impl(self, progress, log, instance, version, account,
                           username, memory_mb, width, height, java="自动选择",
                           extra_game_args=None):
@@ -1135,16 +1314,28 @@ class BackendAPI(QObject):
                 raise LaunchError(f"账号不存在: {account}")
             acc = self.accounts.ensure_valid(acc)
         props = self.accounts.launch_props(acc)
-        log(f"账号: {props.get('name')} ({'正版' if props.get('user_type') == 'msa' else '离线'})")
+        log(f"账号: {props.get('name')} ({self._account_kind(props, acc)})")
         log(f"内存: {memory_mb} MB | 分辨率: {width}x{height}")
 
         mods_dir = inst.path / "mods"
         jar_count = 0
         if mods_dir.is_dir():
             jar_count = sum(1 for p in mods_dir.iterdir() if p.suffix.lower() == ".jar")
-        looks_loader = any(tok in version.lower() for tok in ("forge", "fabric", "quilt", "neoforge"))
+        looks_loader = any(tok in version.lower() for tok in (
+            "forge", "fabric", "quilt", "neoforge", "optifine", "liteloader"))
         if jar_count and not looks_loader:
             log(f"警告: mods 里有 {jar_count} 个 jar，但当前版本是原版，不会加载模组")
+
+        from mclauncher import launch_flow
+        prep = launch_flow.prepare(inst, version, extra_game_args=extra_game_args, memory_mb=memory_mb)
+        memory_mb = prep["memory_mb"] or memory_mb
+        extra_game_args = prep["extra_game_args"]
+        game_dir = prep["game_dir"]
+        if prep["settings"].get("isolation") != "none":
+            log(f"版本隔离: {prep['settings']['isolation']} → {game_dir}")
+        if prep["global_mods"]:
+            log(f"已应用 {prep['global_mods']} 个全局模组")
+        launch_flow.run_hook(prep["settings"].get("pre_launch") or "", game_dir, log=log)
 
         progress(1, 4, "检查 Java")
         vjson = inst.version_json(version) or {}
@@ -1154,6 +1345,8 @@ class BackendAPI(QObject):
             resolved = vjson
         prefer = None
         java_choice = java
+        if prep["settings"].get("java") and prep["settings"]["java"] != JAVA_AUTO:
+            java_choice = prep["settings"]["java"]
         if not java_choice or java_choice == JAVA_AUTO:
             java_choice = inst.java_pref()
         if java_choice and java_choice != JAVA_AUTO:
@@ -1176,16 +1369,23 @@ class BackendAPI(QObject):
         log(f"Java -version: {ver_line}")
         log(f"使用 Java {java_mod.get_java_major(java_exe) or '?'}: {java_exe}")
         progress(2, 4, "构建启动参数")
-        cmd, _natives, _vdir = build_launch_command(
+        if props.get("authlib_api"):
+            from mclauncher import authlib as authlib_mod
+            authlib_mod.ensure_injector(self._dm(progress, log), on_note=log)
+            log(f"皮肤站: {props.get('authlib_api')}")
+        cmd, _natives, _vdir, game_dir = build_launch_command(
             inst, version, props, java_exe,
             memory_mb=memory_mb, width=width, height=height,
             extra_game_args=extra_game_args,
+            extra_jvm_args=prep["jvm_args"],
+            game_directory=game_dir,
+            authlib_api=props.get("authlib_api"),
         )
         log(f"实际启动: {cmd[0]}")
         log("正在启动游戏进程…")
         progress(3, 4, "游戏启动中")
         worker = QThread.currentThread()
-        proc = GameProcess(cmd, cwd=inst.path, on_line=log)
+        proc = GameProcess(cmd, cwd=game_dir, on_line=log, priority=prep["priority"])
         with self._game_lock:
             self._game_proc = proc
         try:
@@ -1198,10 +1398,12 @@ class BackendAPI(QObject):
             log("已停止游戏")
             return
         log(f"游戏已退出，退出码 {code}")
+        launch_flow.run_hook(prep["settings"].get("post_launch") or "", game_dir, log=log)
         report = analyze_launch(
             inst, exit_code=code, output_lines=proc.last_lines(),
             started_at=getattr(proc, "started_at", None),
             cancelled=False, version=version,
+            extra_roots=[game_dir],
         )
         if report.get("is_crash"):
             log(f"[崩溃分析] {report.get('summary') or report.get('headline')}")
@@ -1227,4 +1429,55 @@ class BackendAPI(QObject):
         account = auth.login(on_code=on_code, on_status=on_status, open_browser=True)
         self.accounts.add_account(account)
         log(f"登录成功：{account.get('name')}")
+
+    def _authlib_login_impl(self, progress, log, api, username, password):
+        from mclauncher import authlib as authlib_mod
+        progress(0, 0, "下载 authlib-injector")
+        authlib_mod.ensure_injector(self._dm(progress, log), on_note=log)
+        progress(1, 2, "登录皮肤站")
+        account = authlib_mod.login(api, username, password)
+        self.accounts.add_account(account)
+        log(f"皮肤站登录成功：{account.get('name')}")
         return f"已登录 {account.get('name')}"
+
+    def _repair_impl(self, progress, log, instance, version):
+        from mclauncher.repair import repair
+        inst = self._instance(instance)
+        dm = self._dm(progress, log)
+        installer = Installer(inst, dm, on_progress=dm.on_progress, cancel=dm.cancel)
+        return repair(installer, version)
+
+    def _export_pack_impl(self, progress, log, instance, dest):
+        from mclauncher.export_pack import export_mrpack
+        inst = self._instance(instance)
+        if not dest:
+            dest = str(utils.ROOT / "exports" / f"{inst.name}.mrpack")
+        dm = self._dm(progress, log)
+        path = export_mrpack(inst, dest, dm=dm, on_note=lambda m, a, b: progress(a, b, m))
+        log(f"已导出: {path}")
+        return path
+
+    def _mod_update_impl(self, progress, log, instance):
+        from mclauncher.mod_update import apply_update, check_updates
+        inst = self._instance(instance)
+        dm = self._dm(progress, log)
+        rows = check_updates(inst, dm=dm)
+        if not rows:
+            log("已装模组都是最新")
+            return "没有可更新的模组"
+        for i, row in enumerate(rows):
+            log(f"更新 {row.get('name')} {row.get('current')} → {row.get('latest')}")
+            apply_update(inst, row, dm=dm)
+            progress(i + 1, len(rows), row.get("name") or "")
+        return f"已更新 {len(rows)} 个模组"
+
+    def _self_update_impl(self, progress, log):
+        from mclauncher import updater as updater_mod
+        info = updater_mod.check(self._dm(progress, log))
+        if not info.get("has_update"):
+            return info.get("message") or "已是最新"
+        log(info.get("message") or "发现更新")
+        path = updater_mod.download(info, self._dm(progress, log))
+        msg = updater_mod.apply_exe(path)
+        log(msg)
+        return msg
