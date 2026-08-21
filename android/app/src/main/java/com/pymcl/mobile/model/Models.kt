@@ -1,65 +1,74 @@
 package com.pymcl.mobile.model
 
-data class VersionRow(
+import java.io.File
+
+data class PyMclConfig(
+    val defaultInstanceId: String? = null,
+    val lastVersionId: String? = null,
+)
+
+data class Account(
+    val id: String,
+    val username: String,
+    val uuid: String? = null,
+    val accessToken: String? = null,
+    val deviceCode: String? = null,
+)
+
+data class GameInstance(
+    val id: String,
+    val name: String,
+    val versionId: String,
+    val gameDir: File,
+    val createdAt: Long = System.currentTimeMillis(),
+)
+
+data class VersionManifest(
+    val latestRelease: String,
+    val latestSnapshot: String,
+    val versions: List<VersionEntry>,
+)
+
+data class VersionEntry(
     val id: String,
     val type: String,
     val url: String,
-    val sha1: String = "",
-    val releaseTime: String = "",
+    val releaseTime: String,
 )
 
-data class InstanceInfo(
-    val name: String,
-    val versions: List<String>,
-    val path: String,
-)
-
-data class CatalogHit(
-    val name: String,
-    val slug: String,
-    val description: String,
-    val downloads: Long,
-    val source: String,
-    val author: String = "",
-    val projectId: String = "",
-)
-
-data class AccountInfo(
-    val name: String,
-    val type: String,
-    val uuid: String = "",
-    val accessToken: String = "",
-    val refreshToken: String = "",
-    val api: String = "",
-)
-
-data class TaskInfo(
+data class DownloadTask(
     val id: String,
+    val label: String,
+    val progress: Float = 0f,
+    val status: DownloadStatus = DownloadStatus.Pending,
+)
+
+enum class DownloadStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+data class ModSearchResult(
+    val projectId: String,
+    val slug: String,
     val title: String,
-    val current: Long = 0,
-    val total: Long = 0,
-    val message: String = "",
-    val done: Boolean = false,
-    val success: Boolean = true,
-    val log: List<String> = emptyList(),
+    val description: String,
+    val downloads: Long = 0,
 )
 
 data class LaunchPlan(
-    val instance: String,
-    val version: String,
-    val mainClass: String,
-    val classpath: List<String>,
-    val gameArgs: List<String>,
-    val jvmArgs: List<String>,
-    val missing: List<String>,
-    val nativesMissing: Boolean,
-    val gameDir: String = "",
+    val instanceId: String,
+    val versionId: String,
+    val classpath: List<String> = emptyList(),
+    val mainClass: String? = null,
+    val ready: Boolean = false,
+    val message: String = "运行时里程碑后续接入",
 )
 
-data class DeviceCode(
-    val deviceCode: String,
-    val userCode: String,
-    val uri: String,
-    val interval: Int,
-    val expiresIn: Int,
+data class AiMessage(
+    val role: String,
+    val content: String,
+    val timestamp: Long = System.currentTimeMillis(),
 )

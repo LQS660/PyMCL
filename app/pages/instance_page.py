@@ -9,7 +9,8 @@ from qfluentwidgets import (
 )
 
 from mclauncher.config import CONFIG
-from ..widgets import ComboDialog, IconTile, InputDialog, Pill
+from ..widgets import ComboDialog, IconTile, InputDialog, Pill, grid_columns
+from mclauncher.i18n import tr
 
 
 class InstanceCard(SimpleCardWidget):
@@ -29,7 +30,7 @@ class InstanceCard(SimpleCardWidget):
         name_box.addWidget(StrongBodyLabel(info["name"]))
         name_box.addWidget(CaptionLabel(f'{info["versions"]} 个版本'))
         top.addLayout(name_box, 1)
-        top.addWidget(Pill("默认" if info["name"] == CONFIG.get("default_instance") else "实例", "#4C8BF5"))
+        top.addWidget(Pill(tr("默认") if info["name"] == CONFIG.get("default_instance") else tr("实例"), "#4C8BF5"))
         layout.addLayout(top)
         layout.addWidget(CaptionLabel(str(info.get("mc") or "")))
         layout.addWidget(CaptionLabel(f"Java · {info.get('java_label') or '自动选择'}"))
@@ -38,17 +39,17 @@ class InstanceCard(SimpleCardWidget):
         actions = QHBoxLayout()
         actions.setSpacing(4)
         open_btn = TransparentToolButton(FIF.FOLDER)
-        open_btn.setToolTip("打开实例文件夹")
+        open_btn.setToolTip(tr("打开实例文件夹"))
         java_btn = TransparentToolButton(FIF.CODE)
-        java_btn.setToolTip("选择此实例使用的 Java")
+        java_btn.setToolTip(tr("选择此实例使用的 Java"))
         rename_btn = TransparentToolButton(FIF.EDIT)
-        rename_btn.setToolTip("重命名")
+        rename_btn.setToolTip(tr("重命名"))
         delete_btn = TransparentToolButton(FIF.DELETE)
-        delete_btn.setToolTip("删除实例")
+        delete_btn.setToolTip(tr("删除实例"))
         export_btn = TransparentToolButton(FIF.SHARE if hasattr(FIF, "SHARE") else FIF.DOWNLOAD)
-        export_btn.setToolTip("导出为 .mrpack")
+        export_btn.setToolTip(tr("导出为 .mrpack"))
         saves_btn = TransparentToolButton(FIF.PHOTO)
-        saves_btn.setToolTip("存档 / 截图")
+        saves_btn.setToolTip(tr("存档 / 截图"))
         open_btn.clicked.connect(lambda: page.open_folder(info["name"]))
         java_btn.clicked.connect(lambda: page.pick_java(info["name"]))
         rename_btn.clicked.connect(lambda: page.rename(info["name"]))
@@ -73,14 +74,17 @@ class NewInstanceCard(SimpleCardWidget):
         self.setCursor(Qt.PointingHandCursor)
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignCenter)
-        label = StrongBodyLabel("＋ 新建实例")
+        label = StrongBodyLabel(tr("＋ 新建实例"))
         label.setAlignment(Qt.AlignCenter)
-        sub = CaptionLabel("隔离的版本、模组与存档")
+        sub = CaptionLabel(tr("隔离的版本、模组与存档"))
         sub.setAlignment(Qt.AlignCenter)
         layout.addWidget(label)
         layout.addWidget(sub)
 
     def mouseReleaseEvent(self, event):
+        # 不判断按键的话，右键这张卡也会弹出新建实例对话框
+        if event.button() != Qt.LeftButton:
+            return
         self.page.create()
 
 
@@ -103,19 +107,19 @@ class InstancePage(QWidget):
 
         head = QHBoxLayout()
         title_box = QVBoxLayout()
-        title_box.addWidget(SubtitleLabel("实例"))
-        title_box.addWidget(CaptionLabel("每个实例相互隔离，放心折腾"))
+        title_box.addWidget(SubtitleLabel(tr("实例")))
+        title_box.addWidget(CaptionLabel(tr("每个实例相互隔离，放心折腾")))
         head.addLayout(title_box, 1)
         root.addLayout(head)
 
-        scroll = ScrollArea(self)
-        scroll.setWidgetResizable(True)
+        self.scroll = ScrollArea(self)
+        self.scroll.setWidgetResizable(True)
         host = QWidget()
         self.grid = QGridLayout(host)
         self.grid.setContentsMargins(0, 0, 8, 0)
         self.grid.setSpacing(12)
-        scroll.setWidget(host)
-        root.addWidget(scroll, 1)
+        self.scroll.setWidget(host)
+        root.addWidget(self.scroll, 1)
 
         self.reload()
 
@@ -129,40 +133,43 @@ class InstancePage(QWidget):
                 if item.widget():
                     item.widget().deleteLater()
             insts = self.backend.get_instances()
-            cols = max(1, self.width() // 260)
+            cols = grid_columns(self.scroll, self, 240)
             self._cols = cols
             for i, inst in enumerate(insts):
                 self.grid.addWidget(InstanceCard(inst, self), i // cols, i % cols)
             n = len(insts)
             self.grid.addWidget(NewInstanceCard(self), n // cols, n % cols)
+            # reload 会重建卡片宿主，深色底要再刷一次
+            from ..pcl_chrome import paint_theme_surfaces
+            paint_theme_surfaces(self)
         finally:
             self._reloading = False
 
     def create(self):
-        dlg = InputDialog("新建实例", "实例名称", placeholder="例如：模组生存", parent=self)
+        dlg = InputDialog(tr("新建实例"), tr("实例名称"), placeholder=tr("例如：模组生存"), parent=self)
         if dlg.exec() and dlg.value():
             try:
                 self.backend.create_instance(dlg.value())
             except Exception as e:
-                MessageBox("创建失败", str(e), self).exec()
+                MessageBox(tr("创建失败"), str(e), self).exec()
             self.reload()
 
     def delete(self, name: str):
-        box = MessageBox("删除实例", f"确定删除实例「{name}」？其中的存档与配置将一并移除。", self)
+        box = MessageBox(tr("删除实例"), f"确定删除实例「{name}」？其中的存档与配置将一并移除。", self)
         if box.exec():
             try:
                 self.backend.delete_instance(name)
             except Exception as e:
-                MessageBox("删除失败", str(e), self).exec()
+                MessageBox(tr("删除失败"), str(e), self).exec()
             self.reload()
 
     def rename(self, name: str):
-        dlg = InputDialog("重命名实例", "新名称", text=name, parent=self)
+        dlg = InputDialog(tr("重命名实例"), tr("新名称"), text=name, parent=self)
         if dlg.exec() and dlg.value():
             try:
                 self.backend.rename_instance(name, dlg.value())
             except Exception as e:
-                MessageBox("重命名失败", str(e), self).exec()
+                MessageBox(tr("重命名失败"), str(e), self).exec()
             self.reload()
 
     def export_pack(self, name: str):
@@ -179,13 +186,13 @@ class InstancePage(QWidget):
             labels = [o["label"] for o in opts]
             current = self.backend.java_combo_label_for(name, opts)
             dlg = ComboDialog(
-                "选择 Java",
+                tr("选择 Java"),
                 f"实例「{name}」启动时使用的 Java。自动选择会按游戏版本匹配（1.19+ 用 17，远古版用 8）。",
                 labels, current, self,
             )
             if dlg.exec():
                 chosen = dlg.value()
-                value = "自动选择"
+                value = tr("自动选择")
                 for o in opts:
                     if o["label"] == chosen:
                         value = o["value"]
@@ -193,7 +200,7 @@ class InstancePage(QWidget):
                 try:
                     self.backend.set_instance_java(name, value)
                 except Exception as e:
-                    MessageBox("保存失败", str(e), self).exec()
+                    MessageBox(tr("保存失败"), str(e), self).exec()
                 self.reload()
                 win = self.window()
                 lp = getattr(win, "launch_page", None)
@@ -202,7 +209,7 @@ class InstancePage(QWidget):
 
         def failed(msg):
             self._picking_java = False
-            MessageBox("扫描 Java 失败", str(msg or "未知错误"), self).exec()
+            MessageBox(tr("扫描 Java 失败"), str(msg or tr("未知错误")), self).exec()
 
         call_async = getattr(self.backend, "call_async", None)
         if callable(call_async):
@@ -217,7 +224,7 @@ class InstancePage(QWidget):
         try:
             self.backend.open_instance_folder(name)
         except Exception as e:
-            MessageBox("无法打开", str(e), self).exec()
+            MessageBox(tr("无法打开"), str(e), self).exec()
 
     def open_saves(self, name: str):
         from .saves_dialog import SavesDialog
@@ -227,7 +234,7 @@ class InstancePage(QWidget):
         super().resizeEvent(event)
         if not self.isVisible():
             return
-        cols = max(1, self.width() // 260)
+        cols = grid_columns(self.scroll, self, 240)
         if cols == self._cols:
             return
         self._resize_timer.start()

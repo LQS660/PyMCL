@@ -74,6 +74,8 @@ public sealed class SettingsDto
     [JsonPropertyName("homepage_mode")] public string HomepageMode { get; set; } = "news";
     [JsonPropertyName("window_mode")] public string WindowMode { get; set; } = "window";
     [JsonPropertyName("game_dir")] public string GameDir { get; set; } = "";
+    [JsonPropertyName("ui_fly_animation")] public bool UiFlyAnimation { get; set; } = true;
+    [JsonPropertyName("ui_fly_duration_ms")] public int UiFlyDurationMs { get; set; } = 620;
 }
 
 public sealed class VersionSettingsDto
@@ -179,6 +181,41 @@ public sealed class CrashReport
     [JsonPropertyName("exit_code")] public int? ExitCode { get; set; }
     [JsonPropertyName("exit_hint")] public string ExitHint { get; set; } = "";
     [JsonPropertyName("task_id")] public string TaskId { get; set; } = "";
+    public string Instance { get; set; } = "";
+    public string Version { get; set; } = "";
+    public List<CrashAction>? Actions { get; set; }
+}
+
+public sealed class CrashAction
+{
+    public string Id { get; set; } = "";
+    public string Label { get; set; } = "";
+    public List<string>? Mods { get; set; }
+    public int? Major { get; set; }
+    [JsonPropertyName("memory_mb")] public int? MemoryMb { get; set; }
+    public string Instance { get; set; } = "";
+    public string Version { get; set; } = "";
+}
+
+public sealed class PreflightResult
+{
+    public bool Ok { get; set; }
+    public List<PreflightItem> Items { get; set; } = new();
+}
+
+public sealed class PreflightItem
+{
+    public string Level { get; set; } = "";
+    public string Code { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string Detail { get; set; } = "";
+}
+
+public sealed class CrashActionResult
+{
+    public bool Ok { get; set; }
+    public string Message { get; set; } = "";
+    [JsonPropertyName("task_id")] public string? TaskId { get; set; }
 }
 
 public sealed class BridgeEvent
@@ -343,4 +380,20 @@ public sealed class CatalogKind
         FileKind = "world",
         DefaultSource = "CurseForge",
     };
+}
+
+public sealed class ServerRow
+{
+    public string Name { get; set; } = "";
+    public string Ip { get; set; } = "";
+    public int Port { get; set; } = 25565;
+    public string Description { get; set; } = "";
+}
+
+public sealed class PlaytimeRow
+{
+    public string Instance { get; set; } = "";
+    public int TotalSeconds { get; set; }
+    public string TotalText { get; set; } = "";
+    public string VersionsText { get; set; } = "";
 }

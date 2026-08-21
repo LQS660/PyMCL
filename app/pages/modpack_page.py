@@ -11,6 +11,7 @@ from qfluentwidgets import (
 
 from mclauncher.config import CONFIG
 from ..widgets import EmptyState, IconTile
+from mclauncher.i18n import tr
 
 
 class ResultCard(SimpleCardWidget):
@@ -41,15 +42,15 @@ class ResultCard(SimpleCardWidget):
 
         right = QVBoxLayout()
         right.setSpacing(4)
-        dl = BodyLabel(f"{downloads:,}" if downloads else "热门")
+        dl = BodyLabel(f"{downloads:,}" if downloads else tr("热门"))
         dl.setAlignment(Qt.AlignRight)
-        cap = CaptionLabel("下载量")
+        cap = CaptionLabel(tr("下载量"))
         cap.setAlignment(Qt.AlignRight)
         right.addWidget(dl)
         right.addWidget(cap)
         layout.addLayout(right)
 
-        install_btn = PushButton(FIF.DOWNLOAD, "安装")
+        install_btn = PushButton(FIF.DOWNLOAD, tr("安装"))
         install_btn.setFixedSize(96, 32)
         install_btn.clicked.connect(lambda: on_install(item))
         layout.addWidget(install_btn)
@@ -67,12 +68,12 @@ class ModpackPage(QWidget):
 
         head = QHBoxLayout()
         root_title = QVBoxLayout()
-        root_title.addWidget(SubtitleLabel("整合包"))
-        root_title.addWidget(CaptionLabel("一键安装别人调配好的世界"))
+        root_title.addWidget(SubtitleLabel(tr("整合包")))
+        root_title.addWidget(CaptionLabel(tr("一键安装别人调配好的世界")))
         head.addLayout(root_title, 1)
         self.instance_box = ComboBox()
         self.instance_box.setFixedWidth(160)
-        self.local_btn = TransparentPushButton(FIF.FOLDER, "从本地文件安装 (.mrpack/.zip)")
+        self.local_btn = TransparentPushButton(FIF.FOLDER, tr("从本地文件安装 (.mrpack/.zip)"))
         head.addWidget(self.instance_box, 0, Qt.AlignBottom)
         head.addWidget(self.local_btn, 0, Qt.AlignBottom)
         root.addLayout(head)
@@ -84,7 +85,7 @@ class ModpackPage(QWidget):
         self.source_seg.addItem("curseforge", "CurseForge")
         self.source_seg.setCurrentItem("curseforge")
         self.search = SearchLineEdit()
-        self.search.setPlaceholderText("搜索整合包，回车搜索…（机械动力 = 黄铜协奏曲 CBC 1.20.1）")
+        self.search.setPlaceholderText(tr("搜索整合包，回车搜索…（机械动力 = 黄铜协奏曲 CBC 1.20.1）"))
         bar.addWidget(self.source_seg)
         bar.addWidget(self.search, 1)
         root.addLayout(bar)
@@ -128,7 +129,7 @@ class ModpackPage(QWidget):
         if not query:
             self._render_packs(self.backend.search_modpacks("", source))
             return
-        self.list_layout.addWidget(EmptyState(FIF.SEARCH, "搜索中…"))
+        self.list_layout.addWidget(EmptyState(FIF.SEARCH, tr("搜索中…")))
         self.backend.call_async(
             lambda: self.backend.search_modpacks(query, source),
             self._render_packs,
@@ -141,7 +142,7 @@ class ModpackPage(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         if not results:
-            self.list_layout.addWidget(EmptyState(FIF.SEARCH, "没有找到相关整合包"))
+            self.list_layout.addWidget(EmptyState(FIF.SEARCH, tr("没有找到相关整合包")))
             return
         for p in results:
             self.list_layout.addWidget(ResultCard(p, self._install))
@@ -156,7 +157,7 @@ class ModpackPage(QWidget):
 
     def _install_local(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择整合包文件", "", "整合包 (*.mrpack *.zip)")
+            self, tr("选择整合包文件"), "", tr("整合包 (*.mrpack *.zip)"))
         if path:
             extra = {"path": path, "instance": self.instance_box.currentText() or "default"}
-            self.backend.install_modpack(path, "本地文件", extra=extra)
+            self.backend.install_modpack(path, tr("本地文件"), extra=extra)

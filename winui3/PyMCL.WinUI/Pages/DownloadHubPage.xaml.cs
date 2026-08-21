@@ -61,11 +61,17 @@ public sealed partial class DownloadHubPage : UserControl
         }
         var gen = ++_tabGen;
         Inner.ContentTransitions.Clear();
-        if (Inner.Content is UIElement old && !ReferenceEquals(old, page))
-            await Motion.TabOutAsync(old);
+        if (Inner.Content is UIElement old && !ReferenceEquals(old, page) && Motion.AnimationsWanted())
+        {
+            var outTask = Motion.TabOutAsync(old);
+            await Task.WhenAny(outTask, Task.Delay(70));
+        }
         if (gen != _tabGen) return;
         Inner.Content = page;
-        await Motion.TabInAsync(page);
+        if (Motion.AnimationsWanted())
+            await Motion.TabInAsync(page);
+        else
+            Motion.ResetVisual(page);
         ReloadCurrent();
     }
 

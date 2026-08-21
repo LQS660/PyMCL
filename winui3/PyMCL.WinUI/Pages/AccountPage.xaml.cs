@@ -46,6 +46,11 @@ public sealed partial class AccountPage : UserControl
             var del = new Button { Content = "删除" };
             del.Click += async (_, _) =>
             {
+                // 「删除」就贴在「使用」旁边，误点一次就没了；微软账号删掉连刷新令牌一起丢，
+                // 只能重新走一遍 OAuth。版本卸载和实例删除都有二次确认，这里以前偏偏没有。
+                if (!await Dialogs.ConfirmAsync(XamlRoot, "删除账号",
+                        $"确定删除账号「{row.Name}」吗？微软账号的登录凭据会一并删除，需要重新登录。"))
+                    return;
                 try { await AppServices.Client.CallAsync("remove_account", new { name = row.Name }); await ReloadAsync(); }
                 catch (Exception ex) { AppServices.Toast?.Invoke("删除失败", ex.Message, InfoBarSeverity.Error); }
             };

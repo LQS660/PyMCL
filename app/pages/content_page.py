@@ -10,6 +10,7 @@ from qfluentwidgets import (
 
 from ..widgets import EmptyState, InputDialog, Pill
 from .modpack_page import ResultCard
+from mclauncher.i18n import tr
 
 try:
     from mclauncher.config import CONFIG
@@ -22,48 +23,48 @@ except ImportError:  # 独立 UI 包没有 mclauncher
 
 SHADER_SPEC = {
     "object_name": "shaderPage",
-    "title": "光影",
-    "subtitle": "安装到当前实例 shaderpacks（需 Iris / OptiFine / Oculus）",
-    "search_ph": "搜索光影，回车搜索…",
-    "empty_search": "没有找到相关光影",
-    "empty_installed": "还没有安装光影",
-    "installed_title": "已安装光影",
-    "local_label": "导入本地 zip",
-    "local_filter": "光影包 (*.zip)",
-    "local_dialog": "选择光影包",
-    "link_label": "从链接安装",
-    "link_title": "从链接安装光影",
-    "link_hint": "光影包下载链接 (URL)",
+    "title": tr("光影"),
+    "subtitle": tr("安装到当前实例 shaderpacks（需 Iris / OptiFine / Oculus）"),
+    "search_ph": tr("搜索光影，回车搜索…"),
+    "empty_search": tr("没有找到相关光影"),
+    "empty_installed": tr("还没有安装光影"),
+    "installed_title": tr("已安装光影"),
+    "local_label": tr("导入本地 zip"),
+    "local_filter": tr("光影包 (*.zip)"),
+    "local_dialog": tr("选择光影包"),
+    "link_label": tr("从链接安装"),
+    "link_title": tr("从链接安装光影"),
+    "link_hint": tr("光影包下载链接 (URL)"),
     "link_ph": "https://…/shader.zip",
     "icon": FIF.BRIGHTNESS,
     "search": "search_shaders",
     "install": "install_shader",
     "list_installed": "get_installed_shaders",
     "delete": "delete_shader",
-    "task_prefix": "安装光影",
+    "task_prefix": tr("安装光影"),
 }
 
 RESOURCE_SPEC = {
     "object_name": "resourcePackPage",
-    "title": "资源包",
-    "subtitle": "安装到当前实例 resourcepacks",
-    "search_ph": "搜索资源包，回车搜索…",
-    "empty_search": "没有找到相关资源包",
-    "empty_installed": "还没有安装资源包",
-    "installed_title": "已安装资源包",
-    "local_label": "导入本地 zip",
-    "local_filter": "资源包 (*.zip)",
-    "local_dialog": "选择资源包",
-    "link_label": "从链接安装",
-    "link_title": "从链接安装资源包",
-    "link_hint": "资源包下载链接 (URL)",
+    "title": tr("资源包"),
+    "subtitle": tr("安装到当前实例 resourcepacks"),
+    "search_ph": tr("搜索资源包，回车搜索…"),
+    "empty_search": tr("没有找到相关资源包"),
+    "empty_installed": tr("还没有安装资源包"),
+    "installed_title": tr("已安装资源包"),
+    "local_label": tr("导入本地 zip"),
+    "local_filter": tr("资源包 (*.zip)"),
+    "local_dialog": tr("选择资源包"),
+    "link_label": tr("从链接安装"),
+    "link_title": tr("从链接安装资源包"),
+    "link_hint": tr("资源包下载链接 (URL)"),
     "link_ph": "https://…/pack.zip",
     "icon": FIF.PHOTO,
     "search": "search_resourcepacks",
     "install": "install_resourcepack",
     "list_installed": "get_installed_resourcepacks",
     "delete": "delete_resourcepack",
-    "task_prefix": "安装资源包",
+    "task_prefix": tr("安装资源包"),
 }
 
 
@@ -112,7 +113,7 @@ class PackBrowsePage(QWidget):
         left = QVBoxLayout(left_card)
         left.setContentsMargins(16, 14, 16, 14)
         left.setSpacing(10)
-        left.addWidget(StrongBodyLabel("搜索结果（点击安装）"))
+        left.addWidget(StrongBodyLabel(tr("搜索结果（点击安装）")))
         scroll = ScrollArea()
         scroll.setWidgetResizable(True)
         host = QWidget()
@@ -130,7 +131,7 @@ class PackBrowsePage(QWidget):
         head2 = QHBoxLayout()
         head2.addWidget(StrongBodyLabel(spec["installed_title"]))
         head2.addStretch(1)
-        self.count_pill = Pill("0 个", "#4C8BF5")
+        self.count_pill = Pill(tr("0 个"), "#4C8BF5")
         head2.addWidget(self.count_pill)
         right.addLayout(head2)
         self.installed_layout = QVBoxLayout()
@@ -213,7 +214,7 @@ class PackBrowsePage(QWidget):
             row = QHBoxLayout()
             row.addWidget(CaptionLabel(name), 1)
             btn = TransparentToolButton(FIF.DELETE)
-            btn.setToolTip("删除")
+            btn.setToolTip(tr("删除"))
             btn.clicked.connect(lambda _, n=name: self._delete(n))
             row.addWidget(btn)
             wrap = QWidget()
@@ -255,8 +256,8 @@ class PackBrowsePage(QWidget):
         title = f"{self.spec['task_prefix']} {name}".strip()
 
         def _pending(progress, log, *_a, **_k):
-            log("待后端对接")
-            progress(1, 1, "待对接")
+            log(tr("待后端对接"))
+            progress(1, 1, tr("待对接"))
 
         start(title, _pending)
 

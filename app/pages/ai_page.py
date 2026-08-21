@@ -24,13 +24,14 @@ from mclauncher.ai.agent import AgentCancelled, run_agent
 from mclauncher.ai.client import AIClientError, HttpCancel
 from mclauncher.ai import store as chat_store
 from mclauncher.ai.defaults import DEFAULT_MODEL
-from ..pcl_chrome import Theme, PCL_GREEN, PCL_HOVER, PCL_LINE, PCL_MUTED, PCL_TEXT
+from ..pcl_chrome import Theme
+from mclauncher.i18n import tr
 
-_STOP = {"已停止", "已取消"}
-_CHIPS = ("下一款游戏 1.20.1 Fabric", "装钠和光影", "启动闪退了帮我看")
+_STOP = {tr("已停止"), tr("已取消")}
+_CHIPS = (tr("下一款游戏 1.20.1 Fabric"), tr("装钠和光影"), tr("启动闪退了帮我看"))
 _WELCOME = (
-    "我是启动器助手。可以帮你下游戏、装模组和整合包、看启动报错、查模组冲突、改常用配置。\n"
-    "直接说你想做什么就行。写操作我会先让你确认。"
+    tr("我是启动器助手。可以帮你下游戏、装模组和整合包、看启动报错、查模组冲突、改常用配置。\n"
+    "直接说你想做什么就行。写操作我会先让你确认。")
 )
 _FENCE = re.compile(r"```(?:\w+)?\n([\s\S]*?)```")
 _CODE = re.compile(r"`([^`]+)`")
@@ -39,13 +40,15 @@ _BOLD = re.compile(r"\*\*(.+?)\*\*")
 
 def _md(text: str) -> str:
     raw = text or ""
+    pre_bg = "#2B2B2B" if Theme.dark else "#F4F6F5"
+    pre_fg = "#E8E8E8" if Theme.dark else "#2B2B2B"
     parts = []
     idx = 0
     for m in _FENCE.finditer(raw):
         parts.append(_md_inline(raw[idx:m.start()]))
         code = html.escape(m.group(1).rstrip())
         parts.append(
-            "<pre style='background:#F4F6F5;padding:8px;border-radius:6px;"
+            f"<pre style='background:{pre_bg};color:{pre_fg};padding:8px;border-radius:6px;"
             "white-space:pre-wrap;font-family:Consolas,monospace;font-size:12px;'>"
             f"{code}</pre>"
         )
@@ -128,11 +131,11 @@ class AgentThread(QThread):
                 http_cancel=self._http,
             )
             if self._cancel:
-                self.failed.emit("已停止")
+                self.failed.emit(tr("已停止"))
                 return
             self.done.emit(text or "")
         except AgentCancelled:
-            self.failed.emit("已停止")
+            self.failed.emit(tr("已停止"))
         except AIClientError as exc:
             self.failed.emit(str(exc))
         except Exception as exc:  # noqa: BLE001
@@ -144,28 +147,18 @@ class Bubble(QFrame):
         super().__init__(parent)
         self.role = role
         self._plain = text or ""
+        self._live = False
         mine = role == "user"
         err = role == "error"
-        if mine:
-            bg = "#1E3A2E" if Theme.dark else "#E8F6EF"
-        elif err:
-            bg = "#3A1E1E" if Theme.dark else "#FDECEC"
-        else:
-            bg = Theme.card
-        self.setStyleSheet(
-            "Bubble { background: %s; border: 1px solid %s; border-radius: 10px; }"
-            % (bg, "#E07A7A" if err else PCL_LINE)
-        )
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 8, 12, 8)
         lay.setSpacing(4)
         head = QHBoxLayout()
-        who = CaptionLabel("我" if mine else ("出错" if err else "助手"))
-        who.setStyleSheet(f"color: {'#C23A3A' if err else PCL_MUTED};")
-        head.addWidget(who)
+        self.who = CaptionLabel(tr("我") if mine else (tr("出错") if err else tr("助手")))
+        head.addWidget(self.who)
         head.addStretch(1)
         if not mine:
-            copy = TransparentPushButton("复制")
+            copy = TransparentPushButton(tr("复制"))
             copy.setFixedHeight(22)
             copy.clicked.connect(self._copy)
             head.addWidget(copy)
@@ -174,14 +167,34 @@ class Bubble(QFrame):
         self.body.setWordWrap(True)
         self.body.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
         self.body.setOpenExternalLinks(True)
-        self.body.setStyleSheet(f"color: {PCL_TEXT};")
         lay.addWidget(self.body)
+        self._apply_style()
         self.set_text(text)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.setMaximumWidth(640)
 
+    def _apply_style(self):
+        err = self.role == "error"
+        if self.role == "user":
+            bg = "#1E3A2E" if Theme.dark else "#E8F6EF"
+        elif err:
+            bg = "#3A1E1E" if Theme.dark else "#FDECEC"
+        else:
+            bg = Theme.card
+        self.setStyleSheet(
+            "Bubble { background: %s; border: 1px solid %s; border-radius: 10px; }"
+            % (bg, "#E07A7A" if err else Theme.line)
+        )
+        self.who.setStyleSheet(f"color: {'#C23A3A' if err else Theme.muted};")
+        self.body.setStyleSheet(f"color: {Theme.text};")
+
+    def restyle(self):
+        self._apply_style()
+        self.set_text(self._plain, live=self._live)
+
     def set_text(self, text: str, *, live: bool = False):
         self._plain = text or ""
+        self._live = live
         if self.role == "user" or live:
             self.body.setTextFormat(Qt.PlainText)
             self.body.setText(self._plain)
@@ -191,26 +204,29 @@ class Bubble(QFrame):
 
     def _copy(self):
         QApplication.clipboard().setText(self._plain or "")
-        InfoBar.success("已复制", "", parent=self.window() or self,
+        InfoBar.success(tr("已复制"), "", parent=self.window() or self,
                         position=InfoBarPosition.TOP, duration=1200)
 
 
 class ToolLine(QFrame):
     def __init__(self, text: str, parent=None):
         super().__init__(parent)
-        self.setStyleSheet(f"ToolLine {{ background: {PCL_HOVER}; border-radius: 8px; }}")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 6, 10, 6)
         lay.setSpacing(4)
         self.lab = CaptionLabel(text)
         self.lab.setWordWrap(True)
-        self.lab.setStyleSheet(f"color: {PCL_GREEN};")
+        self.restyle()
         self.bar = ProgressBar()
         self.bar.setRange(0, 100)
         self.bar.hide()
         lay.addWidget(self.lab)
         lay.addWidget(self.bar)
         self.task_id = ""
+
+    def restyle(self):
+        self.setStyleSheet(f"ToolLine {{ background: {Theme.hover}; border-radius: 8px; }}")
+        self.lab.setStyleSheet(f"color: {Theme.green};")
 
     def set_text(self, text: str):
         self.lab.setText(text)
@@ -233,12 +249,10 @@ class ConfirmCard(QFrame):
 
     def __init__(self, label: str, detail: str = "", parent=None):
         super().__init__(parent)
-        self.setStyleSheet(
-            "ConfirmCard { background: #FFF8E8; border: 1px solid #F0D48A; border-radius: 10px; }"
-        )
+        self.restyle()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
-        lay.addWidget(BodyLabel("需要你点一下确认："))
+        lay.addWidget(BodyLabel(tr("需要你点一下确认：")))
         desc = BodyLabel(label)
         desc.setWordWrap(True)
         lay.addWidget(desc)
@@ -249,14 +263,21 @@ class ConfirmCard(QFrame):
             box.setFixedHeight(min(160, 40 + detail.count("\n") * 16))
             lay.addWidget(box)
         row = QHBoxLayout()
-        yes = PrimaryPushButton("确认执行")
-        no = PushButton("取消")
+        yes = PrimaryPushButton(tr("确认执行"))
+        no = PushButton(tr("取消"))
         yes.clicked.connect(self.accepted.emit)
         no.clicked.connect(self.rejected.emit)
         row.addWidget(yes)
         row.addWidget(no)
         row.addStretch(1)
         lay.addLayout(row)
+
+    def restyle(self):
+        el_bg = "#3A2E10" if Theme.dark else "#FFF8E8"
+        el_border = "#8A7A3A" if Theme.dark else "#F0D48A"
+        self.setStyleSheet(
+            f"ConfirmCard {{ background: {el_bg}; border: 1px solid {el_border}; border-radius: 10px; }}"
+        )
 
 
 class AskCard(QFrame):
@@ -265,9 +286,7 @@ class AskCard(QFrame):
 
     def __init__(self, questions: list, title: str = "", parent=None):
         super().__init__(parent)
-        self.setStyleSheet(
-            "AskCard { background: #F3F7F5; border: 1px solid #C9E4D6; border-radius: 10px; }"
-        )
+        self.restyle()
         self._qs = []
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
@@ -281,8 +300,8 @@ class AskCard(QFrame):
             self._qs.append(block)
             lay.addWidget(block)
         row = QHBoxLayout()
-        ok = PrimaryPushButton("确定")
-        no = PushButton("跳过")
+        ok = PrimaryPushButton(tr("确定"))
+        no = PushButton(tr("跳过"))
         ok.clicked.connect(self._submit)
         no.clicked.connect(self.cancelled.emit)
         row.addWidget(ok)
@@ -290,12 +309,19 @@ class AskCard(QFrame):
         row.addStretch(1)
         lay.addLayout(row)
 
+    def restyle(self):
+        bg = "#1E3A2E" if Theme.dark else "#F3F7F5"
+        border = "#3A6B52" if Theme.dark else "#C9E4D6"
+        self.setStyleSheet(
+            f"AskCard {{ background: {bg}; border: 1px solid {border}; border-radius: 10px; }}"
+        )
+
     def _submit(self):
         answers = {}
         for block in self._qs:
             row = block.collect()
             if row is None:
-                InfoBar.warning("还没选", block.prompt, parent=self.window() or self,
+                InfoBar.warning(tr("还没选"), block.prompt, parent=self.window() or self,
                                 position=InfoBarPosition.TOP, duration=2200)
                 return
             answers[block.qid] = row
@@ -307,7 +333,7 @@ class _AskBlock(QWidget):
     def __init__(self, q: dict, parent=None):
         super().__init__(parent)
         self.qid = str(q.get("id") or "q1")
-        self.prompt = str(q.get("prompt") or "请选择")
+        self.prompt = str(q.get("prompt") or tr("请选择"))
         self.multi = bool(q.get("allow_multiple"))
         self._opts = list(q.get("options") or [])
         self._group = None
@@ -318,7 +344,7 @@ class _AskBlock(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(6)
-        hint = BodyLabel(self.prompt + ("（可多选）" if self.multi else ""))
+        hint = BodyLabel(self.prompt + (tr("（可多选）") if self.multi else ""))
         hint.setWordWrap(True)
         root.addWidget(hint)
         if self.multi:
@@ -344,7 +370,7 @@ class _AskBlock(QWidget):
             if self._group:
                 self._group.buttonToggled.connect(self._sync_other)
         self.other_edit = LineEdit()
-        self.other_edit.setPlaceholderText("选「其他」时在这里填")
+        self.other_edit.setPlaceholderText(tr("选「其他」时在这里填"))
         self.other_edit.hide()
         root.addWidget(self.other_edit)
 
@@ -367,9 +393,9 @@ class _AskBlock(QWidget):
             if btn:
                 picked.append({"id": btn.property("opt_id"), "label": btn.text()})
         extra = self.other_edit.text().strip()
-        other_on = any(p.get("id") == "other" or "其他" in (p.get("label") or "") for p in picked)
+        other_on = any(p.get("id") == "other" or tr("其他") in (p.get("label") or "") for p in picked)
         if extra and not other_on:
-            picked.append({"id": "other", "label": "其他"})
+            picked.append({"id": "other", "label": tr("其他")})
             other_on = True
         if other_on and not extra and len(picked) == 1:
             return None
@@ -387,7 +413,7 @@ class ChatInput(PlainTextEdit):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setPlaceholderText("问我要下什么、哪报错、模组怎么配…  Enter 发送，Shift+Enter 换行")
+        self.setPlaceholderText(tr("问我要下什么、哪报错、模组怎么配…  Enter 发送，Shift+Enter 换行"))
         self.setFixedHeight(48)
         self._preedit = ""
         self.textChanged.connect(self._grow)
@@ -441,44 +467,37 @@ class AiPage(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        side = QFrame()
-        side.setFixedWidth(200)
-        side.setStyleSheet(f"QFrame {{ background: #F7FAF8; border-right: 1px solid {PCL_LINE}; }}")
-        sl = QVBoxLayout(side)
+        self._side = QFrame()
+        self._side.setFixedWidth(200)
+        sl = QVBoxLayout(self._side)
         sl.setContentsMargins(10, 14, 10, 14)
         sl.setSpacing(8)
-        new_btn = PrimaryPushButton(getattr(FIF, "ADD", FIF.PLAY), "新对话")
+        new_btn = PrimaryPushButton(getattr(FIF, "ADD", FIF.PLAY), tr("新对话"))
         new_btn.setFixedHeight(32)
         new_btn.clicked.connect(self._new_chat)
         sl.addWidget(new_btn)
         self.chat_list = QListWidget()
-        self.chat_list.setStyleSheet(
-            f"QListWidget {{ border: none; background: transparent; color: {PCL_TEXT}; }}"
-            f"QListWidget::item {{ padding: 8px; border-radius: 6px; }}"
-            "QListWidget::item:selected { background: #E8F6EF; }"
-        )
         self.chat_list.currentItemChanged.connect(self._on_pick_chat)
         sl.addWidget(self.chat_list, 1)
-        del_btn = TransparentPushButton(FIF.DELETE, "删除对话")
+        del_btn = TransparentPushButton(FIF.DELETE, tr("删除对话"))
         del_btn.clicked.connect(self._delete_chat)
         sl.addWidget(del_btn)
-        root.addWidget(side)
+        root.addWidget(self._side)
 
         main = QVBoxLayout()
         main.setContentsMargins(24, 20, 24, 20)
         main.setSpacing(10)
 
         head = QHBoxLayout()
-        title = SubtitleLabel("AI 助手")
+        title = SubtitleLabel(tr("AI 助手"))
         title.setFont(QFont(title.font().family(), 16, QFont.DemiBold))
         head.addWidget(title)
         self.status = CaptionLabel("")
-        self.status.setStyleSheet(f"color: {PCL_MUTED};")
         head.addWidget(self.status)
         head.addStretch(1)
-        self.stop_btn = PushButton(FIF.CLOSE, "停止")
+        self.stop_btn = PushButton(FIF.CLOSE, tr("停止"))
         self.stop_btn.setEnabled(False)
-        self.retry_btn = TransparentPushButton(FIF.SYNC, "重试")
+        self.retry_btn = TransparentPushButton(FIF.SYNC, tr("重试"))
         self.retry_btn.setEnabled(False)
         head.addWidget(self.stop_btn)
         head.addWidget(self.retry_btn)
@@ -506,18 +525,15 @@ class AiPage(QWidget):
         self._host = host
         main.addWidget(self.scroll, 1)
 
-        box = QFrame()
-        box.setStyleSheet(
-            f"QFrame {{ background: {Theme.card}; border: 1px solid {Theme.line}; border-radius: 10px; }}"
-        )
-        row = QHBoxLayout(box)
+        self._input_box = QFrame()
+        row = QHBoxLayout(self._input_box)
         row.setContentsMargins(10, 8, 10, 8)
         self.input = ChatInput()
-        self.send_btn = PrimaryPushButton(getattr(FIF, "SEND", FIF.PLAY), "发送")
+        self.send_btn = PrimaryPushButton(getattr(FIF, "SEND", FIF.PLAY), tr("发送"))
         self.send_btn.setFixedHeight(34)
         row.addWidget(self.input, 1)
         row.addWidget(self.send_btn)
-        main.addWidget(box)
+        main.addWidget(self._input_box)
 
         wrap = QWidget()
         wrap.setLayout(main)
@@ -532,11 +548,29 @@ class AiPage(QWidget):
         self.backend.progress.connect(self._on_task_progress)
         self.backend.finished.connect(self._on_task_finished)
 
-        self._refresh_status()
+        self.restyle()
         self._reload_list()
         self._load_active()
 
     def reload(self):
+        self._refresh_status()
+
+    def restyle(self):
+        self._side.setStyleSheet(
+            f"QFrame {{ background: {Theme.card}; border-right: 1px solid {Theme.line}; }}")
+        self.chat_list.setStyleSheet(
+            f"QListWidget {{ border: none; background: transparent; color: {Theme.text}; }}"
+            f"QListWidget::item {{ padding: 8px; border-radius: 6px; }}"
+            f"QListWidget::item:selected {{ background: {Theme.hover}; }}"
+        )
+        self._input_box.setStyleSheet(
+            f"QFrame {{ background: {Theme.card}; border: 1px solid {Theme.line}; border-radius: 10px; }}"
+        )
+        self.status.setStyleSheet(f"color: {Theme.muted};")
+        # 已经贴在对话流里的气泡 / 工具行 / 卡片不会自己跟主题走，逐个刷一遍
+        for kind in (Bubble, ToolLine, ConfirmCard, AskCard):
+            for w in self._host.findChildren(kind):
+                w.restyle()
         self._refresh_status()
 
     def _refresh_status(self):
@@ -575,7 +609,7 @@ class AiPage(QWidget):
         active = self._store.get("active_id")
         pick = None
         for c in self._store.get("chats") or []:
-            item = QListWidgetItem(c.get("title") or "对话")
+            item = QListWidgetItem(c.get("title") or tr("对话"))
             item.setData(Qt.UserRole, c.get("id"))
             self.chat_list.addItem(item)
             if c.get("id") == active:
@@ -680,23 +714,27 @@ class AiPage(QWidget):
         if self._worker:
             self._queue.append(text)
             self.input.clear()
+            # 这里已经把气泡贴出去了，出队时 _send 不能再贴一次
             self._add_bubble("user", text)
-            InfoBar.info("已排队", "这条会在当前回复结束后发出", parent=self.window() or self,
+            InfoBar.info(tr("已排队"), tr("这条会在当前回复结束后发出"), parent=self.window() or self,
                          position=InfoBarPosition.TOP, duration=1800)
             return
         self.input.clear()
         self._send(text)
 
-    def _send(self, text: str):
-        self._add_bubble("user", text)
+    def _send(self, text: str, *, echo: bool = True):
+        if echo:
+            self._add_bubble("user", text)
         self._stream = ""
         self._notes = []
         self._tool_lines = {}
         self._task_lines = {}
-        self._assistant_bubble = self._add_bubble("assistant", "正在想…")
+        self._assistant_bubble = self._add_bubble("assistant", tr("正在想…"))
         settings = self.backend.get_settings()
         self.backend._ui_launch = self._launch_prefs()
-        worker = AgentThread(self.backend, settings, chat_store.api_messages(self._history), text, self)
+        # 只截取最近 24 条喂给模型；完整历史留在 self._history 里，不能跟着截
+        worker = AgentThread(
+            self.backend, settings, chat_store.api_messages(self._history[-24:]), text, self)
         self._worker = worker
         worker.delta.connect(self._on_delta, Qt.QueuedConnection)
         worker.status.connect(self._on_status, Qt.QueuedConnection)
@@ -731,38 +769,38 @@ class AiPage(QWidget):
         if kind == "think":
             if not self._stream:
                 if payload.get("after_tools"):
-                    tip = "搜完了，正在整理…"
+                    tip = tr("搜完了，正在整理…")
                 else:
-                    tip = "正在想…"
+                    tip = tr("正在想…")
                 if self._assistant_bubble:
                     self._assistant_bubble.set_text(tip)
             return
         if kind == "tool":
             if name == "ask_user":
                 if self._assistant_bubble and not self._stream:
-                    self._assistant_bubble.set_text("请在下面选一下")
+                    self._assistant_bubble.set_text(tr("请在下面选一下"))
                 return
             line = self._tool_lines.get(name)
             if line:
-                line.set_text("准备：" + label)
+                line.set_text(tr("准备：") + label)
             else:
-                line = ToolLine("准备：" + label)
+                line = ToolLine(tr("准备：") + label)
                 self._tool_lines[name] = line
                 self._add_widget(line)
             return
         line = self._tool_lines.get(name)
         if kind == "tool_run":
             if line:
-                line.set_text("执行中：" + label)
+                line.set_text(tr("执行中：") + label)
             else:
-                line = ToolLine("执行中：" + label)
+                line = ToolLine(tr("执行中：") + label)
                 self._tool_lines[name] = line
                 self._add_widget(line)
         elif kind == "tool_done":
             if line:
-                line.set_text("完成：" + label)
+                line.set_text(tr("完成：") + label)
             else:
-                line = ToolLine("完成：" + label)
+                line = ToolLine(tr("完成：") + label)
                 self._tool_lines[name] = line
                 self._add_widget(line)
             tid = payload.get("task_id") or ""
@@ -780,9 +818,9 @@ class AiPage(QWidget):
                 self._notes.append(label)
         elif kind == "tool_skip":
             if line:
-                line.set_text("已跳过：" + label)
+                line.set_text(tr("已跳过：") + label)
             else:
-                self._add_widget(ToolLine("已跳过：" + label))
+                self._add_widget(ToolLine(tr("已跳过：") + label))
         self._scroll_bottom()
 
     def _on_confirm(self, name: str, args: dict, label: str):
@@ -790,7 +828,7 @@ class AiPage(QWidget):
         if name == "write_mod_config":
             detail = str((args or {}).get("content") or "")[:4000]
         elif name == "delete_instance":
-            detail = "删掉后文件找不回来。"
+            detail = tr("删掉后文件找不回来。")
         card = ConfirmCard(label, detail)
         worker = self._worker
 
@@ -820,7 +858,7 @@ class AiPage(QWidget):
                 for row in (payload or {}).get("answers", {}).values():
                     labels.extend(row.get("labels") or [])
                 if labels:
-                    self._notes.append("已选 " + "、".join(labels))
+                    self._notes.append(tr("已选 ") + "、".join(labels))
             except Exception:
                 pass
 
@@ -833,27 +871,25 @@ class AiPage(QWidget):
         card.cancelled.connect(skip)
         self._add_widget(card)
         if self._assistant_bubble and not self._stream:
-            self._assistant_bubble.set_text("请在下面选一下")
+            self._assistant_bubble.set_text(tr("请在下面选一下"))
 
     def _compose_assistant(self, text: str) -> str:
         body = (text or "").strip()
         if self._notes:
-            extra = "（本轮：" + "；".join(self._notes[:8]) + "）"
+            extra = tr("（本轮：") + "；".join(self._notes[:8]) + "）"
             if extra not in body:
                 body = (body + "\n\n" + extra).strip()
         return body
 
     def _finish(self, assistant_text: str, ok: bool):
         self._flush_timer.stop()
-        shown = self._compose_assistant(assistant_text if ok else (assistant_text or "已停止"))
+        shown = self._compose_assistant(assistant_text if ok else (assistant_text or tr("已停止")))
         if self._assistant_bubble:
-            self._assistant_bubble.set_text(shown or ("已停止" if not ok else ""))
+            self._assistant_bubble.set_text(shown or (tr("已停止") if not ok else ""))
         user = getattr(self, "_pending_user", None)
         if user:
             self._history.append({"role": "user", "content": user})
             self._history.append({"role": "assistant" if ok else "error", "content": shown or ""})
-            if len(self._history) > 24:
-                self._history = self._history[-24:]
             self._persist()
         self._pending_user = None
         self._worker = None
@@ -864,23 +900,23 @@ class AiPage(QWidget):
         self._scroll_bottom()
         if self._queue:
             nxt = self._queue.pop(0)
-            QTimer.singleShot(30, lambda: self._send(nxt))
+            QTimer.singleShot(30, lambda: self._send(nxt, echo=False))
 
     def _on_done(self, text: str):
         self._finish(text or self._stream, True)
 
     def _on_fail(self, msg: str):
         self._flush_timer.stop()
-        text = (msg or "").strip() or "接口没返回具体原因"
+        text = (msg or "").strip() or tr("接口没返回具体原因")
         if self._assistant_bubble:
             self._assistant_bubble.set_text(text)
         else:
             self._add_bubble("error", text)
         if text in _STOP:
-            InfoBar.info("已停止", "可以继续说下一句", parent=self.window() or self,
+            InfoBar.info(tr("已停止"), tr("可以继续说下一句"), parent=self.window() or self,
                          position=InfoBarPosition.TOP, duration=2200)
         else:
-            InfoBar.error("助手出错", text, parent=self.window() or self,
+            InfoBar.error(tr("助手出错"), text, parent=self.window() or self,
                           position=InfoBarPosition.TOP, duration=12000)
         self._finish(text, text in _STOP)
 
@@ -899,6 +935,6 @@ class AiPage(QWidget):
         line = self._task_lines.get(task_id)
         if not line:
             return
-        line.set_text(("完成：" if success else "失败：") + (message or ""))
+        line.set_text((tr("完成：") if success else tr("失败：")) + (message or ""))
         if hasattr(line, "bar"):
             line.bar.setValue(100 if success else line.bar.value())

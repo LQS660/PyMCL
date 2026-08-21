@@ -148,6 +148,7 @@ def search_mods(dm: DownloadManager, query, limit=30, game_version=None, categor
             "tags": [str(c) for c in (h.get("display_categories") or h.get("categories") or [])[:6]],
             "updated": str(h.get("date_modified") or "")[:10],
             "source": "modrinth",
+            "icon_url": h.get("icon_url") or "",
         }
         for h in data.get("hits", [])
     ]
@@ -289,6 +290,7 @@ def _alias_to_modrinth_hits(dm: DownloadManager, slug, title=None, limit=30):
                 "downloads": data.get("downloads", 0),
                 "description": (data.get("description") or "")[:120],
                 "matched_alias": True,
+                "icon_url": data.get("icon_url") or "",
             })
         except Exception as e:
             utils.log.warning("Modrinth 项目 %s 查询失败: %s", sl, e)
@@ -925,6 +927,7 @@ def search_modrinth_projects(dm: DownloadManager, query, project_type, limit=30,
             "downloads": h.get("downloads") or 0,
             "tags": [str(c) for c in cats[:6]],
             "updated": str(h.get("date_modified") or "")[:10],
+            "icon_url": h.get("icon_url") or "",
         })
     return rows
 

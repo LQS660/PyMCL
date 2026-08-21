@@ -6,7 +6,9 @@ from qfluentwidgets import (
 from PySide6.QtWidgets import QFormLayout, QWidget
 
 from mclauncher.gc import LABELS as GC_LABELS
-from mclauncher.version_settings import ISOLATION_LABELS
+from mclauncher.version_settings import FULLSCREEN_MODES, ISOLATION_LABELS
+from mclauncher.i18n import tr
+from ..pcl_chrome import form_label, paint_theme_surfaces
 
 
 class VersionSetupDialog(MessageBoxBase):
@@ -17,7 +19,7 @@ class VersionSetupDialog(MessageBoxBase):
         self.version = version
         self._java_opts = []
         self.viewLayout.addWidget(SubtitleLabel(f"版本设置 · {version}", self))
-        hint = BodyLabel("这些选项只作用于当前版本，对齐 PCL 的「版本设置」。", self)
+        hint = BodyLabel(tr("这些选项只作用于当前版本，对齐 PCL 的「版本设置」。"), self)
         hint.setWordWrap(True)
         self.viewLayout.addWidget(hint)
 
@@ -32,15 +34,15 @@ class VersionSetupDialog(MessageBoxBase):
         self.iso.setCurrentText(cur)
 
         self.memory = LineEdit()
-        self.memory.setPlaceholderText("留空则用启动页滑条")
+        self.memory.setPlaceholderText(tr("留空则用启动页滑条"))
         if data.get("memory_mb"):
             self.memory.setText(str(data["memory_mb"]))
 
         self.java = ComboBox()
         self._java_opts = backend.java_combo_options(instance, False) or []
-        labels = [o["label"] for o in self._java_opts] or ["自动选择"]
+        labels = [o["label"] for o in self._java_opts] or [tr("自动选择")]
         self.java.addItems(labels)
-        want = data.get("java") or "自动选择"
+        want = data.get("java") or tr("自动选择")
         picked = ""
         for o in self._java_opts:
             if o.get("value") == want or o.get("label") == want:
@@ -60,93 +62,103 @@ class VersionSetupDialog(MessageBoxBase):
             )
 
         self.jvm = TextEdit()
-        self.jvm.setPlaceholderText("-XX:+UseG1GC 等，一行或空格分隔")
+        self.jvm.setPlaceholderText(tr("-XX:+UseG1GC 等，一行或空格分隔"))
         self.jvm.setFixedHeight(64)
         self.jvm.setPlainText(data.get("jvm_args") or "")
 
         self.gc = ComboBox()
-        self.gc.addItems(["跟随全局"] + list(GC_LABELS.values()))
+        self.gc.addItems([tr("跟随全局")] + list(GC_LABELS.values()))
         gck = data.get("gc") or ""
         if gck and gck in GC_LABELS:
             self.gc.setCurrentText(GC_LABELS[gck])
 
         self.game = LineEdit()
-        self.game.setPlaceholderText("附加游戏参数")
+        self.game.setPlaceholderText(tr("附加游戏参数"))
         self.game.setText(data.get("game_args") or "")
 
         self.login = ComboBox()
-        self.login.addItem("跟随启动页")
+        self.login.addItem(tr("跟随启动页"))
         accounts = backend.get_accounts() or []
         self.login.addItems(accounts)
         if data.get("login_account") and data["login_account"] in accounts:
             self.login.setCurrentText(data["login_account"])
 
         self.nide8 = LineEdit()
-        self.nide8.setPlaceholderText("32 位服务器 ID 或通行证链接")
+        self.nide8.setPlaceholderText(tr("32 位服务器 ID 或通行证链接"))
         self.nide8.setText(data.get("nide8_id") or "")
         self.auth_server = LineEdit()
-        self.auth_server.setPlaceholderText("自定义认证服 API（可选）")
+        self.auth_server.setPlaceholderText(tr("自定义认证服 API（可选）"))
         self.auth_server.setText(data.get("auth_server") or "")
 
         self.server = LineEdit()
-        self.server.setPlaceholderText("启动后直连，例如 play.example.com")
+        self.server.setPlaceholderText(tr("启动后直连，例如 play.example.com"))
         self.server.setText(data.get("server") or "")
         self.port = LineEdit()
         self.port.setPlaceholderText("25565")
         self.port.setText(str(data.get("port") or ""))
 
         self.title = LineEdit()
-        self.title.setPlaceholderText("自定义窗口标题")
+        self.title.setPlaceholderText(tr("自定义窗口标题"))
         self.title.setText(data.get("window_title") or "")
         self.win_mode = ComboBox()
-        self.win_mode.addItems(["窗口", "全屏"])
-        self.win_mode.setCurrentText("全屏" if data.get("window_mode") == "maximize" else "窗口")
+        self.win_mode.addItems([tr("窗口"), tr("全屏")])
+        self.win_mode.setCurrentText(
+            tr("全屏") if data.get("window_mode") in FULLSCREEN_MODES else tr("窗口"))
+        self.win_w = LineEdit()
+        self.win_w.setPlaceholderText(tr("留空则用设置页的全局分辨率"))
+        self.win_w.setText(str(data.get("window_width") or ""))
+        self.win_h = LineEdit()
+        self.win_h.setPlaceholderText(tr("留空则用设置页的全局分辨率"))
+        self.win_h.setText(str(data.get("window_height") or ""))
 
         self.skin = ComboBox()
-        self.skin.addItems(["默认", "Steve", "Alex"])
+        self.skin.addItems([tr("默认"), "Steve", "Alex"])
         skin_map = {"steve": "Steve", "alex": "Alex"}
-        self.skin.setCurrentText(skin_map.get(data.get("offline_skin") or "default", "默认"))
+        self.skin.setCurrentText(skin_map.get(data.get("offline_skin") or "default", tr("默认")))
 
         self.pre = LineEdit()
-        self.pre.setPlaceholderText("启动前命令（cmd / 脚本）")
+        self.pre.setPlaceholderText(tr("启动前命令（cmd / 脚本）"))
         self.pre.setText(data.get("pre_launch") or "")
-        self.wait = CheckBox("等待启动前命令结束")
+        self.wait = CheckBox(tr("等待启动前命令结束"))
         self.wait.setChecked(bool(data.get("pre_launch_wait", True)))
         self.post = LineEdit()
-        self.post.setPlaceholderText("退出后命令")
+        self.post.setPlaceholderText(tr("退出后命令"))
         self.post.setText(data.get("post_launch") or "")
 
         self.priority = ComboBox()
         self.priority.addItems(["low", "normal", "high"])
         self.priority.setCurrentText(data.get("process_priority") or "normal")
 
-        form.addRow("隔离", self.iso)
-        form.addRow("内存 MB", self.memory)
-        form.addRow("Java", self.java)
-        form.addRow("GC", self.gc)
-        form.addRow("JVM 参数", self.jvm)
-        form.addRow("游戏参数", self.game)
-        form.addRow("绑定账号", self.login)
-        form.addRow("统一通行证", self.nide8)
-        form.addRow("认证服", self.auth_server)
-        form.addRow("服务器", self.server)
-        form.addRow("端口", self.port)
-        form.addRow("窗口标题", self.title)
-        form.addRow("窗口模式", self.win_mode)
-        form.addRow("离线皮肤", self.skin)
-        form.addRow("启动前", self.pre)
+        form.addRow(form_label(tr("隔离")), self.iso)
+        form.addRow(form_label(tr("内存 MB")), self.memory)
+        form.addRow(form_label("Java"), self.java)
+        form.addRow(form_label("GC"), self.gc)
+        form.addRow(form_label(tr("JVM 参数")), self.jvm)
+        form.addRow(form_label(tr("游戏参数")), self.game)
+        form.addRow(form_label(tr("绑定账号")), self.login)
+        form.addRow(form_label(tr("统一通行证")), self.nide8)
+        form.addRow(form_label(tr("认证服")), self.auth_server)
+        form.addRow(form_label(tr("服务器")), self.server)
+        form.addRow(form_label(tr("端口")), self.port)
+        form.addRow(form_label(tr("窗口标题")), self.title)
+        form.addRow(form_label(tr("窗口模式")), self.win_mode)
+        form.addRow(form_label(tr("窗口宽度")), self.win_w)
+        form.addRow(form_label(tr("窗口高度")), self.win_h)
+        form.addRow(form_label(tr("离线皮肤")), self.skin)
+        form.addRow(form_label(tr("启动前")), self.pre)
         form.addRow("", self.wait)
-        form.addRow("退出后", self.post)
-        form.addRow("优先级", self.priority)
+        form.addRow(form_label(tr("退出后")), self.post)
+        form.addRow(form_label(tr("优先级")), self.priority)
         self.viewLayout.addWidget(form_host)
-        self.yesButton.setText("保存")
-        self.cancelButton.setText("取消")
+        self.yesButton.setText(tr("保存"))
+        self.cancelButton.setText(tr("取消"))
         self.widget.setMinimumWidth(540)
+        paint_theme_surfaces(form_host)
 
     def _fill_java(self, opts):
         self._java_opts = opts or []
         cur = self.java.currentText()
-        labels = [o["label"] for o in self._java_opts] or ["自动选择"]
+        labels = [o["label"] for o in self._java_opts] or [tr("自动选择")]
         self.java.blockSignals(True)
         self.java.clear()
         self.java.addItems(labels)
@@ -158,15 +170,20 @@ class VersionSetupDialog(MessageBoxBase):
         inv = {v: k for k, v in ISOLATION_LABELS.items()}
         gc_inv = {v: k for k, v in GC_LABELS.items()}
         mem = self.memory.text().strip()
-        java = self.java.currentText().strip() or "自动选择"
+        java = self.java.currentText().strip() or tr("自动选择")
         for o in self._java_opts:
             if o.get("label") == java:
                 java = o.get("value") or java
                 break
         login = self.login.currentText()
-        if login == "跟随启动页":
+        if login == tr("跟随启动页"):
             login = ""
         skin = {"Steve": "steve", "Alex": "alex"}.get(self.skin.currentText(), "default")
+
+        def size_of(edit):
+            text = edit.text().strip()
+            return int(text) if text.isdigit() and int(text) > 0 else None
+
         return {
             "isolation": inv.get(self.iso.currentText(), "none"),
             "memory_mb": int(mem) if mem.isdigit() else None,
@@ -184,7 +201,9 @@ class VersionSetupDialog(MessageBoxBase):
             "auth_server": self.auth_server.text().strip(),
             "gc": gc_inv.get(self.gc.currentText(), ""),
             "window_title": self.title.text().strip(),
-            "window_mode": "maximize" if self.win_mode.currentText() == "全屏" else "window",
+            "window_mode": "maximize" if self.win_mode.currentText() == tr("全屏") else "window",
+            "window_width": size_of(self.win_w),
+            "window_height": size_of(self.win_h),
             "offline_skin": skin,
         }
 

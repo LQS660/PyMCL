@@ -65,6 +65,13 @@ DEFAULT_CONFIG = {
     "theme_color": "#2E9B6B",
     "ui_dark": False,
     "ui_background": "",
+    # 这三个键以前只在 save_settings 里写、没在这儿声明。
+    # `save()` 落的是整份 data，`load()` 却只按本表的键名回读 ——
+    # 结果就是「关掉飞入动画、重开启动器它又自己回来了」。
+    "ui_fly_animation": True,
+    "ui_fly_duration_ms": 620,
+    # 全局默认 Java：版本设置与实例偏好都是「自动」时才生效
+    "default_java": "",
     "global_mods_dir": "",
     "launcher_visibility": "keep",
     "gc_preset": "auto",
@@ -78,15 +85,21 @@ DEFAULT_CONFIG = {
     "show_hidden_versions": False,
     "catalog_favorites": [],
     "offline_skin": "default",
+    "allow_multi_instance": False,
+    "language": "zh_CN",
 }
 
 
 class Config:
     def __init__(self):
         self.data = dict(DEFAULT_CONFIG)
+        # 每次改动 +1。上层（如 app.backend.get_setting）据此判断缓存是否还新鲜，
+        # 不用每取一个键就把整份设置字典重建一遍。
+        self.revision = 0
         self.load()
 
     def load(self):
+        self.revision += 1
         stored = utils.read_json(CONFIG_FILE, None)
         if isinstance(stored, dict):
             missing = False
@@ -123,9 +136,11 @@ class Config:
 
     def set(self, key, value):
         self.data[key] = value
+        self.revision += 1
 
     def update(self, mapping):
         self.data.update(mapping)
+        self.revision += 1
 
     # ---- 路径 ----
     @property

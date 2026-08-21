@@ -1,0 +1,21 @@
+{
+  "name": "pymcl-eziapp",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "eziapp-builder --mode debug",
+    "build:web": "vite build",
+    "build": "eziapp-builder --mode release",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@eziapp-org/bridge": "0.0.0-beta.2"
+  },
+  "devDependencies": {
+    "@eziapp-org/builder": "0.0.0-beta.9",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.2.2"
+  }
+}

@@ -10,7 +10,8 @@ from qfluentwidgets import (
 )
 
 from mclauncher.config import CONFIG
-from ..widgets import EmptyState, Pill
+from ..widgets import EmptyState, Pill, grid_columns
+from mclauncher.i18n import tr
 
 
 class VersionCard(SimpleCardWidget):
@@ -25,7 +26,7 @@ class VersionCard(SimpleCardWidget):
         top = QHBoxLayout()
         top.addWidget(StrongBodyLabel(info["version"]), 1)
         vtype = info["type"]
-        labels = {"release": "正式版", "snapshot": "快照", "old_alpha": "远古", "old_beta": "远古"}
+        labels = {"release": tr("正式版"), "snapshot": tr("快照"), "old_alpha": tr("远古"), "old_beta": tr("远古")}
         colors = {"release": "#2FA36B", "snapshot": "#E8862E", "old_alpha": "#7C5CD6", "old_beta": "#7C5CD6"}
         top.addWidget(Pill(labels.get(vtype, vtype), colors.get(vtype, "#E8862E")))
         layout.addLayout(top)
@@ -34,7 +35,7 @@ class VersionCard(SimpleCardWidget):
 
         row = QHBoxLayout()
         row.addStretch(1)
-        install_btn = PushButton(FIF.DOWNLOAD, "安装")
+        install_btn = PushButton(FIF.DOWNLOAD, tr("安装"))
         install_btn.setFixedHeight(30)
         install_btn.clicked.connect(lambda: on_install(info, self))
         row.addWidget(install_btn)
@@ -58,54 +59,54 @@ class VersionPage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 20, 28, 20)
         root.setSpacing(14)
-        root.addWidget(SubtitleLabel("版本"))
+        root.addWidget(SubtitleLabel(tr("版本")))
 
         bar = QHBoxLayout()
         bar.setSpacing(12)
         self.search = SearchLineEdit()
-        self.search.setPlaceholderText("搜索版本号…")
+        self.search.setPlaceholderText(tr("搜索版本号…"))
         self.search.setFixedWidth(260)
         self.pivot = Pivot(self)
-        self.pivot.addItem("all", "全部")
-        self.pivot.addItem("release", "正式版")
-        self.pivot.addItem("snapshot", "快照")
-        self.pivot.addItem("old_alpha", "远古")
+        self.pivot.addItem("all", tr("全部"))
+        self.pivot.addItem("release", tr("正式版"))
+        self.pivot.addItem("snapshot", tr("快照"))
+        self.pivot.addItem("old_alpha", tr("远古"))
         self.pivot.setCurrentItem("all")
         self.instance_box = ComboBox()
         self.instance_box.setFixedWidth(140)
-        self.launch_after = CheckBox("完成后启动")
+        self.launch_after = CheckBox(tr("完成后启动"))
         self.launch_after.setChecked(True)
-        self.hidden_box = CheckBox("显示隐藏")
+        self.hidden_box = CheckBox(tr("显示隐藏"))
         self.hidden_box.setChecked(self._show_hidden)
         bar.addWidget(self.search)
         bar.addWidget(self.pivot)
         bar.addStretch(1)
-        bar.addWidget(BodyLabel("实例"))
+        bar.addWidget(BodyLabel(tr("实例")))
         bar.addWidget(self.instance_box)
         bar.addWidget(self.hidden_box)
         bar.addWidget(self.launch_after)
         root.addLayout(bar)
 
-        scroll = ScrollArea(self)
-        scroll.setWidgetResizable(True)
+        self.scroll = ScrollArea(self)
+        self.scroll.setWidgetResizable(True)
         self.grid_host = QWidget()
         self.grid = QGridLayout(self.grid_host)
         self.grid.setContentsMargins(0, 0, 8, 0)
         self.grid.setSpacing(12)
-        scroll.setWidget(self.grid_host)
-        root.addWidget(scroll, 3)
+        self.scroll.setWidget(self.grid_host)
+        root.addWidget(self.scroll, 3)
 
         installed_card = SimpleCardWidget(self)
         ic_layout = QVBoxLayout(installed_card)
         ic_layout.setContentsMargins(20, 14, 20, 14)
         ic_layout.setSpacing(10)
         head = QHBoxLayout()
-        head.addWidget(StrongBodyLabel("已安装版本"))
+        head.addWidget(StrongBodyLabel(tr("已安装版本")))
         head.addStretch(1)
         self.uninstall_btn = TransparentToolButton(FIF.DELETE)
-        self.uninstall_btn.setToolTip("卸载选中版本")
+        self.uninstall_btn.setToolTip(tr("卸载选中版本"))
         self.repair_btn = TransparentToolButton(FIF.SYNC)
-        self.repair_btn.setToolTip("修复选中版本（补全缺失文件）")
+        self.repair_btn.setToolTip(tr("修复选中版本（补全缺失文件）"))
         head.addWidget(self.repair_btn)
         head.addWidget(self.uninstall_btn)
         ic_layout.addLayout(head)
@@ -143,11 +144,31 @@ class VersionPage(QWidget):
         self.backend.call_async(
             self.backend.fetch_version_list,
             self._on_versions_fetched,
+            self._on_versions_err,
         )
 
     def _on_versions_fetched(self, rows):
         self._all_versions = rows or []
         self._refill()
+
+    def _on_versions_err(self, err):
+        self._fetched = False
+        msg = str(err or tr("未知错误"))
+        InfoBar.error(
+            tr("版本列表加载失败"),
+            msg,
+            parent=self,
+            position=InfoBarPosition.TOP,
+            duration=4000,
+        )
+        if not self._all_versions:
+            while self.grid.count():
+                item = self.grid.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            self.grid.addWidget(
+                EmptyState(FIF.INFO, tr("版本列表加载失败")), 0, 0)
+            self._cols = 1
 
     def reload_installed_only(self):
         cur = self.instance_box.currentText()
@@ -180,10 +201,10 @@ class VersionPage(QWidget):
                 rows.append(v)
 
         if not rows:
-            self.grid.addWidget(EmptyState(FIF.SEARCH, "没有匹配的版本"), 0, 0)
+            self.grid.addWidget(EmptyState(FIF.SEARCH, tr("没有匹配的版本")), 0, 0)
             self._cols = 1
             return
-        cols = max(1, self.width() // 240)
+        cols = grid_columns(self.scroll, self, 240)
         self._cols = cols
         shown = rows[: self._limit]
         for i, v in enumerate(shown):
@@ -219,14 +240,14 @@ class VersionPage(QWidget):
                     "Quilt" if "quilt" in low else (
                         "NeoForge" if "neoforge" in low or "neo" in low else (
                             "OptiFine" if "optifine" in low else (
-                                "LiteLoader" if "liteloader" in low else "原版")))))
+                                "LiteLoader" if "liteloader" in low else tr("原版"))))))
             row.addWidget(cb, 1)
             row.addWidget(Pill(label, color))
             setup = TransparentToolButton(FIF.SETTING)
-            setup.setToolTip("版本设置")
+            setup.setToolTip(tr("版本设置"))
             setup.clicked.connect(lambda _, vid=v, inst=instance: self._setup(inst, vid))
             more = TransparentToolButton(getattr(FIF, "MORE", FIF.VIEW))
-            more.setToolTip("更多")
+            more.setToolTip(tr("更多"))
             more.clicked.connect(lambda _, vid=v, inst=instance, btn=more: self._version_menu(inst, vid, btn))
             row.addWidget(setup)
             row.addWidget(more)
@@ -251,7 +272,7 @@ class VersionPage(QWidget):
         if not dlg.exec():
             return
         payload = dlg.payload()
-        loader = payload.get("loader") or "无"
+        loader = payload.get("loader") or tr("无")
         win = self.window()
         if source is not None and hasattr(win, "fly_to_tasks"):
             win.fly_to_tasks(source, info["version"], "#2FA36B")
@@ -270,22 +291,31 @@ class VersionPage(QWidget):
             act.triggered.connect(fn)
             menu.addAction(act)
 
-        add("打开游戏文件夹", lambda: self._open_folder(instance, version, "game"))
-        add("打开 mods", lambda: self._open_folder(instance, version, "mods"))
-        add("打开 saves", lambda: self._open_folder(instance, version, "saves"))
-        add("打开截图", lambda: self._open_folder(instance, version, "screenshots"))
-        add("存档管理…", lambda: self._saves(instance, version))
-        add("重命名", lambda: self._rename(instance, version))
-        add("复制", lambda: self._copy(instance, version))
-        add("隐藏 / 取消隐藏", lambda: self._hide(instance, version))
-        add("导出启动脚本", lambda: self.backend.export_launch_script(instance, version))
+        add(tr("打开游戏文件夹"), lambda: self._open_folder(instance, version, "game"))
+        add(tr("打开 mods"), lambda: self._open_folder(instance, version, "mods"))
+        add(tr("打开 saves"), lambda: self._open_folder(instance, version, "saves"))
+        add(tr("打开截图"), lambda: self._open_folder(instance, version, "screenshots"))
+        add(tr("存档管理…"), lambda: self._saves(instance, version))
+        add(tr("重命名"), lambda: self._rename(instance, version))
+        add(tr("复制"), lambda: self._copy(instance, version))
+        add(tr("隐藏 / 取消隐藏"), lambda: self._hide(instance, version))
+        add(tr("创建桌面快捷方式"), lambda: self._shortcut(instance, version))
+        add(tr("导出启动脚本"), lambda: self.backend.export_launch_script(instance, version))
         menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
+
+    def _shortcut(self, instance, version):
+        try:
+            path = self.backend.create_desktop_shortcut(instance, version)
+        except Exception as e:
+            MessageBox(tr("创建失败"), str(e), self).exec()
+            return
+        MessageBox(tr("已创建"), f"桌面快捷方式：\n{path}\n\n双击即可直接启动该版本。", self).exec()
 
     def _open_folder(self, instance, version, which):
         try:
             self.backend.open_version_folder(instance, version, which)
         except Exception as e:
-            MessageBox("无法打开", str(e), self).exec()
+            MessageBox(tr("无法打开"), str(e), self).exec()
 
     def _saves(self, instance, version):
         from .saves_dialog import SavesDialog
@@ -293,22 +323,22 @@ class VersionPage(QWidget):
 
     def _rename(self, instance, version):
         from ..widgets import InputDialog
-        dlg = InputDialog("重命名版本", "新版本 ID", text=version, parent=self)
+        dlg = InputDialog(tr("重命名版本"), tr("新版本 ID"), text=version, parent=self)
         if dlg.exec() and dlg.value():
             try:
                 self.backend.rename_version(instance, version, dlg.value())
             except Exception as e:
-                MessageBox("重命名失败", str(e), self).exec()
+                MessageBox(tr("重命名失败"), str(e), self).exec()
             self._reload_installed()
 
     def _copy(self, instance, version):
         from ..widgets import InputDialog
-        dlg = InputDialog("复制版本", "新版本 ID", text=version + "-copy", parent=self)
+        dlg = InputDialog(tr("复制版本"), tr("新版本 ID"), text=version + "-copy", parent=self)
         if dlg.exec() and dlg.value():
             try:
                 self.backend.copy_version(instance, version, dlg.value())
             except Exception as e:
-                MessageBox("复制失败", str(e), self).exec()
+                MessageBox(tr("复制失败"), str(e), self).exec()
             self._reload_installed()
 
     def _hide(self, instance, version):
@@ -316,22 +346,22 @@ class VersionPage(QWidget):
             data = self.backend.get_version_settings(instance, version)
             self.backend.hide_version(instance, version, not bool(data.get("hidden")))
         except Exception as e:
-            MessageBox("操作失败", str(e), self).exec()
+            MessageBox(tr("操作失败"), str(e), self).exec()
         self._reload_installed()
 
     def _uninstall_selected(self):
         selected = [v for rb, v in getattr(self, "_installed_checks", []) if rb.isChecked()]
         if not selected:
-            box = MessageBox("未选择", "请先勾选要卸载的版本", self)
+            box = MessageBox(tr("未选择"), tr("请先勾选要卸载的版本"), self)
             box.exec()
             return
-        box = MessageBox("确认卸载", f"将卸载 {len(selected)} 个版本：\n" + "\n".join(selected), self)
+        box = MessageBox(tr("确认卸载"), f"将卸载 {len(selected)} 个版本：\n" + "\n".join(selected), self)
         if box.exec():
             for spec in selected:
                 try:
                     self.backend.uninstall_version(spec)
                 except Exception as e:
-                    MessageBox("卸载失败", str(e), self).exec()
+                    MessageBox(tr("卸载失败"), str(e), self).exec()
             self._reload_installed()
 
     def _setup(self, instance, version):
@@ -343,20 +373,20 @@ class VersionPage(QWidget):
     def _repair_selected(self):
         selected = [v for rb, v in getattr(self, "_installed_checks", []) if rb.isChecked()]
         if not selected:
-            MessageBox("未选择", "请先勾选要修复的版本", self).exec()
+            MessageBox(tr("未选择"), tr("请先勾选要修复的版本"), self).exec()
             return
         for spec in selected:
             inst, vid = spec.split(" / ", 1) if " / " in spec else (
                 self.instance_box.currentText() or "default", spec)
             self.backend.repair_version(inst, vid)
-        InfoBar.success("已开始修复", f"{len(selected)} 个版本", parent=self,
+        InfoBar.success(tr("已开始修复"), f"{len(selected)} 个版本", parent=self,
                         position=InfoBarPosition.TOP, duration=2500)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if not self._all_versions:
             return
-        cols = max(1, self.width() // 240)
+        cols = grid_columns(self.scroll, self, 240)
         if cols == self._cols:
             return
         self._resize_timer.start(120)

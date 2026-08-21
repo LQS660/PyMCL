@@ -1057,7 +1057,7 @@ def _run(instance, *, output_lines=None, exit_code=None, started_at=None,
         {"code": k, "title": _title_of({k: v}), "extra": v}
         for k, v in an.reasons.items()
     ]
-    return {
+    report = {
         "is_crash": bool(crashed),
         "title": "Minecraft 出现错误" if crashed else "游戏已退出",
         "headline": _title_of(an.reasons),
@@ -1079,6 +1079,193 @@ def _run(instance, *, output_lines=None, exit_code=None, started_at=None,
         "has_crash": bool(an.log_crash),
         "has_hs_err": bool(an.log_hs),
     }
+    report["actions"] = build_actions(report, path)
+    return report
+
+
+def _match_mod_files(mods_dir: Path, names: list[str]) -> list[str]:
+    """把分析里的模组名模糊映射到 mods 目录实际文件。"""
+    if not mods_dir.is_dir() or not names:
+        return []
+    files = [p for p in mods_dir.iterdir()
+             if p.is_file() and (p.suffix.lower() == ".jar"
+                                 or p.name.lower().endswith(".jar.disabled"))]
+    hit: list[str] = []
+    lower_map = {p.name.lower(): p.name for p in files}
+    stems = {(p.name[:-9] if p.name.lower().endswith(".disabled") else p.stem).lower(): p.name
+             for p in files}
+    for raw in names:
+        key = (raw or "").strip()
+        if not key:
+            continue
+        low = key.lower()
+        if low in lower_map:
+            hit.append(lower_map[low])
+            continue
+        stem = Path(key).stem.lower()
+        if stem in stems:
+            hit.append(stems[stem])
+            continue
+        for p in files:
+            pn = p.name.lower()
+            if low in pn or stem in pn or pn.startswith(stem):
+                hit.append(p.name)
+                break
+    # 去重保序
+    return list(dict.fromkeys(hit))
+
+
+def build_actions(report: dict, instance_path: Path | str | None = None) -> list[dict]:
+    """根据 reasons 生成可一键执行的修复动作（PCL 风格）。"""
+    report = report or {}
+    reasons = report.get("reasons") or []
+    path = Path(instance_path) if instance_path else None
+    if path is None and report.get("instance"):
+        try:
+            from mclauncher.instances import Instance
+            path = Instance(str(report["instance"])).path
+        except Exception:
+            path = None
+    mods_dir = (path / "mods") if path else None
+    actions: list[dict] = []
+    seen: set[str] = set()
+
+    def add(action: dict):
+        aid = action.get("id") or ""
+        key = (
+            aid + "|" + ",".join(action.get("mods") or [])
+            + "|" + str(action.get("major") or "")
+            + "|" + str(action.get("path") or "")
+        )
+        if key in seen:
+            return
+        seen.add(key)
+        actions.append(action)
+
+    mod_codes = (
+        "mod_suspect", "stack_mod", "mod_name_chars", "shaders_optifine",
+        "mod_certain", "mixin", "mod_config", "mod_init", "mod_incompat",
+        "optifine_forge", "mixin_bootstrap", "nightconfig",
+    )
+    java_codes = (
+        "openj9", "jdk", "java_too_new", "java_mismatch", "java32",
+        "need_java11", "old_forge_new_java", "java_too_old",
+    )
+    repair_codes = (
+        "forge_incomplete", "verify_fail", "multi_forge_json",
+        "libs_missing", "assets_index_missing", "assets_missing",
+        "natives_missing", "loader_error", "forge_error",
+    )
+    open_mods_codes = (
+        "mod_unzipped", "mod_duplicate", "mod_breaks", "mod_dup",
+        "mod_missing", "mod_id_limit", "hd_pack",
+    )
+
+    for row in reasons:
+        code = (row.get("code") or "").strip()
+        extra = list(row.get("extra") or [])
+        if code in mod_codes:
+            mods = _match_mod_files(mods_dir, extra) if mods_dir else []
+            if not mods and extra:
+                mods = [e for e in extra if e]
+            if mods:
+                add({
+                    "id": "disable_mods",
+                    "label": "禁用嫌疑 Mod",
+                    "mods": mods,
+                    "codes": [code],
+                })
+            elif mods_dir and mods_dir.is_dir():
+                add({
+                    "id": "open_mods_folder",
+                    "label": "打开 Mods 文件夹排查",
+                    "codes": [code],
+                })
+        elif code == "oom":
+            from mclauncher.config import CONFIG
+            cur = int(CONFIG.get("memory_mb") or 4096)
+            add({
+                "id": "bump_memory",
+                "label": "提高默认内存",
+                "memory_mb": min(16384, cur + 2048),
+                "codes": [code],
+            })
+        elif code in java_codes:
+            if code == "need_java11":
+                major = 11
+            elif code in ("jdk", "java_too_old", "old_forge_new_java"):
+                major = 8
+            elif code == "java_too_new":
+                major = 17
+            elif code == "java32":
+                major = 17
+            else:
+                major = 17
+            add({
+                "id": "need_java",
+                "label": f"下载 Java {major}",
+                "major": major,
+                "codes": [code],
+            })
+        elif code in repair_codes:
+            if report.get("version"):
+                add({
+                    "id": "repair_version",
+                    "label": "修复该版本文件",
+                    "version": report.get("version") or "",
+                    "instance": report.get("instance") or "",
+                    "codes": [code],
+                })
+        elif code in open_mods_codes:
+            add({
+                "id": "open_mods_folder",
+                "label": "打开 Mods 文件夹",
+                "codes": [code],
+            })
+            if code == "mod_dup" and extra:
+                mods = _match_mod_files(mods_dir, extra) if mods_dir else [e for e in extra if e]
+                if mods:
+                    add({
+                        "id": "disable_mods",
+                        "label": "禁用重复 Mod",
+                        "mods": mods[1:] if len(mods) > 1 else mods,
+                        "codes": [code],
+                    })
+        elif code in ("nvidia_av", "intel_av", "amd_av", "pixel_format",
+                      "no_opengl", "opengl_1282"):
+            add({
+                "id": "open_gpu_hint",
+                "label": "查看显卡驱动提示",
+                "codes": [code],
+            })
+        elif code in ("jvm_args",):
+            add({
+                "id": "reset_jvm_args",
+                "label": "清空自定义 JVM 参数",
+                "codes": [code],
+            })
+
+    # 通用：有崩溃报告文件时允许打开
+    direct = (report.get("direct_file") or "").strip()
+    if direct and Path(direct).is_file():
+        add({
+            "id": "open_crash_file",
+            "label": "打开崩溃报告",
+            "path": direct,
+            "codes": ["_file"],
+        })
+    # 有 hs_err 时提供清理建议动作
+    if report.get("has_hs_err") and path:
+        hs = list(path.glob("hs_err_pid*.log"))[:1]
+        if hs:
+            add({
+                "id": "open_crash_file",
+                "label": "打开 hs_err 日志",
+                "path": str(hs[0]),
+                "codes": ["_hs"],
+            })
+
+    return actions
 
 
 def analyze_launch(instance, *, exit_code, output_lines=None, started_at=None,

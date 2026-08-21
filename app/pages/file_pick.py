@@ -9,6 +9,7 @@ from qfluentwidgets import (
 
 from ..pcl_chrome import Theme, ghost_btn_qss, row_qss
 from ..ui_alive import guard
+from mclauncher.i18n import tr
 
 
 def fmt_downloads(n) -> str:
@@ -35,8 +36,8 @@ class FilePickDialog(MessageBoxBase):
         self._rows = []
         self._limit = self.PAGE
         self._dismissed = False
-        self.viewLayout.addWidget(SubtitleLabel(self.item.get("name") or "选择版本", self))
-        hint = BodyLabel("选择要安装的构建。可按游戏版本和加载器筛选。", self)
+        self.viewLayout.addWidget(SubtitleLabel(self.item.get("name") or tr("选择版本"), self))
+        hint = BodyLabel(tr("选择要安装的构建。可按游戏版本和加载器筛选。"), self)
         hint.setWordWrap(True)
         self.viewLayout.addWidget(hint)
 
@@ -45,10 +46,10 @@ class FilePickDialog(MessageBoxBase):
         self.gv.setFixedWidth(160)
         self.loader = ComboBox()
         self.loader.setFixedWidth(120)
-        self.loader.addItems(["全部", "Fabric", "Forge", "Quilt", "NeoForge"])
+        self.loader.addItems([tr("全部"), "Fabric", "Forge", "Quilt", "NeoForge"])
         filt.addWidget(BodyLabel("MC"))
         filt.addWidget(self.gv)
-        filt.addWidget(BodyLabel("加载器"))
+        filt.addWidget(BodyLabel(tr("加载器")))
         filt.addWidget(self.loader)
         filt.addStretch(1)
         host = QWidget(self)
@@ -66,11 +67,11 @@ class FilePickDialog(MessageBoxBase):
         scroll.setWidget(inner)
         self.viewLayout.addWidget(scroll)
 
-        self.status = BodyLabel("正在加载版本列表…")
+        self.status = BodyLabel(tr("正在加载版本列表…"))
         self.viewLayout.addWidget(self.status)
-        self.yesButton.setText("安装所选")
-        self.cancelButton.setText("取消")
-        latest = TransparentPushButton(FIF.DOWNLOAD, "安装最新")
+        self.yesButton.setText(tr("安装所选"))
+        self.cancelButton.setText(tr("取消"))
+        latest = TransparentPushButton(FIF.DOWNLOAD, tr("安装最新"))
         latest.clicked.connect(self._latest)
         self.buttonLayout.insertWidget(0, latest, 1, Qt.AlignVCenter)
         self.widget.setMinimumWidth(640)
@@ -81,7 +82,7 @@ class FilePickDialog(MessageBoxBase):
             "slug": self.item.get("slug"),
             "id": self.item.get("id"),
             "name": self.item.get("name"),
-            "game_version": "" if (not game_version or str(game_version).startswith("全部")) else game_version,
+            "game_version": "" if (not game_version or str(game_version).startswith(tr("全部"))) else game_version,
         }
         call_async = getattr(backend, "call_async", None)
         if callable(call_async):
@@ -109,7 +110,7 @@ class FilePickDialog(MessageBoxBase):
 
     def _on_ok(self, rows):
         self._rows = list(rows or [])
-        gvs = ["全部"]
+        gvs = [tr("全部")]
         seen = set()
         for r in self._rows:
             for v in r.get("game_versions") or []:
@@ -133,14 +134,19 @@ class FilePickDialog(MessageBoxBase):
 
     def _matched(self):
         gv = self.gv.currentText()
-        loader = self.loader.currentText().lower()
+        # 「全部」这个哨兵值要拿**原文**比，小写版只用来跟 loaders 匹配。
+        # 以前统一 .lower() 后再和 tr("全部") 比：中文下 .lower() 恰好是恒等所以看不出问题，
+        # 一旦切英文就是 "all" != "All"，加载器筛选被当成真实筛选条件，列表直接空掉。
+        loader_text = self.loader.currentText()
+        loader = loader_text.lower()
+        all_label = tr("全部")
         out = []
         for row in self._rows:
             games = [str(x) for x in (row.get("game_versions") or [])]
             loaders = [str(x).lower() for x in (row.get("loaders") or [])]
-            if gv and gv != "全部" and games and gv not in games:
+            if gv and gv != all_label and games and gv not in games:
                 continue
-            if loader and loader != "全部" and loaders and loader not in loaders:
+            if loader_text and loader_text != all_label and loaders and loader not in loaders:
                 continue
             out.append(row)
         return out
@@ -155,7 +161,7 @@ class FilePickDialog(MessageBoxBase):
         for row in shown:
             self.list_layout.addWidget(self._row(row))
         if not shown:
-            self.list_layout.addWidget(BodyLabel("没有匹配的文件，试试放宽筛选。"))
+            self.list_layout.addWidget(BodyLabel(tr("没有匹配的文件，试试放宽筛选。")))
         rest = len(matched) - len(shown)
         if rest > 0:
             more = PushButton(f"加载更多（还有 {rest}）")
@@ -191,7 +197,7 @@ class FilePickDialog(MessageBoxBase):
         if row.get("filename"):
             info.addWidget(fn)
         lay.addLayout(info, 1)
-        btn = PushButton("安装")
+        btn = PushButton(tr("安装"))
         btn.setFixedSize(64, 28)
         btn.setStyleSheet(ghost_btn_qss())
         btn.clicked.connect(lambda _, r=row: self._pick(r))

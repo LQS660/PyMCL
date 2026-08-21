@@ -120,7 +120,7 @@
                              TextWrapping="Wrap" PlaceholderText="启动日志将输出到这里…" FontSize="12"
                              MinHeight="140" HorizontalAlignment="Stretch"/>
                     <StackPanel x:Name="NewsHost" Grid.Row="2" Margin="0,10,0,0" Spacing="4">
-                        <TextBlock Text="Minecraft 新闻" FontWeight="SemiBold"/>
+                        <TextBlock x:Name="NewsTitle" Text="Minecraft 新闻" FontWeight="SemiBold"/>
                     </StackPanel>
                 </Grid>
             </Border>

@@ -12,7 +12,8 @@ from qfluentwidgets import (
 )
 
 from ..pcl_chrome import Theme, chip_qss, ghost_btn_qss, row_qss, _icon
-from ..widgets import EmptyState, IconTile, InputDialog
+from ..widgets import EmptyState, IconTile, InputDialog, ThumbnailTile
+from mclauncher.i18n import tr
 
 _HEART = getattr(FIF, "HEART", FIF.TAG)
 
@@ -42,10 +43,20 @@ class PclCard(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("pclCard")
+        self._style_ver = -1
+        self._apply_style()
+
+    def _apply_style(self):
         self.setStyleSheet(
             f"#pclCard {{ background: {Theme.card}; border: 1px solid {Theme.line};"
             " border-radius: 10px; }"
         )
+
+    def paintEvent(self, event):
+        if self._style_ver != Theme._version:
+            self._style_ver = Theme._version
+            self._apply_style()
+        super().paintEvent(event)
 
 
 def _src_label(src) -> str:
@@ -90,7 +101,11 @@ class PclResultRow(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(12)
-        layout.addWidget(IconTile(name, size=52))
+        thumb_url = item.get("icon_url") or item.get("thumb") or item.get("icon") or item.get("image")
+        if thumb_url:
+            layout.addWidget(ThumbnailTile(name, thumb_url, size=52))
+        else:
+            layout.addWidget(IconTile(name, size=52))
 
         info = QVBoxLayout()
         info.setSpacing(3)
@@ -121,148 +136,148 @@ class PclResultRow(QFrame):
         info.addLayout(meta)
         layout.addLayout(info, 1)
 
-        btn = PushButton("选择版本")
+        btn = PushButton(tr("选择版本"))
         btn.setFixedSize(88, 30)
         btn.setStyleSheet(ghost_btn_qss())
         btn.clicked.connect(lambda: on_install(item, btn))
         layout.addWidget(btn)
         if on_fav:
             star = TransparentToolButton(_HEART)
-            star.setToolTip("收藏")
+            star.setToolTip(tr("收藏"))
             star.clicked.connect(lambda: on_fav(item))
             layout.addWidget(star)
 
 
 MOD_SPEC = {
     "object_name": "modPage",
-    "search_title": "搜索 Mod",
-    "empty_search": "没有找到相关模组",
-    "empty_installed": "还没有安装模组",
-    "installed_title": "已安装",
-    "local_label": "导入 jar",
-    "local_filter": "模组 (*.jar)",
-    "local_dialog": "选择模组",
-    "link_label": "从链接安装",
-    "link_title": "从链接安装模组",
-    "link_hint": "模组下载链接 (URL)",
+    "search_title": tr("搜索 Mod"),
+    "empty_search": tr("没有找到相关模组"),
+    "empty_installed": tr("还没有安装模组"),
+    "installed_title": tr("已安装"),
+    "local_label": tr("导入 jar"),
+    "local_filter": tr("模组 (*.jar)"),
+    "local_dialog": tr("选择模组"),
+    "link_label": tr("从链接安装"),
+    "link_title": tr("从链接安装模组"),
+    "link_hint": tr("模组下载链接 (URL)"),
     "link_ph": "https://…/mod.jar",
     "icon": FIF.TAG,
     "search": "search_mods",
     "install": "install_mod",
     "list_installed": "get_installed_mods",
     "delete": "delete_mod",
-    "task_prefix": "安装模组",
-    "types": ["全部", "优化", "科技", "魔法", "冒险"],
+    "task_prefix": tr("安装模组"),
+    "types": [tr("全部"), tr("优化"), tr("科技"), tr("魔法"), tr("冒险")],
 }
 
 MODPACK_SPEC = {
     "object_name": "modpackPage",
-    "search_title": "搜索整合包",
-    "empty_search": "没有找到相关整合包",
-    "empty_installed": "还没有安装整合包",
-    "installed_title": "已安装",
-    "local_label": "导入文件",
-    "local_filter": "整合包 (*.mrpack *.zip)",
-    "local_dialog": "选择整合包",
-    "link_label": "从链接安装",
-    "link_title": "从链接安装整合包",
-    "link_hint": "整合包链接或文件",
+    "search_title": tr("搜索整合包"),
+    "empty_search": tr("没有找到相关整合包"),
+    "empty_installed": tr("还没有安装整合包"),
+    "installed_title": tr("已安装"),
+    "local_label": tr("导入文件"),
+    "local_filter": tr("整合包 (*.mrpack *.zip)"),
+    "local_dialog": tr("选择整合包"),
+    "link_label": tr("从链接安装"),
+    "link_title": tr("从链接安装整合包"),
+    "link_hint": tr("整合包链接或文件"),
     "link_ph": "https://…/pack.mrpack",
     "icon": FIF.ZIP_FOLDER,
     "search": "search_modpacks",
     "install": "install_modpack",
     "list_installed": "get_installed_modpacks",
     "delete": "delete_modpack",
-    "task_prefix": "安装整合包",
-    "types": ["全部", "生存", "空岛", "科技", "魔法"],
+    "task_prefix": tr("安装整合包"),
+    "types": [tr("全部"), tr("生存"), tr("空岛"), tr("科技"), tr("魔法")],
 }
 
 RESOURCE_SPEC = {
     "object_name": "resourcePackPage",
-    "search_title": "搜索资源包",
-    "empty_search": "没有找到相关资源包",
-    "empty_installed": "还没有安装资源包",
-    "installed_title": "已安装",
-    "local_label": "导入 zip",
-    "local_filter": "资源包 (*.zip)",
-    "local_dialog": "选择资源包",
-    "link_label": "从链接安装",
-    "link_title": "从链接安装资源包",
-    "link_hint": "资源包下载链接 (URL)",
+    "search_title": tr("搜索资源包"),
+    "empty_search": tr("没有找到相关资源包"),
+    "empty_installed": tr("还没有安装资源包"),
+    "installed_title": tr("已安装"),
+    "local_label": tr("导入 zip"),
+    "local_filter": tr("资源包 (*.zip)"),
+    "local_dialog": tr("选择资源包"),
+    "link_label": tr("从链接安装"),
+    "link_title": tr("从链接安装资源包"),
+    "link_hint": tr("资源包下载链接 (URL)"),
     "link_ph": "https://…/pack.zip",
     "icon": FIF.PHOTO,
     "search": "search_resourcepacks",
     "install": "install_resourcepack",
     "list_installed": "get_installed_resourcepacks",
     "delete": "delete_resourcepack",
-    "task_prefix": "安装资源包",
-    "types": ["全部", "16x", "32x", "64x", "写实", "现代风", "动态效果"],
+    "task_prefix": tr("安装资源包"),
+    "types": [tr("全部"), "16x", "32x", "64x", tr("写实"), tr("现代风"), tr("动态效果")],
 }
 
 SHADER_SPEC = {
     "object_name": "shaderPage",
-    "search_title": "搜索光影包",
-    "empty_search": "没有找到相关光影",
-    "empty_installed": "还没有安装光影",
-    "installed_title": "已安装",
-    "local_label": "导入 zip",
-    "local_filter": "光影包 (*.zip)",
-    "local_dialog": "选择光影包",
-    "link_label": "从链接安装",
-    "link_title": "从链接安装光影",
-    "link_hint": "光影包下载链接 (URL)",
+    "search_title": tr("搜索光影包"),
+    "empty_search": tr("没有找到相关光影"),
+    "empty_installed": tr("还没有安装光影"),
+    "installed_title": tr("已安装"),
+    "local_label": tr("导入 zip"),
+    "local_filter": tr("光影包 (*.zip)"),
+    "local_dialog": tr("选择光影包"),
+    "link_label": tr("从链接安装"),
+    "link_title": tr("从链接安装光影"),
+    "link_hint": tr("光影包下载链接 (URL)"),
     "link_ph": "https://…/shader.zip",
     "icon": FIF.BRIGHTNESS,
     "search": "search_shaders",
     "install": "install_shader",
     "list_installed": "get_installed_shaders",
     "delete": "delete_shader",
-    "task_prefix": "安装光影",
-    "types": ["全部", "写实", "卡通", "高性能", "光追"],
+    "task_prefix": tr("安装光影"),
+    "types": [tr("全部"), tr("写实"), tr("卡通"), tr("高性能"), tr("光追")],
 }
 
 DATAPACK_SPEC = {
     "object_name": "datapackPage",
-    "search_title": "搜索数据包",
-    "empty_search": "没有找到相关数据包",
-    "empty_installed": "还没有安装数据包",
-    "installed_title": "已安装",
-    "local_label": "导入 zip",
-    "local_filter": "数据包 (*.zip)",
-    "local_dialog": "选择数据包",
-    "link_label": "从链接安装",
-    "link_title": "从链接安装数据包",
-    "link_hint": "数据包下载链接 (URL)",
+    "search_title": tr("搜索数据包"),
+    "empty_search": tr("没有找到相关数据包"),
+    "empty_installed": tr("还没有安装数据包"),
+    "installed_title": tr("已安装"),
+    "local_label": tr("导入 zip"),
+    "local_filter": tr("数据包 (*.zip)"),
+    "local_dialog": tr("选择数据包"),
+    "link_label": tr("从链接安装"),
+    "link_title": tr("从链接安装数据包"),
+    "link_hint": tr("数据包下载链接 (URL)"),
     "link_ph": "https://…/datapack.zip",
     "icon": FIF.LEAF,
     "search": "search_datapacks",
     "install": "install_datapack",
     "list_installed": "get_installed_datapacks",
     "delete": "delete_datapack",
-    "task_prefix": "安装数据包",
-    "types": ["全部", "生存", "冒险", "装饰"],
+    "task_prefix": tr("安装数据包"),
+    "types": [tr("全部"), tr("生存"), tr("冒险"), tr("装饰")],
 }
 
 WORLD_SPEC = {
     "object_name": "worldPage",
-    "search_title": "搜索世界",
-    "empty_search": "没有找到相关世界",
-    "empty_installed": "还没有安装世界",
-    "installed_title": "已安装",
-    "local_label": "导入 zip",
-    "local_filter": "世界 (*.zip)",
-    "local_dialog": "选择世界",
-    "link_label": "从链接安装",
-    "link_title": "从链接安装世界",
-    "link_hint": "世界下载链接 (URL)",
+    "search_title": tr("搜索世界"),
+    "empty_search": tr("没有找到相关世界"),
+    "empty_installed": tr("还没有安装世界"),
+    "installed_title": tr("已安装"),
+    "local_label": tr("导入 zip"),
+    "local_filter": tr("世界 (*.zip)"),
+    "local_dialog": tr("选择世界"),
+    "link_label": tr("从链接安装"),
+    "link_title": tr("从链接安装世界"),
+    "link_hint": tr("世界下载链接 (URL)"),
     "link_ph": "https://…/world.zip",
     "icon": FIF.GLOBE,
     "search": "search_worlds",
     "install": "install_world",
     "list_installed": "list_saves",
     "delete": "delete_save",
-    "task_prefix": "安装世界",
-    "types": ["全部", "生存", "冒险", "创造"],
+    "task_prefix": tr("安装世界"),
+    "types": [tr("全部"), tr("生存"), tr("冒险"), tr("创造")],
 }
 
 
@@ -301,21 +316,21 @@ class PclCatalogPage(QWidget):
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(10)
         self.name_edit = LineEdit()
-        self.name_edit.setPlaceholderText("名称")
+        self.name_edit.setPlaceholderText(tr("名称"))
         self.source_box = ComboBox()
-        self.source_box.addItems(["全部", "Modrinth", "CurseForge"])
+        self.source_box.addItems([tr("全部"), "Modrinth", "CurseForge"])
         self.version_box = EditableComboBox()
-        self.version_box.addItems(["全部 (也可自行输入)", "1.21.1", "1.20.1", "1.19.2", "1.18.2", "1.16.5", "1.12.2"])
+        self.version_box.addItems([tr("全部 (也可自行输入)"), "1.21.1", "1.20.1", "1.19.2", "1.18.2", "1.16.5", "1.12.2"])
         self.version_box.setCurrentIndex(0)
         self.type_box = ComboBox()
-        self.type_box.addItems(spec.get("types") or ["全部"])
-        grid.addWidget(self._lab("名称"), 0, 0)
+        self.type_box.addItems(spec.get("types") or [tr("全部")])
+        grid.addWidget(self._lab(tr("名称")), 0, 0)
         grid.addWidget(self.name_edit, 0, 1)
-        grid.addWidget(self._lab("来源"), 0, 2)
+        grid.addWidget(self._lab(tr("来源")), 0, 2)
         grid.addWidget(self.source_box, 0, 3)
-        grid.addWidget(self._lab("版本"), 1, 0)
+        grid.addWidget(self._lab(tr("版本")), 1, 0)
         grid.addWidget(self.version_box, 1, 1)
-        grid.addWidget(self._lab("类型"), 1, 2)
+        grid.addWidget(self._lab(tr("类型")), 1, 2)
         grid.addWidget(self.type_box, 1, 3)
         grid.setColumnStretch(1, 3)
         grid.setColumnStretch(3, 2)
@@ -323,10 +338,10 @@ class PclCatalogPage(QWidget):
 
         btns = QHBoxLayout()
         btns.addStretch(1)
-        self.search_btn = PushButton("搜索")
+        self.search_btn = PushButton(tr("搜索"))
         self.search_btn.setFixedSize(88, 32)
         self.search_btn.setStyleSheet(ghost_btn_qss())
-        self.reset_btn = PushButton("重置条件")
+        self.reset_btn = PushButton(tr("重置条件"))
         self.reset_btn.setFixedSize(88, 32)
         btns.addWidget(self.search_btn)
         btns.addSpacing(12)
@@ -339,18 +354,18 @@ class PclCatalogPage(QWidget):
         rc = QVBoxLayout(result_card)
         rc.setContentsMargins(8, 6, 8, 8)
         mode_row = QHBoxLayout()
-        self.mode_search = PushButton("浏览")
-        self.mode_installed = PushButton("已安装")
+        self.mode_search = PushButton(tr("浏览"))
+        self.mode_installed = PushButton(tr("已安装"))
         for b in (self.mode_search, self.mode_installed):
             b.setFixedHeight(28)
             b.setCheckable(True)
         self.mode_search.setChecked(True)
-        self.update_btn = TransparentPushButton(FIF.SYNC, "检查更新")
+        self.update_btn = TransparentPushButton(FIF.SYNC, tr("检查更新"))
         self.installed_ver_box = ComboBox()
         self.installed_ver_box.setFixedWidth(160)
-        self.installed_ver_box.addItem("实例目录")
+        self.installed_ver_box.addItem(tr("实例目录"))
         self.installed_ver_box.setVisible(False)
-        self.fav_btn = TransparentPushButton(_HEART, "收藏")
+        self.fav_btn = TransparentPushButton(_HEART, tr("收藏"))
         mode_row.addWidget(self.mode_search)
         mode_row.addWidget(self.mode_installed)
         mode_row.addWidget(self.installed_ver_box)
@@ -418,7 +433,7 @@ class PclCatalogPage(QWidget):
             return "CurseForge"
         if text == "Modrinth":
             return "Modrinth"
-        return "全部"
+        return tr("全部")
 
     def _reset(self):
         self.name_edit.clear()
@@ -436,7 +451,7 @@ class PclCatalogPage(QWidget):
     def _show_idle(self):
         self._search_token += 1
         self._clear_list()
-        self.list_layout.addWidget(EmptyState(self.spec["icon"], "输入名称后点击搜索"))
+        self.list_layout.addWidget(EmptyState(self.spec["icon"], tr("输入名称后点击搜索")))
         self.list_layout.addStretch(1)
 
     def _search(self):
@@ -453,7 +468,7 @@ class PclCatalogPage(QWidget):
         type_f = self.type_box.currentText()
         gv = self.version_box.currentText()
         extra = {
-            "game_version": "" if (not gv or str(gv).startswith("全部")) else gv,
+            "game_version": "" if (not gv or str(gv).startswith(tr("全部"))) else gv,
             "category": type_f,
         }
         call_async = getattr(self.backend, "call_async", None)
@@ -465,7 +480,7 @@ class PclCatalogPage(QWidget):
                 return fn(query, source)
 
         if callable(call_async):
-            self.list_layout.addWidget(EmptyState(self.spec["icon"], "正在搜索…"))
+            self.list_layout.addWidget(EmptyState(self.spec["icon"], tr("正在搜索…")))
             self.list_layout.addStretch(1)
             call_async(
                 _call,
@@ -490,7 +505,7 @@ class PclCatalogPage(QWidget):
         self._clear_list()
         query = self.name_edit.text().strip()
         if not query:
-            head = QLabel("热门推荐")
+            head = QLabel(tr("热门推荐"))
             head.setStyleSheet(
                 f"color: {Theme.title}; font-size: 13px; font-weight: 700;"
                 " background: transparent; padding: 10px 12px 6px 12px;")
@@ -518,7 +533,7 @@ class PclCatalogPage(QWidget):
         if self.spec.get("list_installed") != "get_installed_mods":
             return ""
         text = self.installed_ver_box.currentText()
-        if not text or text == "实例目录":
+        if not text or text == tr("实例目录"):
             return ""
         return text
 
@@ -531,9 +546,9 @@ class PclCatalogPage(QWidget):
         cur = self.installed_ver_box.currentText()
         self.installed_ver_box.blockSignals(True)
         self.installed_ver_box.clear()
-        self.installed_ver_box.addItem("实例目录")
+        self.installed_ver_box.addItem(tr("实例目录"))
         self.installed_ver_box.addItems(ids)
-        if cur and cur in ["实例目录", *ids]:
+        if cur and cur in [tr("实例目录"), *ids]:
             self.installed_ver_box.setCurrentText(cur)
         self.installed_ver_box.blockSignals(False)
 
@@ -604,7 +619,7 @@ class PclCatalogPage(QWidget):
             else:
                 self.backend.disable_mod(inst, filename, ver)
         except Exception as e:
-            InfoBar.error("切换失败", str(e), parent=self,
+            InfoBar.error(tr("切换失败"), str(e), parent=self,
                           position=InfoBarPosition.TOP, duration=4000)
             self.reload_installed()
 
@@ -619,15 +634,31 @@ class PclCatalogPage(QWidget):
             "get_installed_modpacks": "delete_modpack",
             "list_saves": "delete_save",
         }.get(kind)
+        # 以前只有整合包会二次确认，mod / 光影 / 资源包 / 数据包 / **世界存档** 全是点一下就没。
+        # 世界存档那条尤其要命：删掉的是玩家自己的游戏进度，重下不回来。
+        from qfluentwidgets import MessageBox
         if fn == "delete_modpack":
-            from qfluentwidgets import MessageBox
             box = MessageBox(
-                "删除整合包实例",
+                tr("删除整合包实例"),
                 f"将删除整个实例「{inst}」及其文件，不可恢复。",
                 self,
             )
-            box.yesButton.setText("删除实例")
-            box.cancelButton.setText("取消")
+            box.yesButton.setText(tr("删除实例"))
+        elif fn == "delete_save":
+            box = MessageBox(
+                tr("删除世界存档"),
+                f"将永久删除世界「{filename}」，其中的建筑与游戏进度都无法恢复。\n"
+                + tr("建议先在「存档管理」里备份。"),
+                self,
+            )
+            box.yesButton.setText(tr("永久删除"))
+        elif fn:
+            box = MessageBox(tr("删除确认"), f"将删除「{filename}」。", self)
+            box.yesButton.setText(tr("删除"))
+        else:
+            box = None
+        if box is not None:
+            box.cancelButton.setText(tr("取消"))
             if not box.exec():
                 return
         try:
@@ -636,7 +667,7 @@ class PclCatalogPage(QWidget):
             elif fn:
                 getattr(self.backend, fn)(inst, filename)
         except Exception as e:
-            InfoBar.error("删除失败", str(e), parent=self,
+            InfoBar.error(tr("删除失败"), str(e), parent=self,
                           position=InfoBarPosition.TOP, duration=4000)
             return
         self.reload_installed()
@@ -680,9 +711,9 @@ class PclCatalogPage(QWidget):
         if not names:
             return extra
         from ..widgets import ComboDialog
-        dlg = ComboDialog("装进存档", "可选：把数据包装进某个存档，或只放到 datapacks 文件夹。",
-                          ["不装进存档"] + names, "不装进存档", self)
-        if dlg.exec() and dlg.value() and dlg.value() != "不装进存档":
+        dlg = ComboDialog(tr("装进存档"), tr("可选：把数据包装进某个存档，或只放到 datapacks 文件夹。"),
+                          [tr("不装进存档")] + names, tr("不装进存档"), self)
+        if dlg.exec() and dlg.value() and dlg.value() != tr("不装进存档"):
             extra = dict(extra)
             extra["save"] = dlg.value()
         return extra
@@ -690,17 +721,17 @@ class PclCatalogPage(QWidget):
     def _toggle_fav(self, item):
         try:
             self.backend.toggle_favorite(item)
-            InfoBar.success("已更新收藏", item.get("name") or "", parent=self,
+            InfoBar.success(tr("已更新收藏"), item.get("name") or "", parent=self,
                             position=InfoBarPosition.TOP, duration=1800)
         except Exception as e:
-            InfoBar.error("收藏失败", str(e), parent=self,
+            InfoBar.error(tr("收藏失败"), str(e), parent=self,
                           position=InfoBarPosition.TOP, duration=3000)
 
     def _show_favs(self):
         self._clear_list()
         rows = self.backend.catalog_favorites() or []
         if not rows:
-            self.list_layout.addWidget(EmptyState(_HEART, "还没有收藏"))
+            self.list_layout.addWidget(EmptyState(_HEART, tr("还没有收藏")))
             self.list_layout.addStretch(1)
             return
         for row in rows:
@@ -722,7 +753,7 @@ class PclCatalogPage(QWidget):
         self._clip_seen = clip
         if not self.name_edit.text().strip():
             self.name_edit.setText(clip)
-        InfoBar.info("识别到剪贴板链接", clip[:96], parent=self,
+        InfoBar.info(tr("识别到剪贴板链接"), clip[:96], parent=self,
                      position=InfoBarPosition.TOP, duration=3500)
 
     def _do_install(self, item, tile=None):
@@ -735,7 +766,7 @@ class PclCatalogPage(QWidget):
         extra["instance"] = self._current_instance()
         extra["source"] = item.get("source") or self._source()
         gv = self.version_box.currentText()
-        extra.setdefault("game_version", "" if (not gv or str(gv).startswith("全部")) else gv)
+        extra.setdefault("game_version", "" if (not gv or str(gv).startswith(tr("全部"))) else gv)
         if callable(fn):
             try:
                 if self.spec.get("install") == "install_modpack":
@@ -751,8 +782,8 @@ class PclCatalogPage(QWidget):
         start = getattr(self.backend, "start_task", None)
         if callable(start):
             def _pending(progress, log, *_a, **_k):
-                log("待后端对接")
-                progress(1, 1, "待对接")
+                log(tr("待后端对接"))
+                progress(1, 1, tr("待对接"))
             start(f"{self.spec['task_prefix']} {name}".strip(), _pending)
 
     def dragEnterEvent(self, event):

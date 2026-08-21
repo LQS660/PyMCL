@@ -1,4 +1,4 @@
-<UserControl
+﻿<UserControl
     x:Class="PyMCL.Pages.JavaPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -20,7 +20,7 @@
                 <StackPanel>
                     <TextBlock Text="Java" FontSize="20" FontWeight="SemiBold"/>
                     <TextBlock Text="Minecraft 所需 Java 会在启动时自动匹配下载；也可在实例页为每个实例单独指定"
-                               Foreground="#888888" FontSize="12" TextWrapping="Wrap" Margin="0,0,12,0"/>
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12" TextWrapping="Wrap" Margin="0,0,12,0"/>
                 </StackPanel>
                 <Button Grid.Column="1" Content="重新检测" VerticalAlignment="Top"
                         Click="Refresh_Click" Background="Transparent" BorderThickness="0"/>
@@ -42,28 +42,28 @@
                 <Border x:Name="Dl8Card" MinHeight="128" Style="{StaticResource FluentCard}" Padding="14,12" Translation="0,0,16">
                     <StackPanel>
                         <TextBlock Text="Java 8" FontSize="16" FontWeight="SemiBold"/>
-                        <TextBlock Text="1.16 及以下旧版本" Foreground="#888888" FontSize="12" TextWrapping="Wrap"/>
+                        <TextBlock Text="1.16 及以下旧版本" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12" TextWrapping="Wrap"/>
                         <Button Content="下载" Height="30" Margin="0,16,0,0" Click="Dl8" HorizontalAlignment="Stretch"/>
                     </StackPanel>
                 </Border>
                 <Border x:Name="Dl11Card" Grid.Column="1" MinHeight="128" Style="{StaticResource FluentCard}" Padding="14,12" Translation="0,0,16">
                     <StackPanel>
                         <TextBlock Text="Java 11" FontSize="16" FontWeight="SemiBold"/>
-                        <TextBlock Text="部分旧模组环境" Foreground="#888888" FontSize="12" TextWrapping="Wrap"/>
+                        <TextBlock Text="部分旧模组环境" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12" TextWrapping="Wrap"/>
                         <Button Content="下载" Height="30" Margin="0,16,0,0" Click="Dl11" HorizontalAlignment="Stretch"/>
                     </StackPanel>
                 </Border>
                 <Border x:Name="Dl17Card" Grid.Column="2" MinHeight="128" Style="{StaticResource FluentCard}" Padding="14,12" Translation="0,0,16">
                     <StackPanel>
                         <TextBlock Text="Java 17" FontSize="16" FontWeight="SemiBold"/>
-                        <TextBlock Text="1.18 – 1.20.4 推荐" Foreground="#888888" FontSize="12" TextWrapping="Wrap"/>
+                        <TextBlock Text="1.18 – 1.20.4 推荐" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12" TextWrapping="Wrap"/>
                         <Button Content="下载" Height="30" Margin="0,16,0,0" Click="Dl17" HorizontalAlignment="Stretch"/>
                     </StackPanel>
                 </Border>
                 <Border x:Name="Dl21Card" Grid.Column="3" MinHeight="128" Style="{StaticResource FluentCard}" Padding="14,12" Translation="0,0,16">
                     <StackPanel>
                         <TextBlock Text="Java 21" FontSize="16" FontWeight="SemiBold"/>
-                        <TextBlock Text="1.20.5+ 新版本" Foreground="#888888" FontSize="12" TextWrapping="Wrap"/>
+                        <TextBlock Text="1.20.5+ 新版本" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12" TextWrapping="Wrap"/>
                         <Button Content="下载" Height="30" Margin="0,16,0,0" Click="Dl21" HorizontalAlignment="Stretch"/>
                     </StackPanel>
                 </Border>

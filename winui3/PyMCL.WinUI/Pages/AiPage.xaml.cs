@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -235,8 +235,14 @@ public sealed partial class AiPage : UserControl
     private async void DeleteChat_Click(object sender, RoutedEventArgs e)
     {
         if (AppServices.Client is null || string.IsNullOrEmpty(_activeId)) return;
-        var data = await AppServices.Client.CallAsync<AiStoreDto>("ai_delete_chat", new { chat_id = _activeId });
-        FillList(data);
+        if (!await Dialogs.ConfirmAsync(XamlRoot, "删除会话", "确定删除当前 AI 会话吗？该会话的全部对话记录都会丢失。"))
+            return;
+        try
+        {
+            var data = await AppServices.Client.CallAsync<AiStoreDto>("ai_delete_chat", new { chat_id = _activeId });
+            FillList(data);
+        }
+        catch (Exception ex) { AppServices.Toast?.Invoke("删除失败", ex.Message, InfoBarSeverity.Error); }
     }
 
     private async void ChatList_SelectionChanged(object sender, SelectionChangedEventArgs e)

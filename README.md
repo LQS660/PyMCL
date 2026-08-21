@@ -20,6 +20,7 @@
 - 🤖 **AI 助手**：对话里下游戏、装模组/光影/整合包、读崩溃日志、扫模组冲突、改模组配置；写操作会先弹确认。公益接口已内置（默认 `deepseek-v4-flash`），也可接自定义 NewAPI / 自建网关。
 - 🧩 **加载器**：Fabric / Quilt（官方 meta 版本 JSON）、Forge / NeoForge（官方安装器）。
 - 🪟 跨平台：Windows / macOS / Linux。
+- 📱 **Android**：仓库内有 `android/` Compose 骨架（`0.1.0-skeleton`），可编译浏览 UI；**尚不能**像桌面端 / PCL 一样完整装版与启动游戏，详见 `android/ANDROID.md`。
 
 ## 📥 安装
 

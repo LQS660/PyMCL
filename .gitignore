@@ -7,6 +7,7 @@ config.json
 ai_chats.json
 
 # Runtime / generated
+node_modules/
 instances/
 .minecraft/
 cache/
@@ -49,3 +50,15 @@ promo/out/*
 # OS
 .DS_Store
 Thumbs.db
+.pytest_cache/
+_*.txt
+_*.json
+!requirements.txt
+会话-*.md
+*.mp4
+
+# WinUI / .NET build
+winui3/**/bin/
+winui3/**/obj/
+*.user
+*.suo

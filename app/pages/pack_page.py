@@ -12,6 +12,7 @@ from mclauncher.config import CONFIG
 from mclauncher.packs import PACK_RESOURCE, kind_label
 from ..widgets import EmptyState, InputDialog, Pill
 from .modpack_page import ResultCard
+from mclauncher.i18n import tr
 
 
 class PackPage(QWidget):
@@ -35,8 +36,8 @@ class PackPage(QWidget):
         head.addLayout(title_box, 1)
         self.instance_box = ComboBox()
         self.instance_box.setFixedWidth(160)
-        self.link_btn = TransparentPushButton(FIF.LINK, "从链接安装")
-        self.local_btn = TransparentPushButton(FIF.FOLDER, "导入本地 zip")
+        self.link_btn = TransparentPushButton(FIF.LINK, tr("从链接安装"))
+        self.local_btn = TransparentPushButton(FIF.FOLDER, tr("导入本地 zip"))
         head.addWidget(self.instance_box, 0)
         head.addWidget(self.link_btn, 0)
         head.addWidget(self.local_btn, 0)
@@ -62,7 +63,7 @@ class PackPage(QWidget):
         left = QVBoxLayout(left_card)
         left.setContentsMargins(16, 14, 16, 14)
         left.setSpacing(10)
-        left.addWidget(StrongBodyLabel("搜索结果（点击安装）"))
+        left.addWidget(StrongBodyLabel(tr("搜索结果（点击安装）")))
         scroll = ScrollArea()
         scroll.setWidgetResizable(True)
         host = QWidget()
@@ -80,7 +81,7 @@ class PackPage(QWidget):
         head2 = QHBoxLayout()
         head2.addWidget(StrongBodyLabel(f"已安装{self.label}"))
         head2.addStretch(1)
-        self.count_pill = Pill("0 个", "#4C8BF5")
+        self.count_pill = Pill(tr("0 个"), "#4C8BF5")
         head2.addWidget(self.count_pill)
         right.addLayout(head2)
         self.installed_layout = QVBoxLayout()
@@ -150,7 +151,7 @@ class PackPage(QWidget):
             row = QHBoxLayout()
             row.addWidget(CaptionLabel(name), 1)
             btn = TransparentToolButton(FIF.DELETE)
-            btn.setToolTip("删除")
+            btn.setToolTip(tr("删除"))
             btn.clicked.connect(lambda _, n=name: self._delete(n))
             row.addWidget(btn)
             wrap = QWidget()
@@ -176,7 +177,7 @@ class PackPage(QWidget):
     def _install_from_link(self):
         dlg = InputDialog(
             f"从链接安装{self.label}",
-            "Modrinth / CurseForge 项目页或 .zip 直链",
+            tr("Modrinth / CurseForge 项目页或 .zip 直链"),
             placeholder="https://modrinth.com/…", parent=self)
         if dlg.exec() and dlg.value():
             extra = {"url": dlg.value(), "instance": self._current_instance(), "kind": self.kind}
@@ -184,7 +185,7 @@ class PackPage(QWidget):
 
     def _import_local(self):
         paths, _ = QFileDialog.getOpenFileNames(
-            self, f"选择{self.label} zip", "", "压缩包 (*.zip)")
+            self, f"选择{self.label} zip", "", tr("压缩包 (*.zip)"))
         for p in paths:
             extra = {"path": p, "instance": self._current_instance(), "kind": self.kind}
             self.backend.install_pack(p, self._current_instance(), extra=extra)

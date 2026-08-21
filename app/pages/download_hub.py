@@ -3,7 +3,7 @@
 
 from PySide6.QtCore import (
     QAbstractAnimation, QEasingCurve, QParallelAnimationGroup, QPoint,
-    QPropertyAnimation, QRect, Qt, Signal,
+    QPropertyAnimation, QRect, Qt, QTimer, Signal,
 )
 from PySide6.QtWidgets import (
     QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea,
@@ -28,15 +28,32 @@ class SlideHStack(QStackedWidget):
             lab.hide()
         self._ani = None
         self._pending = None
+        self._grab_gen = 0
+        self._last_slide_ms = 0
 
     def slide_to(self, widget):
         if widget is None:
             return
         if widget is self.currentWidget() or self.indexOf(widget) < 0:
             return
+        from ..motion_prefs import ui_motion_ok
+        import time
+        now = int(time.monotonic() * 1000)
+        rapid = (now - self._last_slide_ms) < 180
+        self._last_slide_ms = now
+        if (not ui_motion_ok()) or rapid:
+            if self._ani and self._ani.state() == QAbstractAnimation.Running:
+                self._ani.stop()
+            self._finish_now(widget)
+            return
         if self._ani and self._ani.state() == QAbstractAnimation.Running:
             self._ani.stop()
             self._finish_now(self._pending or widget)
+        elif self._pending is not None and self._ani is None:
+            # 上一帧 grab 尚未回来，直接落到目标页
+            self._grab_gen += 1
+            self._finish_now(widget)
+            return
         old = self.currentWidget()
         if old is None or self.width() < 8:
             super().setCurrentWidget(widget)
@@ -53,6 +70,22 @@ class SlideHStack(QStackedWidget):
         self._from.raise_()
         super().setCurrentWidget(widget)
         widget.resize(w, h)
+        widget.ensurePolished()
+        lay = widget.layout()
+        if lay is not None:
+            lay.activate()
+        # setCurrentWidget 后立刻 grab 常抓到未布局完的空白帧；推迟到下一事件循环再抓
+        self._pending = widget
+        self._grab_gen += 1
+        gen = self._grab_gen
+        QTimer.singleShot(0, lambda: self._grab_new_and_animate(widget, direction, w, h, gen))
+
+    def _grab_new_and_animate(self, widget, direction, w, h, gen):
+        if gen != self._grab_gen or self._pending is not widget:
+            return
+        if self.currentWidget() is not widget or self.indexOf(widget) < 0:
+            self._clear_slides()
+            return
         pix_new = widget.grab()
         if pix_new.isNull():
             self._clear_slides()
@@ -61,7 +94,6 @@ class SlideHStack(QStackedWidget):
         self._to.setGeometry(direction * w, 0, w, h)
         self._to.show()
         self._to.raise_()
-        self._pending = widget
 
         group = QParallelAnimationGroup(self)
         a1 = QPropertyAnimation(self._from, b"pos", self)
@@ -78,6 +110,7 @@ class SlideHStack(QStackedWidget):
         group.start()
 
     def _finish_now(self, widget):
+        self._grab_gen += 1
         self._clear_slides()
         if widget is not None and self.indexOf(widget) >= 0:
             super().setCurrentWidget(widget)

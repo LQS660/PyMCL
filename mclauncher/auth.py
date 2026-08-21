@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """账号系统：离线模式 + 微软正版登录（设备代码流）。"""
 import base64
+import hashlib
 import os
 import stat
 import time
@@ -31,6 +32,9 @@ XSTS_ERRORS = {
 ACCOUNTS_FILE = utils.ROOT / "accounts.json"
 _TOKEN_KEYS = ("access_token", "refresh_token")
 _DPAPI_PREFIX = "dpapi:"
+_KEYRING_PREFIX = "keyring:"
+_UNAVAILABLE_PREFIX = "unavailable:"
+_KEYRING_SERVICE = "PyMCL launcher tokens"
 _OWNED_ITEMS = frozenset({
     "game_minecraft", "product_minecraft", "product_minecraft_java",
 })
@@ -74,23 +78,101 @@ def _dpapi_unprotect(blob: bytes) -> bytes:
         ctypes.windll.kernel32.LocalFree(blob_out.pbData)
 
 
-def seal_secret(value: str) -> str:
-    if not value or os.name != "nt" or str(value).startswith(_DPAPI_PREFIX):
-        return value
+def _keyring_backend():
+    """Load keyring lazily so offline/CLI installs still start cleanly."""
     try:
-        return _DPAPI_PREFIX + base64.b64encode(_dpapi_protect(value.encode("utf-8"))).decode("ascii")
-    except OSError:
+        import keyring  # type: ignore[import-not-found]
+        return keyring
+    except Exception:
+        return None
+
+
+def _keyring_name(value: str) -> str:
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return f"token-{digest}"
+
+
+def _store_in_keyring(value: str) -> str | None:
+    backend = _keyring_backend()
+    if backend is None:
+        return None
+    name = _keyring_name(value)
+    try:
+        backend.set_password(_KEYRING_SERVICE, name, value)
+    except Exception as exc:
+        utils.log.warning("系统凭据库不可用，令牌不会写入磁盘: %s", exc)
+        return None
+    return _KEYRING_PREFIX + name
+
+
+def _read_from_keyring(reference: str) -> str:
+    backend = _keyring_backend()
+    if backend is None:
+        utils.log.warning("系统凭据库不可用，需要重新登录账号。")
+        return ""
+    name = reference[len(_KEYRING_PREFIX):]
+    try:
+        return backend.get_password(_KEYRING_SERVICE, name) or ""
+    except Exception as exc:
+        utils.log.warning("读取系统凭据库失败，需要重新登录账号: %s", exc)
+        return ""
+
+
+def _delete_keyring_reference(value: str) -> None:
+    if not str(value or "").startswith(_KEYRING_PREFIX):
+        return
+    backend = _keyring_backend()
+    if backend is None:
+        return
+    try:
+        backend.delete_password(_KEYRING_SERVICE, value[len(_KEYRING_PREFIX):])
+    except Exception:
+        # A missing item and an unavailable backend both leave no local
+        # plaintext behind, so deletion is best effort only.
+        pass
+
+
+def seal_secret(value: str) -> str:
+    if not value:
         return value
+    value = str(value)
+    if value.startswith((_DPAPI_PREFIX, _KEYRING_PREFIX, _UNAVAILABLE_PREFIX)):
+        return value
+    if os.name == "nt":
+        try:
+            return _DPAPI_PREFIX + base64.b64encode(_dpapi_protect(value.encode("utf-8"))).decode("ascii")
+        except OSError as exc:
+            # Do not silently fall back to clear-text credentials.
+            utils.log.warning("DPAPI 不可用，令牌不会写入磁盘: %s", exc)
+            return _UNAVAILABLE_PREFIX
+    reference = _store_in_keyring(value)
+    # macOS Keychain / Linux Secret Service failure must not turn into an
+    # accounts.json with refresh tokens in clear text. Users can log in again
+    # when a system credential backend becomes available.
+    return reference or _UNAVAILABLE_PREFIX
 
 
 def open_secret(value: str) -> str:
-    if not value or not str(value).startswith(_DPAPI_PREFIX):
+    if not value:
         return value
+    value = str(value)
+    if value.startswith(_UNAVAILABLE_PREFIX):
+        return ""
+    if value.startswith(_KEYRING_PREFIX):
+        return _read_from_keyring(value)
+    if not value.startswith(_DPAPI_PREFIX):
+        # Legacy non-Windows records were plaintext. Keep them in memory so
+        # the next save can migrate them to the platform credential store.
+        return value
+    if os.name != "nt":
+        utils.log.warning("当前系统无法解密 Windows DPAPI 令牌，需要重新登录账号。")
+        return ""
     try:
         raw = base64.b64decode(value[len(_DPAPI_PREFIX):].encode("ascii"))
         return _dpapi_unprotect(raw).decode("utf-8")
     except (OSError, ValueError):
-        return value
+        utils.log.warning("无法解密账号令牌，需要重新登录账号。")
+        return ""
 
 
 def seal_account(account: dict) -> dict:
@@ -365,6 +447,7 @@ class AccountManager:
         _restrict_accounts_file()
 
     def add_account(self, account):
+        self._remove_stored_secrets(account.get("name"))
         self.accounts = [a for a in self.accounts if a.get("name") != account.get("name")]
         self.accounts.append(account)
         self.active = account["name"]
@@ -372,10 +455,22 @@ class AccountManager:
         return account
 
     def remove_account(self, name):
+        self._remove_stored_secrets(name)
         self.accounts = [a for a in self.accounts if a.get("name") != name]
         if self.active == name:
             self.active = self.accounts[0]["name"] if self.accounts else None
         self.save()
+
+    def _remove_stored_secrets(self, name):
+        """Delete keychain items belonging to an account before replacement."""
+        if not name:
+            return
+        data = utils.read_json(ACCOUNTS_FILE, {}) or {}
+        for stored in data.get("accounts", []):
+            if not isinstance(stored, dict) or stored.get("name") != name:
+                continue
+            for key in _TOKEN_KEYS:
+                _delete_keyring_reference(stored.get(key) or "")
 
     def get_account(self, name):
         for a in self.accounts:

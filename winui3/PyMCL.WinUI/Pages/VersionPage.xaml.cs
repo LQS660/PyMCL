@@ -1,4 +1,4 @@
-using Microsoft.UI.Xaml;
+﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using PyMCL.Models;
@@ -86,7 +86,7 @@ public sealed partial class VersionPage : UserControl
         var rows = filtered.Take(_limit).ToList();
         var cards = new List<UIElement>();
         if (rows.Count == 0)
-            cards.Add(new TextBlock { Text = "没有匹配的版本", Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)), Margin = new Thickness(8) });
+            cards.Add(new TextBlock { Text = "没有匹配的版本", Foreground = ThemeBrushes.Mute, Margin = new Thickness(8) });
         foreach (var v in rows)
             cards.Add(BuildCard(v));
         var pop = _firstPaint;
@@ -133,11 +133,15 @@ public sealed partial class VersionPage : UserControl
         top.Children.Add(new TextBlock { Text = info.Version, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
         top.Children.Add(Pill(lab, col));
         g.Children.Add(top);
-        var date = new TextBlock { Text = "发布于 " + info.Date, Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)), FontSize = 12, Margin = new Thickness(0, 6, 0, 0) };
+        var date = new TextBlock { Text = "发布于 " + info.Date, Foreground = ThemeBrushes.Mute, FontSize = 12, Margin = new Thickness(0, 6, 0, 0) };
         Grid.SetRow(date, 1);
         g.Children.Add(date);
         var btn = new Button { Content = "安装", Height = 30, HorizontalAlignment = HorizontalAlignment.Right };
-        btn.Click += async (_, _) => await OpenInstallWizard(info);
+        btn.Click += async (_, _) =>
+        {
+            AppServices.FlyToTasks?.Invoke(card, info.Version, "#2FA36B");
+            await OpenInstallWizard(info);
+        };
         Grid.SetRow(btn, 3);
         g.Children.Add(btn);
         card.Child = g;

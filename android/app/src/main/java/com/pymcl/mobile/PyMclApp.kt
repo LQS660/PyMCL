@@ -1,26 +1,43 @@
 package com.pymcl.mobile
 
+import android.app.Application
+import com.pymcl.mobile.data.AiRepo
+import com.pymcl.mobile.data.AuthRepo
+import com.pymcl.mobile.data.CatalogRepo
+import com.pymcl.mobile.data.InstanceStore
+import com.pymcl.mobile.data.LaunchPlanner
+import com.pymcl.mobile.data.ManifestRepo
 import com.pymcl.mobile.data.Paths
-import com.tungsten.fcl.FCLApplication
-import com.tungsten.fclauncher.plugins.DriverPlugin
-import com.tungsten.fclauncher.utils.FCLPath
 
-class PyMclApp : FCLApplication() {
+class PyMclApp : Application() {
+    lateinit var instanceStore: InstanceStore
+        private set
+    lateinit var manifestRepo: ManifestRepo
+        private set
+    lateinit var authRepo: AuthRepo
+        private set
+    lateinit var catalogRepo: CatalogRepo
+        private set
+    lateinit var aiRepo: AiRepo
+        private set
+    lateinit var launchPlanner: LaunchPlanner
+        private set
+
     override fun onCreate() {
         super.onCreate()
-        bind(this)
-        FCLPath.loadPaths(this)
-        DriverPlugin.init(this)
-        Paths.root
+        Paths.ensureLayout(this)
+        instanceStore = InstanceStore(this)
+        manifestRepo = ManifestRepo(this)
+        authRepo = AuthRepo(this, instanceStore)
+        catalogRepo = CatalogRepo()
+        aiRepo = AiRepo()
+        launchPlanner = LaunchPlanner(this, manifestRepo, instanceStore)
     }
 
     companion object {
-        lateinit var instance: android.app.Application
-            private set
-
-        @JvmStatic
-        fun bind(app: android.app.Application) {
-            instance = app
-        }
+        fun get(app: Application): PyMclApp = app as PyMclApp
+    }
+}
+: PyMclApp = app as PyMclApp
     }
 }

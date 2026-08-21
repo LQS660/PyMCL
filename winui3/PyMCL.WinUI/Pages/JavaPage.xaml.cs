@@ -1,4 +1,4 @@
-using Microsoft.UI.Xaml;
+﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using PyMCL.Models;
@@ -56,7 +56,7 @@ public sealed partial class JavaPage : UserControl
         EnvList.Children.Clear();
         if (javas.Count == 0)
         {
-            EnvList.Children.Add(new TextBlock { Text = "未检测到 Java，请从下方下载", Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)) });
+            EnvList.Children.Add(new TextBlock { Text = "未检测到 Java，请从下方下载", Foreground = ThemeBrushes.Mute });
             return;
         }
         foreach (var j in javas)
@@ -84,7 +84,7 @@ public sealed partial class JavaPage : UserControl
             title.Children.Add(new TextBlock { Text = "Java " + j.Major, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
             title.Children.Add(new TextBlock { Text = "可用", Foreground = new SolidColorBrush(Color.FromArgb(255, 47, 163, 107)), FontSize = 12 });
             info.Children.Add(title);
-            info.Children.Add(new TextBlock { Text = string.IsNullOrEmpty(j.Path) ? j.Name : j.Path, Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)), FontSize = 12, TextWrapping = TextWrapping.Wrap });
+            info.Children.Add(new TextBlock { Text = string.IsNullOrEmpty(j.Path) ? j.Name : j.Path, Foreground = ThemeBrushes.Mute, FontSize = 12, TextWrapping = TextWrapping.Wrap });
             Grid.SetColumn(info, 1);
             g.Children.Add(info);
             card.Child = g;
@@ -102,6 +102,7 @@ public sealed partial class JavaPage : UserControl
     private async Task Download(string major)
     {
         if (AppServices.Client is null) return;
+        AppServices.FlyToTasks?.Invoke(this, "J", "#E8862E");
         try { await AppServices.Client.StartTaskAsync("download_java", new { major }); }
         catch (Exception ex) { AppServices.Toast?.Invoke("下载失败", ex.Message, InfoBarSeverity.Error); }
     }

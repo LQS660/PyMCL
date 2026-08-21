@@ -569,3 +569,142 @@ def java_for_installer(loader: str, dm: DownloadManager, on_progress=None):
         if j.get("major") and j["major"] >= major:
             return j["exe"]
     return install_adoptium(dm, major, on_progress=on_progress)
+
+
+# ---------------------------------------------------------------- 多发行版下载
+
+JAVA_VENDORS = {
+    "adoptium": "Adoptium Temurin",
+    "zulu": "Azul Zulu",
+    "microsoft": "Microsoft OpenJDK",
+}
+
+
+def java_vendor_list() -> list[str]:
+    return list(JAVA_VENDORS)
+
+
+def java_vendor_label(vendor: str) -> str:
+    return JAVA_VENDORS.get(str(vendor or "").lower(), str(vendor or "adoptium"))
+
+
+def install_java_vendor(dm: DownloadManager, major: int, vendor: str = "adoptium",
+                        on_progress=None, force=False, arch=None):
+    """按发行版下载 Java。vendor: adoptium / zulu / microsoft。返回 exe 路径。"""
+    vendor = (vendor or "adoptium").lower()
+    if vendor == "adoptium":
+        return install_adoptium(dm, major, on_progress=on_progress, force=force, arch=arch)
+    if vendor == "zulu":
+        return _install_zulu(dm, major, on_progress=on_progress, force=force, arch=arch)
+    if vendor == "microsoft":
+        return _install_microsoft(dm, major, on_progress=on_progress, force=force, arch=arch)
+    raise DownloadError(f"未知的 Java 发行版: {vendor}")
+
+
+def _zulu_os() -> str:
+    return {"windows": "windows", "osx": "macos", "linux": "linux"}[utils.OS_NAME]
+
+
+def _zulu_arch(arch=None) -> str:
+    return {"x64": "x64", "x86": "x86", "arm64": "aarch64"}[arch or utils.ARCH]
+
+
+def _install_zulu(dm: DownloadManager, major: int, on_progress=None, force=False, arch=None):
+    """下载 Azul Zulu JRE。"""
+    major = adoptium_major(major)
+    arch = arch or utils.ARCH
+    zos = _zulu_os()
+    zarch = _zulu_arch(arch)
+    java_dir = CONFIG.java_dir
+    target_dir = java_dir / f"zulu-{major}-{arch}"
+    exe = utils.find_executable(target_dir)
+    if exe and not force:
+        return exe
+
+    # Azul API: os=windows, arch=x64, java_version=21, java_package_type=jre
+    url = (
+        "https://api.azul.com/metadata/v1/zulu/packages"
+        f"?java_version={major}&os={zos}&arch={zarch}"
+        "&java_package_type=jre&archive_type=zip&latest=true"
+    )
+    utils.ensure_dir(java_dir)
+    if on_progress:
+        on_progress(f"查询 Azul Zulu Java {major} ({arch})…", 0, 1)
+    try:
+        meta = dm.fetch_json(url, timeout=25)
+    except Exception:
+        meta = None
+    if not isinstance(meta, list) or not meta:
+        raise DownloadError(f"Azul Zulu 没有 Java {major} ({zos}/{zarch}) 的 JRE 包")
+    entry = meta[0]
+    download_url = entry.get("download_url")
+    if not download_url:
+        raise DownloadError("Azul 返回的数据缺少下载地址")
+    suffix = ".zip" if utils.IS_WINDOWS else ".tar.gz"
+    archive = java_dir / f"zulu-{major}-{arch}{suffix}"
+    try:
+        utils.remove_tree(target_dir)
+        utils.ensure_dir(target_dir)
+        if on_progress:
+            on_progress(f"下载 Zulu Java {major} ({arch}) 运行时", 0, 1)
+        dm.download(download_url, archive, force=True)
+        dm.extract_archive(archive, target_dir)
+    except Exception:
+        utils.remove_tree(target_dir)
+        _safe_unlink(archive)
+        raise
+    finally:
+        _safe_unlink(archive)
+    exe = utils.find_executable(target_dir)
+    if not exe:
+        utils.remove_tree(target_dir)
+        raise DownloadError(f"Zulu Java {major} 解压后未找到 java 可执行文件")
+    utils.write_json(target_dir / "runtime.meta.json", {
+        "kind": "zulu", "name": f"Zulu Java {major} ({arch})",
+        "version": str(major), "major": get_java_major(exe), "arch": arch,
+    })
+    return exe
+
+
+def _install_microsoft(dm: DownloadManager, major: int, on_progress=None, force=False, arch=None):
+    """下载 Microsoft OpenJDK。"""
+    major = adoptium_major(major)
+    arch = arch or utils.ARCH
+    java_dir = CONFIG.java_dir
+    target_dir = java_dir / f"microsoft-{major}-{arch}"
+    exe = utils.find_executable(target_dir)
+    if exe and not force:
+        return exe
+
+    # Microsoft Build of OpenJDK 下载链接
+    ms_arch = {"x64": "x64", "x86": "x86", "arm64": "aarch64"}[arch]
+    ms_os = {"windows": "windows", "osx": "mac", "linux": "linux"}[utils.OS_NAME]
+    url = (
+        "https://aka.ms/download-jdk/"
+        f"microsoft-jdk-{major}-{ms_os}-{ms_arch}.zip"
+    )
+    utils.ensure_dir(java_dir)
+    suffix = ".zip" if utils.IS_WINDOWS else ".tar.gz"
+    archive = java_dir / f"microsoft-{major}-{arch}{suffix}"
+    if on_progress:
+        on_progress(f"下载 Microsoft Java {major} ({arch}) 运行时", 0, 1)
+    try:
+        utils.remove_tree(target_dir)
+        utils.ensure_dir(target_dir)
+        dm.download(url, archive, force=True)
+        dm.extract_archive(archive, target_dir)
+    except Exception:
+        utils.remove_tree(target_dir)
+        _safe_unlink(archive)
+        raise
+    finally:
+        _safe_unlink(archive)
+    exe = utils.find_executable(target_dir)
+    if not exe:
+        utils.remove_tree(target_dir)
+        raise DownloadError(f"Microsoft Java {major} 解压后未找到 java 可执行文件")
+    utils.write_json(target_dir / "runtime.meta.json", {
+        "kind": "microsoft", "name": f"Microsoft Java {major} ({arch})",
+        "version": str(major), "major": get_java_major(exe), "arch": arch,
+    })
+    return exe

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 
 namespace PyMCL.Services;
@@ -28,6 +29,7 @@ public sealed class BridgeHost : IDisposable
         var server = Path.Combine(root, "bridge", "server.py");
         var forcePython = string.Equals(Environment.GetEnvironmentVariable("PYMCL_BRIDGE"), "python", StringComparison.OrdinalIgnoreCase);
         var python = "";
+        var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         var psi = new ProcessStartInfo
         {
             WorkingDirectory = root,
@@ -39,7 +41,8 @@ public sealed class BridgeHost : IDisposable
         if (native != null && !forcePython)
         {
             psi.FileName = native;
-            psi.Arguments = $"--root \"{root}\"";
+            psi.ArgumentList.Add("--root");
+            psi.ArgumentList.Add(root);
             var mingw = @"C:\msys64\mingw64\bin";
             var path = Environment.GetEnvironmentVariable("PATH") ?? "";
             if (Directory.Exists(mingw) && path.IndexOf(mingw, StringComparison.OrdinalIgnoreCase) < 0)
@@ -49,7 +52,10 @@ public sealed class BridgeHost : IDisposable
         {
             python = FindPython();
             psi.FileName = python;
-            psi.Arguments = $"-u \"{server}\" --root \"{root}\"";
+            psi.ArgumentList.Add("-u");
+            psi.ArgumentList.Add(server);
+            psi.ArgumentList.Add("--root");
+            psi.ArgumentList.Add(root);
             psi.Environment["PYTHONIOENCODING"] = "utf-8";
             psi.Environment["PYTHONUNBUFFERED"] = "1";
         }
@@ -58,6 +64,7 @@ public sealed class BridgeHost : IDisposable
             throw new FileNotFoundException("找不到 native/build/pymcl-bridge.exe 或 bridge/server.py", server);
         }
         psi.Environment["PYMCL_HOME"] = root;
+        psi.Environment["PYMCL_BRIDGE_TOKEN"] = token;
         psi.Environment["PYTHONFAULTHANDLER"] = "1";
 
         var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
@@ -97,22 +104,30 @@ public sealed class BridgeHost : IDisposable
         if (!m.Success)
             throw new InvalidOperationException("无法解析桥端口: " + line);
         var port = int.Parse(m.Groups[1].Value);
-        var client = new BridgeClient(new Uri($"http://127.0.0.1:{port}/"));
-        await client.ConnectEventsAsync();
+        var client = new BridgeClient(new Uri($"http://127.0.0.1:{port}/"), token);
+        var ready = false;
         for (var i = 0; i < 25; i++)
         {
             try
             {
-                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(1) };
-                var r = await http.GetAsync($"http://127.0.0.1:{port}/health", ct);
-                if (r.IsSuccessStatusCode) break;
+                if (await client.IsHealthyAsync(ct).ConfigureAwait(false))
+                {
+                    ready = true;
+                    break;
+                }
             }
             catch
             {
-                if (i == 24) throw new InvalidOperationException("桥进程已启动但 /health 无响应");
-                await Task.Delay(200, ct);
             }
+            await Task.Delay(200, ct);
         }
+        if (!ready)
+        {
+            client.Dispose();
+            try { proc.Kill(true); } catch { }
+            throw new InvalidOperationException("桥进程已启动但认证后的 /health 无响应");
+        }
+        await client.ConnectEventsAsync();
         return new BridgeHost(client, proc, port, root, string.IsNullOrEmpty(python) ? native! : python);
     }
 
@@ -227,6 +242,7 @@ public static class AppServices
     public static Microsoft.UI.Dispatching.DispatcherQueue? Dispatcher { get; set; }
     public static Action<string, string, Microsoft.UI.Xaml.Controls.InfoBarSeverity>? Toast { get; set; }
     public static Action<string>? OpenDownload { get; set; }
+    public static Action<Microsoft.UI.Xaml.FrameworkElement?, string, string?>? FlyToTasks { get; set; }
     public static nint WindowHandle { get; set; }
 
     public static void OnUi(Action action)

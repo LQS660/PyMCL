@@ -378,6 +378,44 @@ class BackendAPI:
     def export_launch_script(self, instance: str, version: str, dest: str = "") -> str:
         return self.start_task(f"导出启动脚本 {version}", self._export_bat_impl, instance, version, dest)
 
+    def create_desktop_shortcut(self, instance: str, version: str, username: str = "",
+                                account: str = "", name: str = "") -> str:
+        from mclauncher import shortcut
+        return shortcut.create_launch_shortcut(instance, version, username, account, name)
+
+    def backup_save(self, instance: str, name: str, version: str = "") -> str:
+        return self.start_task(f"备份存档 {name}", self._backup_save_impl, instance, name, version)
+
+    def _backup_save_impl(self, progress, log, instance, name, version):
+        from mclauncher import saves as saves_mod
+        info = saves_mod.backup_save(
+            self._instance(instance), name, version,
+            on_progress=lambda text, cur, total: progress(cur, total, text))
+        log(f"备份完成: {info['path']}")
+        self._emit("ui_changed", {})
+        return f"已备份到 {info['name']}"
+
+    def list_save_backups(self, instance: str, name: str = "", version: str = "") -> list[dict]:
+        from mclauncher import saves as saves_mod
+        return saves_mod.list_backups(self._instance(instance), name, version)
+
+    def restore_save_backup(self, instance: str, backup_name: str, version: str = "",
+                            overwrite: bool = False) -> dict:
+        from mclauncher import saves as saves_mod
+        out = saves_mod.restore_backup(
+            self._instance(instance), backup_name, version, overwrite=overwrite)
+        self._emit("ui_changed", {})
+        return out
+
+    def delete_save_backup(self, instance: str, backup_name: str, version: str = ""):
+        from mclauncher import saves as saves_mod
+        saves_mod.delete_backup(self._instance(instance), backup_name, version)
+        self._emit("ui_changed", {})
+
+    def export_save(self, instance: str, name: str, dest: str, version: str = "") -> str:
+        from mclauncher import saves as saves_mod
+        return saves_mod.export_save(self._instance(instance), name, dest, version)
+
     def list_saves(self, instance: str, version: str = "") -> list[dict]:
         from mclauncher import saves as saves_mod
         return saves_mod.list_saves(self._instance(instance), version)
@@ -415,14 +453,6 @@ class BackendAPI:
         from mclauncher import global_mods as gm
         return gm.set_enabled(filename, enabled)
 
-    def help_articles(self) -> list[dict]:
-        from mclauncher.help_content import list_articles
-        return list_articles()
-
-    def help_article(self, article_id: str) -> dict:
-        from mclauncher.help_content import get_article
-        return get_article(article_id)
-
     def start_nide8_login(self, server_id: str, username: str, password: str) -> str:
         return self.start_task("统一通行证登录", self._nide8_login_impl, server_id, username, password)
 
@@ -446,7 +476,13 @@ class BackendAPI:
         CONFIG.save()
         return kept
 
-    def download_java(self, major: str) -> str:
+    def download_java(self, major: str, vendor: str = "adoptium") -> str:
+        vendor = (vendor or "adoptium").strip() or "adoptium"
+        if vendor != "adoptium":
+            try:
+                return self.install_java(int(major), vendor=vendor)
+            except Exception:
+                pass
         return self.start_task(f"下载 Java {major}", self._download_java_impl, major)
 
     def terracotta_player(self) -> str:
@@ -490,6 +526,29 @@ class BackendAPI:
         )
         self._launch_task_id = task_id
         return task_id
+
+    def build_launch_command(self, instance: str, version: str, account: str,
+                              username: str, memory_mb: int, width: int, height: int,
+                              java: str = "自动选择") -> str:
+        """生成启动命令文本（不实际启动）。"""
+        inst = self._instance(instance)
+        if not version:
+            raise LaunchError("请先选择版本")
+        if account == "离线模式" or not account:
+            acc = self.accounts.offline_account(
+                username or "Player", skin=CONFIG.get("offline_skin") or "default")
+        else:
+            acc = self.accounts.get_account(account)
+            if not acc:
+                raise LaunchError(f"账号不存在: {account}")
+            acc = self.accounts.ensure_valid(acc)
+        props = self.accounts.launch_props(acc)
+        from mclauncher import launcher
+        java_exe = "自动选择" if java in ("自动选择", "") else java
+        cmd, _natives, _vdir, _gdir = launcher.build_launch_command(
+            inst, version, props, java_exe, memory_mb=memory_mb,
+            width=width, height=height)
+        return cmd
 
     def start_microsoft_login(self) -> str:
         return self.start_task("微软登录", self._microsoft_login_impl)
@@ -627,27 +686,43 @@ class BackendAPI:
             "window_mode": CONFIG.get("window_mode") or "window",
             "game_dir": str(CONFIG.instances_dir),
             "offline_skin": CONFIG.get("offline_skin") or "default",
+            "default_java": CONFIG.get("default_java") or "",
+            "ui_dark": bool(CONFIG.get("ui_dark", False)),
         }
 
     def save_settings(self, data: dict):
-        res = data.get("default_resolution") or [854, 480]
-        patch = {
-            "shared_libraries": bool(data.get("share_libraries", False)),
-            "shared_assets": bool(data.get("share_assets", False)),
-            "download_threads": int(data.get("download_threads") or 8),
-            "memory_mb": int(data.get("default_memory_mb") or 4096),
-            "width": int(res[0]),
-            "height": int(res[1]),
-            "microsoft_client_id": (data.get("ms_client_id") or "").strip()
-            or CONFIG.get("microsoft_client_id"),
-            "curseforge_api_key": (data.get("curseforge_api_key") or "").strip(),
-        }
+        # 严格的局部更新：只写 `data` 里真正带来的键。前端（eziapp 设置页只提交 11 个键）
+        # 提交部分设置时，未提交的键必须原样保留，否则等于静默清空用户配置。
+        patch = {}
+        if "default_resolution" in data:
+            res = data.get("default_resolution") or [854, 480]
+            patch["width"] = int(res[0])
+            patch["height"] = int(res[1])
+        if "share_libraries" in data:
+            patch["shared_libraries"] = bool(data.get("share_libraries"))
+        if "share_assets" in data:
+            patch["shared_assets"] = bool(data.get("share_assets"))
+        if "download_threads" in data:
+            patch["download_threads"] = int(data.get("download_threads") or 8)
+        if "default_memory_mb" in data:
+            patch["memory_mb"] = int(data.get("default_memory_mb") or 4096)
+        if "ms_client_id" in data:
+            patch["microsoft_client_id"] = ((data.get("ms_client_id") or "").strip()
+                                            or CONFIG.get("microsoft_client_id"))
+        if "curseforge_api_key" in data:
+            patch["curseforge_api_key"] = (data.get("curseforge_api_key") or "").strip()
         if "ai_mode" in data:
             patch["ai_mode"] = data.get("ai_mode") or "public"
+        # 地址类键各自独立判定：以前它们挂在 `"ai_mode" in data` 下面，
+        # 只要前端提交了 ai_mode 就会被 data 里不存在的值覆写成空串，
+        # 自定义模式随即抛「请在设置里填写自定义 NewAPI 地址」，AI 助手整个不可用。
+        if "ai_gateway_url" in data:
             patch["ai_gateway_url"] = (data.get("ai_gateway_url") or "").strip()
+        if "ai_base_url" in data:
             patch["ai_base_url"] = (data.get("ai_base_url") or "").strip()
-            if "ai_api_key" in data:
-                patch["ai_api_key"] = data.get("ai_api_key") or ""
+        if "ai_api_key" in data:
+            patch["ai_api_key"] = data.get("ai_api_key") or ""
+        if "ai_model" in data:
             patch["ai_model"] = (data.get("ai_model") or CONFIG.get("ai_model") or "deepseek-v4-flash")
         if "feedback_url" in data:
             patch["feedback_url"] = (data.get("feedback_url") or "").strip()
@@ -668,7 +743,7 @@ class BackendAPI:
         if "use_system_proxy" in data:
             patch["use_system_proxy"] = bool(data.get("use_system_proxy"))
         for key in ("launcher_visibility", "gc_preset", "custom_homepage", "homepage_mode",
-                    "window_mode", "offline_skin", "instances_dir"):
+                    "window_mode", "offline_skin", "instances_dir", "default_java"):
             if key in data:
                 patch[key] = data.get(key)
         if "download_limit_kbps" in data:
@@ -677,6 +752,8 @@ class BackendAPI:
             patch["auto_check_update"] = bool(data.get("auto_check_update"))
         if "skip_assets" in data:
             patch["skip_assets"] = bool(data.get("skip_assets"))
+        if "ui_dark" in data:
+            patch["ui_dark"] = bool(data.get("ui_dark"))
         CONFIG.update(patch)
         CONFIG.save()
 
@@ -702,6 +779,14 @@ class BackendAPI:
     def feedback_history(self) -> list:
         from mclauncher import feedback as fb
         return fb.history()
+
+    def help_articles(self, query: str = "") -> list:
+        from mclauncher import help_content as hc
+        return hc.search_articles(query)
+
+    def help_article(self, article_id: str) -> dict:
+        from mclauncher import help_content as hc
+        return hc.get_article(article_id) or {}
 
     def get_accounts(self) -> list[str]:
         names = ["离线模式"]
@@ -756,6 +841,108 @@ class BackendAPI:
 
     def repair_version(self, instance: str, version: str) -> str:
         return self.start_task(f"修复 {version}", self._repair_impl, instance, version)
+
+    def preflight_launch(self, instance: str = "", version: str = "",
+                         memory_mb: int = 0, java: str = "") -> dict:
+        from mclauncher import preflight as preflight_mod
+        from mclauncher.instances import JAVA_AUTO
+        java_exe = ""
+        if java and java not in (JAVA_AUTO, "auto", "default", ""):
+            java_exe = str(java)
+        return preflight_mod.check_launch(
+            self._instance(instance or ""), version or "",
+            memory_mb=int(memory_mb or 0), java_exe=java_exe,
+        )
+
+    def apply_crash_action(self, action: dict | None = None, report: dict | None = None) -> dict:
+        action = action or {}
+        report = report or {}
+        aid = (action.get("id") or "").strip()
+        instance = (action.get("instance") or report.get("instance")
+                    or CONFIG.get("default_instance") or "default")
+        version = (action.get("version") or report.get("version") or "")
+
+        if aid == "disable_mods":
+            mods = list(action.get("mods") or [])
+            done, failed = [], []
+            for name in mods:
+                try:
+                    self.disable_mod(instance, name, version)
+                    done.append(name)
+                except Exception as exc:
+                    failed.append(f"{name}: {exc}")
+            if not done and failed:
+                return {"ok": False, "message": "未能禁用：" + "; ".join(failed)}
+            msg = f"已禁用 {len(done)} 个 Mod"
+            if failed:
+                msg += "；部分失败：" + "; ".join(failed)
+            return {"ok": True, "message": msg}
+
+        if aid == "repair_version":
+            if not version:
+                return {"ok": False, "message": "报告里没有版本号，无法修复"}
+            tid = self.repair_version(instance, version)
+            return {"ok": True, "message": f"已开始修复 {version}", "task_id": tid}
+
+        if aid == "need_java":
+            major = int(action.get("major") or 17)
+            tid = self.download_java(str(major), vendor="adoptium")
+            return {"ok": True, "message": f"已开始下载 Java {major}", "task_id": tid}
+
+        if aid == "bump_memory":
+            mb = int(action.get("memory_mb") or 6144)
+            mb = max(1024, min(32768, mb))
+            CONFIG.set("memory_mb", mb)
+            CONFIG.save()
+            self._emit("ui_changed", {})
+            return {"ok": True, "message": f"默认内存已设为 {mb} MB"}
+
+        if aid == "open_mods_folder":
+            from mclauncher.crash import open_path
+            inst = self._instance(instance)
+            folder = getattr(self, "_mods_folder", None)
+            if callable(folder):
+                path = folder(inst, version)
+            else:
+                path = inst.path / "mods"
+            path.mkdir(parents=True, exist_ok=True)
+            open_path(path)
+            return {"ok": True, "message": "已打开 Mods 文件夹"}
+
+        if aid == "open_crash_file":
+            from pathlib import Path as _P
+            from mclauncher.crash import open_path
+            target = (action.get("path") or report.get("direct_file") or "").strip()
+            if not target or not _P(target).is_file():
+                return {"ok": False, "message": "没有可打开的崩溃文件"}
+            open_path(target)
+            return {"ok": True, "message": "已打开崩溃报告"}
+
+        if aid == "open_gpu_hint":
+            return {
+                "ok": True,
+                "message": (
+                    "显卡/OpenGL 相关崩溃：请更新显卡驱动，关闭独显强制、"
+                    "超采样/滤镜，并确认不是远程桌面/虚拟机缺 OpenGL。"
+                ),
+            }
+
+        if aid == "reset_jvm_args":
+            CONFIG.set("default_jvm_args", "")
+            CONFIG.save()
+            try:
+                from mclauncher import version_settings as vs
+                inst = self._instance(instance)
+                if version:
+                    data = vs.load(inst, version)
+                    data["jvm_args"] = ""
+                    vs.save(inst, version, data)
+            except Exception:
+                pass
+            self._emit("ui_changed", {})
+            return {"ok": True, "message": "已清空自定义 JVM 参数"}
+
+        return {"ok": False, "message": f"未知动作: {aid}"}
 
     def export_modpack(self, instance: str, dest: str = "") -> str:
         return self.start_task(f"导出整合包 {instance}", self._export_pack_impl, instance, dest)
@@ -1260,6 +1447,30 @@ class BackendAPI:
                           extra_game_args=None):
         if not version:
             raise LaunchError("请先选择版本（到「版本」页安装）")
+        # 多开检查
+        allow_multi = bool(CONFIG.get("allow_multi_instance", False))
+        if not allow_multi and self.is_game_running():
+            raise LaunchError("游戏正在运行中\n若要同时运行多个游戏，请到设置开启「允许多开」")
+
+        from mclauncher import preflight as preflight_mod
+        java_exe_hint = ""
+        if java and java != JAVA_AUTO:
+            java_exe_hint = self.normalize_java_pref(java) if hasattr(self, "normalize_java_pref") else str(java)
+            if java_exe_hint == JAVA_AUTO:
+                java_exe_hint = ""
+        pf = preflight_mod.check_launch(
+            self._instance(instance), version,
+            memory_mb=int(memory_mb or 0), java_exe=java_exe_hint or "",
+        )
+        for it in pf.get("items") or []:
+            lvl = it.get("level")
+            if lvl in ("error", "warn"):
+                log(f"[预检:{lvl}] {it.get('title')}: {it.get('detail')}")
+        if not pf.get("ok", True):
+            errs = [it for it in (pf.get("items") or []) if it.get("level") == "error"]
+            msg = "\n\n".join(f"· {e.get('title')}\n{e.get('detail')}" for e in errs) or "启动预检未通过"
+            raise LaunchError("启动预检未通过\n\n" + msg)
+
         inst = self._instance(instance)
         log(f"实例: {inst.name} | 版本: {version}")
         log(f"实例 Java 设置: {inst.java_pref()}")
@@ -1306,6 +1517,9 @@ class BackendAPI:
             java_choice = prep["settings"]["java"]
         if not java_choice or java_choice == JAVA_AUTO:
             java_choice = inst.java_pref()
+        if not java_choice or java_choice == JAVA_AUTO:
+            # 全局默认 Java：版本设置与实例偏好都是「自动」时才生效。
+            java_choice = CONFIG.get("default_java") or ""
         if java_choice and java_choice != JAVA_AUTO:
             for j in java_mod.all_javas():
                 if j.get("name") == java_choice or j.get("exe") == java_choice:
@@ -1335,6 +1549,7 @@ class BackendAPI:
             if prep.get("nide8_id") and not props.get("nide8_id"):
                 props = dict(props)
                 props["nide8_id"] = prep["nide8_id"]
+        width, height = launch_flow.resolve_resolution(prep, width, height)
         cmd, _natives, _vdir, game_dir = build_launch_command(
             inst, version, props, java_exe,
             memory_mb=memory_mb, width=width, height=height,
@@ -1347,14 +1562,30 @@ class BackendAPI:
         log("正在启动游戏进程…")
         progress(3, 4, "游戏启动中")
         worker = getattr(_tls, "worker", None)
-        proc = GameProcess(cmd, cwd=game_dir, on_line=log, priority=prep["priority"])
+        proc = GameProcess(cmd, cwd=game_dir, on_line=log, priority=prep["priority"],
+                           window_title=prep.get("window_title") or "")
         with self._game_lock:
             self._game_proc = proc
         self._emit("game_started", {})
         code = None
+        # 游戏时长统计
+        try:
+            from mclauncher import playtime as playtime_mod
+            tracker = playtime_mod.PlaytimeTracker(inst.name, version)
+        except Exception:
+            tracker = None
+        if tracker is not None:
+            tracker.start()
         try:
             code = proc.wait()
         finally:
+            if tracker is not None:
+                try:
+                    dur = tracker.stop()
+                    if dur:
+                        log(f"本次游玩 {playtime_mod.format_duration(dur)}")
+                except Exception:
+                    pass
             with self._game_lock:
                 if self._game_proc is proc:
                     self._game_proc = None
@@ -1482,6 +1713,273 @@ class BackendAPI:
         path = vops.export_launch_bat(Path(dest), cmd, gdir)
         log(f"已写出 {path}")
         return path
+
+    # ==================================================================
+    # 新增 API：服务器管理
+    # ==================================================================
+
+    def list_servers(self, instance: str = "") -> list[dict]:
+        from mclauncher import servers as servers_mod
+        inst = self._instance(instance)
+        return servers_mod.list_servers(inst)
+
+    def add_server(self, instance: str, name: str, ip: str, port: int = 25565,
+                   description: str = "") -> dict:
+        from mclauncher import servers as servers_mod
+        inst = self._instance(instance)
+        return servers_mod.add_server(inst, name, ip, port, description)
+
+    def update_server(self, instance: str, index: int, **kwargs) -> dict:
+        from mclauncher import servers as servers_mod
+        inst = self._instance(instance)
+        return servers_mod.update_server(inst, index, **kwargs)
+
+    def delete_server(self, instance: str, index: int):
+        from mclauncher import servers as servers_mod
+        inst = self._instance(instance)
+        servers_mod.delete_server(inst, index)
+
+    def import_servers(self, instance: str, text: str) -> int:
+        from mclauncher import servers as servers_mod
+        inst = self._instance(instance)
+        return servers_mod.import_servers_txt(inst, text)
+
+    def export_servers(self, instance: str) -> str:
+        from mclauncher import servers as servers_mod
+        inst = self._instance(instance)
+        return servers_mod.export_servers_txt(inst)
+
+    # ==================================================================
+    # 新增 API：游玩时长
+    # ==================================================================
+
+    def get_playtime(self, instance: str = "") -> dict:
+        from mclauncher import playtime as playtime_mod
+        inst_name = instance or CONFIG.get("default_instance", "default")
+        return playtime_mod.get_playtime(inst_name)
+
+    def get_all_playtime(self) -> dict:
+        from mclauncher import playtime as playtime_mod
+        return playtime_mod.get_all_playtime()
+
+    def get_total_playtime(self) -> int:
+        from mclauncher import playtime as playtime_mod
+        return playtime_mod.get_total_playtime()
+
+    def format_playtime(self, seconds: int) -> str:
+        from mclauncher import playtime as playtime_mod
+        return playtime_mod.format_duration(seconds)
+
+    def clear_playtime(self, instance: str = "", version: str = ""):
+        from mclauncher import playtime as playtime_mod
+        playtime_mod.clear_playtime(instance, version)
+
+    # ==================================================================
+    # 新增 API：缩略图
+    # ==================================================================
+
+    def thumb_path(self, url: str) -> str:
+        from mclauncher import thumbnails as thumb_mod
+        return thumb_mod.thumb_path(url)
+
+    def ensure_thumb(self, url: str) -> str:
+        from mclauncher import thumbnails as thumb_mod
+        return thumb_mod.ensure_thumb(url)
+
+    # ==================================================================
+    # 新增 API：Java 多发行版
+    # ==================================================================
+
+    def java_vendor_list(self) -> list[str]:
+        from mclauncher import java as java_mod
+        return java_mod.java_vendor_list()
+
+    def java_vendor_label(self, vendor: str) -> str:
+        from mclauncher import java as java_mod
+        return java_mod.java_vendor_label(vendor)
+
+    def install_java(self, major: int, vendor: str = "adoptium") -> str:
+        return self.start_task(
+            f"下载 {vendor} Java {major}",
+            self._install_java_impl, major, vendor,
+        )
+
+    def _install_java_impl(self, progress, log, major, vendor):
+        from mclauncher import java as java_mod
+        dm = self._dm(progress, log)
+        exe = java_mod.install_java_vendor(dm, major, vendor=vendor, on_progress=dm.on_progress)
+        log(f"Java 已安装: {exe}")
+        return f"Java {major} ({vendor}) 安装完成"
+
+    # ==================================================================
+    # 新增 API：多语言
+    # ==================================================================
+
+    def get_language(self) -> str:
+        from mclauncher import i18n
+        return i18n.current_language()
+
+    def set_language(self, lang: str):
+        from mclauncher import i18n
+        i18n.set_language(lang)
+
+    def available_languages(self) -> dict[str, str]:
+        from mclauncher import i18n
+        return i18n.available_languages()
+
+    def translate(self, key: str, lang: str = "") -> str:
+        from mclauncher import i18n
+        return i18n._(key, lang or None)
+
+    # ==================================================================
+    # 新增 API：主题包
+    # ==================================================================
+
+    def list_themes(self) -> list[dict]:
+        from mclauncher import themes as themes_mod
+        return themes_mod.list_themes()
+
+    def save_theme(self, name: str) -> dict:
+        from mclauncher import themes as themes_mod
+        return themes_mod.save_theme(name)
+
+    def load_theme(self, name: str) -> dict:
+        from mclauncher import themes as themes_mod
+        return themes_mod.load_theme(name)
+
+    def delete_theme(self, name: str):
+        from mclauncher import themes as themes_mod
+        themes_mod.delete_theme(name)
+
+    def import_theme(self, path: str) -> str:
+        from mclauncher import themes as themes_mod
+        return themes_mod.import_theme(path)
+
+    def export_theme(self, name: str, dest: str) -> str:
+        from mclauncher import themes as themes_mod
+        return themes_mod.export_theme(name, dest)
+
+    # ==================================================================
+    # 新增 API：官方启动器迁移
+    # ==================================================================
+
+    def detect_official_launcher(self) -> bool:
+        from mclauncher import official_migrate as om
+        return om.detect_official()
+
+    def official_launcher_dir(self) -> str:
+        from mclauncher import official_migrate as om
+        d = om.official_dir()
+        return str(d) if d else ""
+
+    def scan_official_versions(self) -> list[str]:
+        from mclauncher import official_migrate as om
+        d = om.official_dir()
+        if not d:
+            return []
+        return om.scan_versions(d)
+
+    def migrate_official_launcher(self, instance: str = "default") -> str:
+        return self.start_task(
+            "导入官方启动器",
+            self._migrate_official_impl, instance,
+        )
+
+    def _migrate_official_impl(self, progress, log, instance):
+        from mclauncher import official_migrate as om
+        src = om.official_dir()
+        if not src:
+            raise FileNotFoundError("未找到官方启动器目录")
+        log(f"正在从 {src} 迁移…")
+        progress(1, 3, "扫描版本")
+        versions = om.scan_versions(src)
+        if not versions:
+            log("未发现版本")
+            return "无版本可导入"
+        log(f"发现 {len(versions)} 个版本")
+        progress(2, 3, f"导入 {len(versions)} 个版本")
+        result = om.migrate(str(src), instance)
+        log(f"已导入 {len(result.get('versions', []))} 个版本")
+        return f"已导入 {len(result.get('versions', []))} 个版本"
+
+    # ==================================================================
+    # 新增 API：多开
+    # ==================================================================
+
+    def is_game_running(self) -> bool:
+        with self._game_lock:
+            proc = self._game_proc
+        return proc is not None and getattr(proc, "poll", lambda: 0)() is None
+
+    def allow_multi_instance(self) -> bool:
+        return bool(CONFIG.get("allow_multi_instance", False))
+
+    def set_multi_instance(self, allow: bool):
+        CONFIG.set("allow_multi_instance", bool(allow))
+        CONFIG.save()
+
+    # ==================================================================
+    # 新增 API：崩溃报告上传
+    # ==================================================================
+
+    def submit_crash_report(self, task_id: str = "") -> str:
+        report = self.get_crash(task_id)
+        if not report:
+            raise LaunchError("没有可上传的崩溃报告")
+        from mclauncher import feedback as fb
+        result = fb.submit_crash(report)
+        return result.get("message") or "已上传"
+
+    # ==================================================================
+    # 新增 API：启动命令展示
+    # ==================================================================
+
+    def get_launch_command(self, instance: str, version: str, account: str = "",
+                           username: str = "", memory_mb: int = 0) -> str:
+        from mclauncher import launch_flow, version_ops as vops
+        from mclauncher.launcher import build_launch_command
+        inst = self._instance(instance)
+        if not version:
+            raise LaunchError("请先选择版本")
+        vjson = inst.version_json(version) or {}
+        from mclauncher import manifest as manifest_mod
+        try:
+            resolved = manifest_mod.resolve_inherits(vjson, lambda pid: inst.version_json(pid))
+        except Exception:
+            resolved = vjson
+        java_exe = java_mod.resolve_launch_java(resolved, on_note=None)
+        if not java_exe:
+            java_exe = java_mod.resolve_launch_java(resolved, dm=DownloadManager(threads=2))
+        if not java_exe:
+            raise LaunchError("无法确定 Java 路径")
+        if not account:
+            acc = self.accounts.get_account(self.accounts.active) if self.accounts.active else None
+            if not acc:
+                acc = self.accounts.offline_account(username or "Player")
+        else:
+            acc = self.accounts.get_account(account)
+            if acc:
+                acc = self.accounts.ensure_valid(acc)
+            else:
+                acc = self.accounts.offline_account(username or "Player")
+        props = self.accounts.launch_props(acc)
+        prep = launch_flow.prepare(inst, version, memory_mb=memory_mb or int(CONFIG.get("memory_mb") or 4096))
+        cmd, _n, _v, _g = build_launch_command(
+            inst, version, props, java_exe,
+            memory_mb=prep["memory_mb"],
+            extra_game_args=prep["extra_game_args"],
+            extra_jvm_args=prep["jvm_args"],
+            game_directory=prep["game_dir"],
+        )
+        return " ".join(cmd)
+
+    # ==================================================================
+    # 新增 API：首次运行智能推荐
+    # ==================================================================
+
+    def get_smart_recommendation(self) -> dict:
+        from mclauncher.sysinfo import get_smart_recommendation
+        return get_smart_recommendation()
 
     def test_ai_connection(self) -> str:
         from mclauncher.ai.client import test_connection

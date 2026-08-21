@@ -534,6 +534,8 @@ def gui_main():
     qt_app.setApplicationName("PyMCL")
     setTheme(Theme.LIGHT)
     setThemeColor(PCL_GREEN, save=False)
+    from mclauncher.i18n import init_language
+    init_language()
     window = MainWindow()
 
     def _ui_hook(kind, text, path):

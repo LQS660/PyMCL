@@ -1,0 +1,21 @@
+<UserControl
+    x:Class="PyMCL.Pages.FeedbackPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer>
+        <StackPanel Padding="28,20" Spacing="12" MaxWidth="720">
+            <TextBlock Text="反馈" FontSize="20" FontWeight="SemiBold"/>
+            <TextBlock Text="发给开发者。可附带本机配置，便于排查问题。" Opacity="0.7" TextWrapping="Wrap"/>
+            <ComboBox x:Name="CategoryBox" Header="分类" HorizontalAlignment="Stretch"/>
+            <TextBox x:Name="ContactBox" Header="联系方式（可选）" PlaceholderText="QQ / 邮箱"/>
+            <TextBox x:Name="TitleBox" Header="标题" PlaceholderText="例如：1.20.1 Fabric 启动黑屏"/>
+            <TextBox x:Name="BodyBox" Header="详细描述" PlaceholderText="发生了什么、怎么复现、期望结果"
+                      AcceptsReturn="True" TextWrapping="Wrap" MinHeight="160"/>
+            <CheckBox x:Name="AttachBox" Content="附带本机配置" IsChecked="True"/>
+            <Button Content="发送反馈" Click="Send_Click" Style="{StaticResource AccentButtonStyle}" HorizontalAlignment="Left"/>
+            <TextBlock Text="常见问题" FontSize="16" FontWeight="SemiBold" Margin="0,16,0,0"/>
+            <TextBlock Text="先扫一眼，很多启动 / 崩溃问题这里就有答案。" Opacity="0.7" TextWrapping="Wrap"/>
+            <StackPanel x:Name="FaqHost" Spacing="8"/>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

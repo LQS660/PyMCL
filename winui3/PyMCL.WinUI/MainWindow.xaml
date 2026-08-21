@@ -52,6 +52,16 @@
                         <FontIcon Glyph="&#xE716;"/>
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
+                <NavigationViewItem Content="服务器" Tag="servers">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE774;"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="游玩时长" Tag="playtime">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE823;"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
                 <NavigationViewItem Content="下载" Tag="download">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE896;"/>
@@ -60,6 +70,11 @@
                 <NavigationViewItem Content="AI 助手" Tag="ai">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE8BD;"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="反馈" Tag="feedback">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE715;"/>
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem Content="设置" Tag="settings">
@@ -80,20 +95,13 @@
             </NavigationView.FooterMenuItems>
 
             <Grid x:Name="ContentRoot" SizeChanged="ContentRoot_SizeChanged">
-                <Frame x:Name="ContentFrame" Background="Transparent">
-                    <Frame.ContentTransitions>
-                        <TransitionCollection>
-                            <NavigationThemeTransition>
-                                <NavigationThemeTransition.DefaultNavigationTransitionInfo>
-                                    <SlideNavigationTransitionInfo Effect="FromRight"/>
-                                </NavigationThemeTransition.DefaultNavigationTransitionInfo>
-                            </NavigationThemeTransition>
-                        </TransitionCollection>
-                    </Frame.ContentTransitions>
-                </Frame>
+                <!-- 换页动画由 Services/Motion.cs 在 SwapPage 里手工做（淡出+位移），
+                     这里不要再声明 ContentTransitions，否则两套动画会叠在一起。 -->
+                <Frame x:Name="ContentFrame" Background="Transparent"/>
+                <Canvas x:Name="FlyLayer" IsHitTestVisible="False"/>
                 <InfoBar x:Name="ToastBar" Severity="Informational" IsOpen="False"
                          IsClosable="True" HorizontalAlignment="Right" VerticalAlignment="Top"
-                         Margin="0,12,16,0" MaxWidth="380"/>
+                         Margin="0,12,16,0" MaxWidth="380" Closed="ToastBar_Closed"/>
                 <Border x:Name="DockHost" HorizontalAlignment="Center" VerticalAlignment="Bottom"
                         Margin="16,0,16,16" Visibility="Collapsed" CornerRadius="8"
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"

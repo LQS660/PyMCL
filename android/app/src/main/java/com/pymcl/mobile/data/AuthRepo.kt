@@ -1,118 +1,71 @@
 package com.pymcl.mobile.data
 
-import com.pymcl.mobile.model.AccountInfo
-import com.pymcl.mobile.model.DeviceCode
-import okhttp3.FormBody
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.Request
+import android.content.Context
+import com.pymcl.mobile.model.Account
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
+import java.util.UUID
 
-object AuthRepo {
-    fun accounts(): List<AccountInfo> {
-        val offline = AccountInfo("离线", "offline")
-        val saved = InstanceStore.loadAccounts().map {
-            AccountInfo(
-                name = it.optString("name"),
-                type = it.optString("type", "microsoft"),
-                uuid = it.optString("uuid"),
-                accessToken = it.optString("access_token"),
-                refreshToken = it.optString("refresh_token"),
-                api = it.optString("api"),
-            )
-        }
-        return listOf(offline) + saved
-    }
-
-    fun startDeviceCode(): DeviceCode {
-        val body = FormBody.Builder()
-            .add("client_id", Paths.MS_CLIENT)
-            .add("scope", "XboxLive.signin offline_access")
-            .build()
-        val req = Request.Builder().url(Paths.MS_DEVICE).header("User-Agent", Paths.UA).post(body).build()
-        Http.client.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw HttpException("device code HTTP ${resp.code} $text")
-            val o = JSONObject(text)
-            return DeviceCode(
-                deviceCode = o.getString("device_code"),
-                userCode = o.getString("user_code"),
-                uri = o.optString("verification_uri", "https://www.microsoft.com/link"),
-                interval = o.optInt("interval", 5),
-                expiresIn = o.optInt("expires_in", 900),
-            )
-        }
-    }
-
-    fun pollOnce(deviceCode: String): JSONObject? {
-        val body = FormBody.Builder()
-            .add("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
-            .add("client_id", Paths.MS_CLIENT)
-            .add("device_code", deviceCode)
-            .build()
-        val req = Request.Builder().url(Paths.MS_TOKEN).header("User-Agent", Paths.UA).post(body).build()
-        Http.client.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            val o = runCatching { JSONObject(text) }.getOrNull() ?: JSONObject()
-            if (resp.isSuccessful) return o
-            val err = o.optString("error")
-            if (err == "authorization_pending" || err == "slow_down") return null
-            throw HttpException(o.optString("error_description", err.ifBlank { text.take(160) }))
-        }
-    }
-
-    fun saveMicrosoft(name: String, access: String, refresh: String) {
-        val list = InstanceStore.loadAccounts().toMutableList()
-        list.removeAll { it.optString("name") == name }
-        list.add(
-            JSONObject()
-                .put("name", name)
-                .put("type", "microsoft")
-                .put("access_token", access)
-                .put("refresh_token", refresh),
-        )
-        InstanceStore.saveAccounts(list)
-    }
-
-    fun loginAuthlib(api: String, username: String, password: String): JSONObject {
-        val base = api.trim().trimEnd('/')
-        if (base.isBlank()) throw HttpException("请填写皮肤站 API")
-        val payload = JSONObject()
-            .put("agent", JSONObject().put("name", "Minecraft").put("version", 1))
-            .put("username", username.trim())
-            .put("password", password)
-            .put("requestUser", true)
-        val body = okhttp3.RequestBody.create(
-            "application/json; charset=utf-8".toMediaTypeOrNull(),
-            payload.toString(),
-        )
-        val req = Request.Builder()
-            .url("$base/authserver/authenticate")
-            .header("User-Agent", Paths.UA)
-            .post(body)
-            .build()
-        Http.client.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            val o = runCatching { JSONObject(text) }.getOrNull() ?: JSONObject()
-            if (!resp.isSuccessful) {
-                throw HttpException(o.optString("errorMessage", o.optString("error", text.take(160))))
+class AuthRepo(
+    private val context: Context,
+    private val store: InstanceStore = InstanceStore(context),
+) {
+    suspend fun listAccounts(): List<Account> = withContext(Dispatchers.IO) {
+        val array = store.readAccounts()
+        buildList {
+            for (i in 0 until array.length()) {
+                val item = array.getJSONObject(i)
+                add(
+                    Account(
+                        id = item.getString("id"),
+                        username = item.getString("username"),
+                        uuid = item.optString("uuid").ifBlank { null },
+                        accessToken = item.optString("accessToken").ifBlank { null },
+                        deviceCode = item.optString("deviceCode").ifBlank { null },
+                    ),
+                )
             }
-            val profile = o.optJSONObject("selectedProfile")
-                ?: o.optJSONArray("availableProfiles")?.optJSONObject(0)
-                ?: JSONObject()
-            val name = profile.optString("name")
-            if (name.isBlank()) throw HttpException("皮肤站没有可用角色")
-            val list = InstanceStore.loadAccounts().toMutableList()
-            list.removeAll { it.optString("name") == name }
-            list.add(
-                JSONObject()
-                    .put("name", name)
-                    .put("type", "authlib")
-                    .put("uuid", profile.optString("id"))
-                    .put("access_token", o.optString("accessToken"))
-                    .put("api", base),
-            )
-            InstanceStore.saveAccounts(list)
-            return profile
         }
     }
+
+    suspend fun saveAccount(account: Account) = withContext(Dispatchers.IO) {
+        val array = store.readAccounts()
+        val updated = JSONArray()
+        var replaced = false
+        for (i in 0 until array.length()) {
+            val item = array.getJSONObject(i)
+            if (item.getString("id") == account.id) {
+                updated.put(account.toJson())
+                replaced = true
+            } else {
+                updated.put(item)
+            }
+        }
+        if (!replaced) updated.put(account.toJson())
+        Paths.ensureLayout(context)
+        Paths.accounts(context).writeText(updated.toString(2))
+    }
+
+    suspend fun createOfflineAccount(username: String): Account {
+        val account = Account(
+            id = UUID.randomUUID().toString(),
+            username = username,
+            uuid = UUID.randomUUID().toString(),
+        )
+        saveAccount(account)
+        return account
+    }
+
+    /** 设备码登录占位：后续里程碑对接 OAuth 设备流 */
+    suspend fun beginDeviceCodeLogin(): Result<String> =
+        Result.failure(UnsupportedOperationException("设备码登录尚未接入"))
+
+    private fun Account.toJson(): JSONObject = JSONObject()
+        .put("id", id)
+        .put("username", username)
+        .put("uuid", uuid)
+        .put("accessToken", accessToken)
+        .put("deviceCode", deviceCode)
 }

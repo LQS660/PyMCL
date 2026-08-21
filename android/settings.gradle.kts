@@ -22,9 +22,3 @@ dependencyResolutionManagement {
 
 rootProject.name = "PyMCL"
 include(":app")
-include(":FCLauncher")
-val fclLauncher = file("../FoldCraftLauncher/FCLauncher")
-project(":FCLauncher").projectDir =
-    if (fclLauncher.resolve("build.gradle.kts").isFile) fclLauncher
-    else file("D:/pymcl-work/FoldCraftLauncher/FCLauncher")
-

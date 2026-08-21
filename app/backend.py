@@ -26,6 +26,7 @@ from mclauncher import mods as mods_mod
 from mclauncher.crash import GameCrashError, analyze_launch, export_report, open_path
 from mclauncher.launcher import LaunchError, build_launch_command, GameProcess
 from mclauncher import terracotta as terracotta_mod
+from mclauncher.i18n import tr
 
 
 class SilentWorker(QThread):
@@ -71,11 +72,16 @@ def _qt_progress(current, total):
 
 
 class BackendWorker(QThread):
-    """通用后台任务线程。target 的第一个参数必须是 progress 回调，第二个是 log 回调。"""
+    """通用后台任务线程。target 的第一个参数必须是 progress 回调，第二个是 log 回调。
+
+    注意信号名叫 `task_finished` 而不是 `finished`：后者是 `QThread` 自带的，
+    覆盖掉就再也拿不到「线程真正退出」的时机，也就没法挂 `deleteLater`，
+    于是每个 worker 作为 `BackendAPI` 的子对象一直活到进程结束。
+    """
 
     progress = Signal(str, int, int, str)
     log = Signal(str, str)
-    finished = Signal(str, bool, str)
+    task_finished = Signal(str, bool, str)
     crash = Signal(str, object)
     login_code = Signal(str, str)
     login_status = Signal(str)
@@ -103,17 +109,17 @@ class BackendWorker(QThread):
     def run(self):
         try:
             result = self._target(self._progress, self._log, *self._args, **self._kwargs)
-            msg = result if isinstance(result, str) and result else "任务完成"
-            self.finished.emit(self.task_id, True, msg)
+            msg = result if isinstance(result, str) and result else tr("任务完成")
+            self.task_finished.emit(self.task_id, True, msg)
         except TaskCancelled:
-            self.finished.emit(self.task_id, False, "已取消")
+            self.task_finished.emit(self.task_id, False, tr("已取消"))
         except GameCrashError as exc:
             self._log(f"[错误] {exc}")
             self.crash.emit(self.task_id, exc.report)
-            self.finished.emit(self.task_id, False, str(exc))
+            self.task_finished.emit(self.task_id, False, str(exc))
         except Exception as exc:  # noqa: BLE001
             self._log(f"[错误] {exc}")
-            self.finished.emit(self.task_id, False, str(exc))
+            self.task_finished.emit(self.task_id, False, str(exc))
 
 
 class BackendAPI(QObject):
@@ -127,6 +133,7 @@ class BackendAPI(QObject):
     login_code = Signal(str, str)
     login_status = Signal(str)
     ui_changed = Signal()
+    theme_changed = Signal()
     task_count_changed = Signal(int)
     game_started = Signal()
     game_exited = Signal(object)
@@ -146,6 +153,8 @@ class BackendAPI(QObject):
         self._bg_threads: list[QThread] = []
         self._task_results: dict[str, tuple] = {}
         self._crashes: dict[str, dict] = {}
+        self._settings_cache: dict | None = None
+        self._settings_rev = -1
         self._ensure_default_instance()
         try:
             from mclauncher.source import warmup_async
@@ -174,7 +183,9 @@ class BackendAPI(QObject):
         worker.crash.connect(self._on_worker_crash, Qt.QueuedConnection)
         worker.login_code.connect(self.login_code, Qt.QueuedConnection)
         worker.login_status.connect(self.login_status, Qt.QueuedConnection)
-        worker.finished.connect(self._on_worker_finished, Qt.QueuedConnection)
+        worker.task_finished.connect(self._on_worker_finished, Qt.QueuedConnection)
+        # QThread.finished 现在没被遮蔽了，可以在线程真正退出后回收对象。
+        worker.finished.connect(worker.deleteLater)
         self._workers[task_id] = worker
         self._titles[task_id] = title
         worker.start()
@@ -185,7 +196,7 @@ class BackendAPI(QObject):
     @staticmethod
     def is_download_title(title: str) -> bool:
         t = str(title or "")
-        return not (t.startswith("启动游戏") or t.startswith("微软登录") or t.startswith("皮肤站登录"))
+        return not (t.startswith(tr("启动游戏")) or t.startswith(tr("微软登录")) or t.startswith(tr("皮肤站登录")))
 
     def _download_task_count(self) -> int:
         n = 0
@@ -212,13 +223,13 @@ class BackendAPI(QObject):
     def export_crash_report(self, task_id: str = "", dest: str = "") -> str:
         report = self.get_crash(task_id)
         if not report:
-            raise LaunchError("没有可导出的错误报告")
+            raise LaunchError(tr("没有可导出的错误报告"))
         return export_report(report, dest or None)
 
     def open_crash_file(self, path: str = "", task_id: str = "") -> str:
         target = path or (self.get_crash(task_id).get("direct_file") or "")
         if not target:
-            raise LaunchError("没有可打开的日志文件")
+            raise LaunchError(tr("没有可打开的日志文件"))
         if not open_path(target):
             raise LaunchError(f"无法打开: {target}")
         return target
@@ -258,10 +269,10 @@ class BackendAPI(QObject):
             while not done.wait(0.4):
                 if cancelled and cancelled():
                     self.cancel_task(task_id)
-                    return {"ok": False, "message": "已停止", "task_id": task_id}
+                    return {"ok": False, "message": tr("已停止"), "task_id": task_id}
                 timeout -= 0.4
                 if timeout <= 0:
-                    return {"ok": False, "message": "等待任务超时", "task_id": task_id}
+                    return {"ok": False, "message": tr("等待任务超时"), "task_id": task_id}
         finally:
             try:
                 self.finished.disconnect(on_finished)
@@ -293,13 +304,52 @@ class BackendAPI(QObject):
             except ValueError:
                 pass
 
+        def _log_err(message):
+            name = getattr(fn, "__name__", None) or repr(fn)
+            utils.log.warning(tr("后台调用 %s 失败: %s"), name, message)
+
         worker.ok.connect(on_ok, Qt.QueuedConnection)
-        if on_err:
-            worker.err.connect(on_err, Qt.QueuedConnection)
+        worker.err.connect(on_err or _log_err, Qt.QueuedConnection)
         worker.finished.connect(_cleanup)
         worker.finished.connect(worker.deleteLater)
         worker.start()
         return worker
+
+    def shutdown(self, timeout_ms: int = 800):
+        """关闭前收拢后台线程。
+
+        以前退出时谁也不等，QThread 还在跑就被销毁，Qt 会打
+        「QThread: Destroyed while thread is still running」。
+
+        预算只给 800ms：关窗是用户动作，不能为了等一个可能几秒才返回的网络请求
+        把界面卡住。等不到就放手交给 Qt/Python 的正常析构（实测正常退出路径是干净的）。
+
+        启动游戏那个 worker 不动：它阻塞在 `proc.wait()` 上，等它等于要等玩家退游戏，
+        而「关掉启动器但游戏继续跑」本来就是既定行为。
+        """
+        import time as _time
+        deadline = _time.monotonic() + max(0, timeout_ms) / 1000.0
+
+        for task_id, worker in list(self._workers.items()):
+            if task_id == self._launch_task_id:
+                continue
+            try:
+                worker.cancel()
+                worker.requestInterruption()
+            except RuntimeError:
+                pass
+
+        pending = [w for tid, w in self._workers.items() if tid != self._launch_task_id]
+        pending += list(self._bg_threads)
+        for worker in pending:
+            remain = int(max(0.0, deadline - _time.monotonic()) * 1000)
+            if remain <= 0:
+                break
+            try:
+                if worker.isRunning():
+                    worker.wait(remain)
+            except RuntimeError:
+                pass
 
     def task_title(self, task_id: str) -> str:
         return self._titles.get(task_id, task_id)
@@ -381,18 +431,18 @@ class BackendAPI(QObject):
     # ==================================================================
     # 对外 API（异步任务）
     # ==================================================================
-    def install_game(self, version: str, loader: str = "无", loader_version: str = "",
+    def install_game(self, version: str, loader: str = tr("无"), loader_version: str = "",
                      instance: str = "", extra: dict | None = None) -> str:
         inst = instance or CONFIG.get("default_instance", "default")
         extra = extra or {}
         bits = [version]
-        if loader and loader not in ("", "无"):
+        if loader and loader not in ("", tr("无")):
             bits.append(loader)
         if extra.get("optifine"):
             bits.append("OptiFine")
         if extra.get("liteloader"):
             bits.append("LiteLoader")
-        title = "安装游戏 " + " + ".join(bits)
+        title = tr("安装游戏 ") + " + ".join(bits)
         return self.start_task(title, self._install_game_impl, version, loader, loader_version, inst, extra)
 
     def install_modpack(self, name: str, source: str = "Modrinth", extra: dict | None = None) -> str:
@@ -458,6 +508,11 @@ class BackendAPI(QObject):
     def export_launch_script(self, instance: str, version: str, dest: str = "") -> str:
         return self.start_task(f"导出启动脚本 {version}", self._export_bat_impl, instance, version, dest)
 
+    def create_desktop_shortcut(self, instance: str, version: str, username: str = "",
+                                account: str = "", name: str = "") -> str:
+        from mclauncher import shortcut
+        return shortcut.create_launch_shortcut(instance, version, username, account, name)
+
     def list_saves(self, instance: str, version: str = "") -> list[dict]:
         from mclauncher import saves as saves_mod
         return saves_mod.list_saves(self._instance(instance), version)
@@ -466,6 +521,39 @@ class BackendAPI(QObject):
         from mclauncher import saves as saves_mod
         saves_mod.delete_save(self._instance(instance), name, version)
         self.ui_changed.emit()
+
+    def backup_save(self, instance: str, name: str, version: str = "") -> str:
+        return self.start_task(f"备份存档 {name}", self._backup_save_impl, instance, name, version)
+
+    def _backup_save_impl(self, progress, log, instance, name, version):
+        from mclauncher import saves as saves_mod
+        info = saves_mod.backup_save(
+            self._instance(instance), name, version,
+            on_progress=lambda text, cur, total: progress(cur, total, text))
+        log(f"备份完成: {info['path']}")
+        self.ui_changed.emit()
+        return f"已备份到 {info['name']}"
+
+    def list_save_backups(self, instance: str, name: str = "", version: str = "") -> list[dict]:
+        from mclauncher import saves as saves_mod
+        return saves_mod.list_backups(self._instance(instance), name, version)
+
+    def restore_save_backup(self, instance: str, backup_name: str, version: str = "",
+                            overwrite: bool = False) -> dict:
+        from mclauncher import saves as saves_mod
+        out = saves_mod.restore_backup(
+            self._instance(instance), backup_name, version, overwrite=overwrite)
+        self.ui_changed.emit()
+        return out
+
+    def delete_save_backup(self, instance: str, backup_name: str, version: str = ""):
+        from mclauncher import saves as saves_mod
+        saves_mod.delete_backup(self._instance(instance), backup_name, version)
+        self.ui_changed.emit()
+
+    def export_save(self, instance: str, name: str, dest: str, version: str = "") -> str:
+        from mclauncher import saves as saves_mod
+        return saves_mod.export_save(self._instance(instance), name, dest, version)
 
     def open_save(self, instance: str, name: str, version: str = "") -> str:
         from mclauncher import saves as saves_mod
@@ -488,7 +576,7 @@ class BackendAPI(QObject):
         meta = inst.meta() or {}
         pack = meta.get("modpack")
         if not isinstance(pack, dict) or not pack.get("name"):
-            raise InstanceError("该实例没有已安装整合包")
+            raise InstanceError(tr("该实例没有已安装整合包"))
         inst.delete()
         self.ui_changed.emit()
 
@@ -502,16 +590,8 @@ class BackendAPI(QObject):
         self.ui_changed.emit()
         return name
 
-    def help_articles(self) -> list[dict]:
-        from mclauncher.help_content import list_articles
-        return list_articles()
-
-    def help_article(self, article_id: str) -> dict:
-        from mclauncher.help_content import get_article
-        return get_article(article_id)
-
     def start_nide8_login(self, server_id: str, username: str, password: str) -> str:
-        return self.start_task("统一通行证登录", self._nide8_login_impl, server_id, username, password)
+        return self.start_task(tr("统一通行证登录"), self._nide8_login_impl, server_id, username, password)
 
     def catalog_favorites(self) -> list:
         return list(CONFIG.get("catalog_favorites") or [])
@@ -543,8 +623,11 @@ class BackendAPI(QObject):
         self.ui_changed.emit()
         return str(CONFIG.instances_dir)
 
-    def download_java(self, major: str) -> str:
-        return self.start_task(f"下载 Java {major}", self._download_java_impl, major)
+    def download_java(self, major: str, vendor: str = "adoptium") -> str:
+        vendor = (vendor or "adoptium").strip() or "adoptium"
+        if vendor == "adoptium":
+            return self.start_task(f"下载 Java {major}", self._download_java_impl, major)
+        return self.install_java(int(major), vendor=vendor)
 
     def terracotta_player(self) -> str:
         acc = self.accounts.get_active()
@@ -557,7 +640,7 @@ class BackendAPI(QObject):
         return terracotta_mod.snapshot(self.terracotta_player(), game_running=game_on)
 
     def terracotta_prepare(self) -> str:
-        return self.start_task("准备陶瓦联机", self._terracotta_prepare_impl)
+        return self.start_task(tr("准备陶瓦联机"), self._terracotta_prepare_impl)
 
     def terracotta_host(self):
         terracotta_mod.set_scanning(self.terracotta_player())
@@ -581,14 +664,14 @@ class BackendAPI(QObject):
         info = self.terracotta_snapshot()
         url = str(info.get("url") or "")
         if info.get("state") != "guest-ok" or not url:
-            raise terracotta_mod.TerracottaError("还没连上房间。请先输入邀请码加入。")
-        return self._launch_into_server(url, "请到游戏「多人游戏」双击「陶瓦联机大厅」。")
+            raise terracotta_mod.TerracottaError(tr("还没连上房间。请先输入邀请码加入。"))
+        return self._launch_into_server(url, tr("请到游戏「多人游戏」双击「陶瓦联机大厅」。"))
 
     def terracotta_direct_connect(self, address: str):
         host, port = terracotta_mod.split_join_url(address)
         if not host or host in ("127.0.0.1", "localhost"):
-            raise terracotta_mod.TerracottaError("请输入房主的公网地址，例如 1.2.3.4:25565")
-        return self._launch_into_server(f"{host}:{port}", "请到游戏「多人游戏」双击「陶瓦联机大厅」。")
+            raise terracotta_mod.TerracottaError(tr("请输入房主的公网地址，例如 1.2.3.4:25565"))
+        return self._launch_into_server(f"{host}:{port}", tr("请到游戏「多人游戏」双击「陶瓦联机大厅」。"))
 
     def _launch_into_server(self, url: str, already_msg: str):
         inst = self._instance()
@@ -598,15 +681,15 @@ class BackendAPI(QObject):
             return already_msg
         ids = inst.installed_ids()
         if not ids:
-            raise LaunchError("请先到「启动」页安装一个版本。")
+            raise LaunchError(tr("请先到「启动」页安装一个版本。"))
         version = max(ids, key=lambda vid: (inst.versions_dir() / vid).stat().st_mtime)
         host, port = terracotta_mod.split_join_url(url)
         acc = self.accounts.get_active()
         if acc and acc.get("type") == "microsoft":
-            account = acc.get("name") or "离线模式"
+            account = acc.get("name") or tr("离线模式")
             username = acc.get("name") or "Player"
         else:
-            account = "离线模式"
+            account = tr("离线模式")
             username = (acc or {}).get("name") or self.terracotta_player()
         return self.launch_game(
             instance=inst.name,
@@ -621,7 +704,7 @@ class BackendAPI(QObject):
 
     def launch_game(self, instance: str, version: str, account: str,
                     username: str, memory_mb: int, width: int, height: int,
-                    java: str = "自动选择", extra_game_args=None) -> str:
+                    java: str = tr("自动选择"), extra_game_args=None) -> str:
         task_id = self.start_task(
             f"启动游戏 {version}", self._launch_game_impl,
             instance, version, account, username, memory_mb, width, height, java,
@@ -630,8 +713,31 @@ class BackendAPI(QObject):
         self._launch_task_id = task_id
         return task_id
 
+    def build_launch_command(self, instance: str, version: str, account: str,
+                              username: str, memory_mb: int, width: int, height: int,
+                              java: str = tr("自动选择")) -> str:
+        """生成启动命令文本（不实际启动）。"""
+        inst = self._instance(instance)
+        if not version:
+            raise LaunchError(tr("请先选择版本"))
+        if account == tr("离线模式") or not account:
+            acc = self.accounts.offline_account(
+                username or "Player", skin=CONFIG.get("offline_skin") or "default")
+        else:
+            acc = self.accounts.get_account(account)
+            if not acc:
+                raise LaunchError(f"账号不存在: {account}")
+            acc = self.accounts.ensure_valid(acc)
+        props = self.accounts.launch_props(acc)
+        from mclauncher import launcher
+        java_exe = tr("自动选择") if java in (tr("自动选择"), "") else java
+        cmd, _natives, _vdir, _gdir = launcher.build_launch_command(
+            inst, version, props, java_exe, memory_mb=memory_mb,
+            width=width, height=height)
+        return cmd
+
     def start_microsoft_login(self) -> str:
-        return self.start_task("微软登录", self._microsoft_login_impl)
+        return self.start_task(tr("微软登录"), self._microsoft_login_impl)
 
     def uninstall_version(self, spec: str):
         if " / " in spec:
@@ -728,8 +834,14 @@ class BackendAPI(QObject):
         self.ui_changed.emit()
 
     def get_setting(self, key: str, default=None):
-        settings = self.get_settings()
-        return settings.get(key, default)
+        # get_settings() 会重建整份字典（含两次模块 import 和几次 Path→str），
+        # 而 main_window 里光是切一次主题就要连取 9 个键。按 CONFIG.revision 缓存，
+        # 配置一改缓存自动失效，取值语义和以前完全一致。
+        rev = CONFIG.revision
+        if self._settings_rev != rev or self._settings_cache is None:
+            self._settings_cache = self.get_settings()
+            self._settings_rev = rev
+        return self._settings_cache.get(key, default)
 
     def update_settings(self, settings: dict):
         self.save_settings(settings)
@@ -774,37 +886,50 @@ class BackendAPI(QObject):
             "homepage_mode": CONFIG.get("homepage_mode") or "news",
             "window_mode": CONFIG.get("window_mode") or "window",
             "skip_assets": bool(CONFIG.get("skip_assets", False)),
+            "allow_multi_instance": bool(CONFIG.get("allow_multi_instance", False)),
             "first_run": bool(CONFIG.get("first_run", True)),
             "show_hidden_versions": bool(CONFIG.get("show_hidden_versions", False)),
             "offline_skin": CONFIG.get("offline_skin") or "default",
+            "default_java": CONFIG.get("default_java") or "",
             "instances_dir": str(CONFIG.get("instances_dir") or ".minecraft"),
             "game_dir": str(CONFIG.instances_dir),
             "root": str(utils.ROOT),
         }
 
     def save_settings(self, data: dict):
-        res = data.get("default_resolution") or [854, 480]
+        # 局部更新语义：`data` 里没有的键一律沿用 CONFIG 现值，绝不回落到硬编码默认。
+        # 设置页 collect() 只提交 35 个键，早先几个键写死默认值，导致「点一次保存设置」
+        # 就把没提交的键静默重置（ui_fly_duration_ms 就是这么被打回 620 的）。
+        res = data.get("default_resolution") or [CONFIG.get("width", 854), CONFIG.get("height", 480)]
+
+        def _keep(key, cfg_key=None, default=""):
+            """提交了就用提交值（含清空），没提交就保持 CONFIG 现值。"""
+            if key in data:
+                return data[key]
+            return CONFIG.get(cfg_key or key, default)
+
         CONFIG.update({
-            "shared_libraries": bool(data.get("share_libraries", False)),
-            "shared_assets": bool(data.get("share_assets", False)),
-            "download_threads": int(data.get("download_threads") or 8),
-            "memory_mb": int(data.get("default_memory_mb") or 4096),
+            "shared_libraries": bool(data.get("share_libraries", CONFIG.get("shared_libraries", False))),
+            "shared_assets": bool(data.get("share_assets", CONFIG.get("shared_assets", False))),
+            "download_threads": int(data.get("download_threads") or CONFIG.get("download_threads") or 8),
+            "memory_mb": int(data.get("default_memory_mb") or CONFIG.get("memory_mb") or 4096),
             "width": int(res[0]),
             "height": int(res[1]),
             "microsoft_client_id": (data.get("ms_client_id") or "").strip()
             or CONFIG.get("microsoft_client_id"),
-            "curseforge_api_key": (data.get("curseforge_api_key") or "").strip(),
+            "curseforge_api_key": str(_keep("curseforge_api_key") or "").strip(),
             "ai_mode": (data.get("ai_mode") or CONFIG.get("ai_mode") or "public"),
-            "ai_gateway_url": (data.get("ai_gateway_url") or "").strip(),
-            "ai_base_url": (data.get("ai_base_url") or "").strip(),
+            "ai_gateway_url": str(_keep("ai_gateway_url") or "").strip(),
+            "ai_base_url": str(_keep("ai_base_url") or "").strip(),
             "ai_api_key": (data.get("ai_api_key") if "ai_api_key" in data
                            else CONFIG.get("ai_api_key") or ""),
             "ai_model": (data.get("ai_model") or CONFIG.get("ai_model") or "deepseek-v4-flash"),
-            "download_source": (data.get("download_source") or "auto"),
-            "community_source": (data.get("community_source") or "auto"),
-            "use_system_proxy": bool(data.get("use_system_proxy", True)),
-            "ui_fly_animation": bool(data.get("ui_fly_animation", True)),
-            "ui_fly_duration_ms": int(data.get("ui_fly_duration_ms") or 620),
+            "download_source": (data.get("download_source") or CONFIG.get("download_source") or "auto"),
+            "community_source": (data.get("community_source") or CONFIG.get("community_source") or "auto"),
+            "use_system_proxy": bool(data.get("use_system_proxy", CONFIG.get("use_system_proxy", True))),
+            "ui_fly_animation": bool(data.get("ui_fly_animation", CONFIG.get("ui_fly_animation", True))),
+            "ui_fly_duration_ms": int(data.get("ui_fly_duration_ms")
+                                      or CONFIG.get("ui_fly_duration_ms") or 620),
             "default_isolation": (data.get("default_isolation") or CONFIG.get("default_isolation") or "none"),
             "default_jvm_args": (data.get("default_jvm_args") if "default_jvm_args" in data
                                  else CONFIG.get("default_jvm_args") or ""),
@@ -819,14 +944,17 @@ class BackendAPI(QObject):
                                 else CONFIG.get("global_mods_dir") or ""),
             "launcher_visibility": data.get("launcher_visibility") or CONFIG.get("launcher_visibility") or "keep",
             "gc_preset": data.get("gc_preset") or CONFIG.get("gc_preset") or "auto",
-            "download_limit_kbps": int(data.get("download_limit_kbps") or 0),
+            "download_limit_kbps": int(_keep("download_limit_kbps", default=0) or 0),
             "auto_check_update": bool(data.get("auto_check_update", CONFIG.get("auto_check_update", True))),
             "custom_homepage": data.get("custom_homepage") if "custom_homepage" in data else CONFIG.get("custom_homepage") or "",
             "homepage_mode": data.get("homepage_mode") or CONFIG.get("homepage_mode") or "news",
             "window_mode": data.get("window_mode") or CONFIG.get("window_mode") or "window",
-            "skip_assets": bool(data.get("skip_assets", False)),
+            "skip_assets": bool(data.get("skip_assets", CONFIG.get("skip_assets", False))),
+            "allow_multi_instance": bool(
+                data.get("allow_multi_instance", CONFIG.get("allow_multi_instance", False))),
             "first_run": bool(data["first_run"]) if "first_run" in data else bool(CONFIG.get("first_run", False)),
             "offline_skin": data.get("offline_skin") or CONFIG.get("offline_skin") or "default",
+            "default_java": _keep("default_java"),
         })
         if "show_hidden_versions" in data:
             CONFIG.set("show_hidden_versions", bool(data.get("show_hidden_versions")))
@@ -844,10 +972,16 @@ class BackendAPI(QObject):
         from mclauncher.net import apply_proxy_policy
         apply_proxy_policy()
         warmup_async()
+        # 主题相关键变了就通知主窗口刷 UI（设置页开关也会直接调 apply_theme，双保险）
+        if "ui_dark" in data or "theme_color" in data or "ui_background" in data:
+            self.theme_changed.emit()
+        self._settings_cache = None
+        self._settings_rev = -1
 
-    def test_ai_connection(self) -> str:
+    def test_ai_connection(self, settings: dict | None = None) -> str:
+        """试连 AI。传 settings 就用它，让设置页能测「还没保存的值」而不必先落盘。"""
         from mclauncher.ai.client import test_connection
-        return test_connection(self.get_settings())
+        return test_connection(settings if settings is not None else self.get_settings())
 
     def collect_sysinfo(self, force: bool = False, scan_system_java: bool = False) -> dict:
         from mclauncher import sysinfo as sysinfo_mod
@@ -872,8 +1006,16 @@ class BackendAPI(QObject):
         from mclauncher import feedback as fb
         return fb.history()
 
+    def help_articles(self, query: str = "") -> list:
+        from mclauncher import help_content as hc
+        return hc.search_articles(query)
+
+    def help_article(self, article_id: str) -> dict:
+        from mclauncher import help_content as hc
+        return hc.get_article(article_id) or {}
+
     def get_accounts(self) -> list[str]:
-        names = ["离线模式"]
+        names = [tr("离线模式")]
         for acc in self.accounts.accounts:
             name = acc.get("name")
             if name and name not in names:
@@ -912,7 +1054,7 @@ class BackendAPI(QObject):
         return acc["name"]
 
     def start_authlib_login(self, api: str, username: str, password: str) -> str:
-        return self.start_task("皮肤站登录", self._authlib_login_impl, api, username, password)
+        return self.start_task(tr("皮肤站登录"), self._authlib_login_impl, api, username, password)
 
     def get_version_settings(self, instance: str, version: str) -> dict:
         from mclauncher import version_settings as vs
@@ -926,6 +1068,104 @@ class BackendAPI(QObject):
 
     def repair_version(self, instance: str, version: str) -> str:
         return self.start_task(f"修复 {version}", self._repair_impl, instance, version)
+
+    def preflight_launch(self, instance: str, version: str, memory_mb: int = 0,
+                         java: str = "") -> dict:
+        from mclauncher import preflight as preflight_mod
+        java_exe = ""
+        if java and java not in (JAVA_AUTO, "auto", "default"):
+            java_exe = self.normalize_java_pref(java)
+            if java_exe == JAVA_AUTO:
+                java_exe = ""
+        return preflight_mod.check_launch(
+            self._instance(instance), version,
+            memory_mb=int(memory_mb or 0), java_exe=java_exe or "",
+        )
+
+    def apply_crash_action(self, action: dict, report: dict | None = None) -> dict:
+        """执行崩溃弹窗里的一键修复建议。"""
+        action = action or {}
+        report = report or {}
+        aid = (action.get("id") or "").strip()
+        instance = (action.get("instance") or report.get("instance")
+                    or CONFIG.get("default_instance") or "default")
+        version = (action.get("version") or report.get("version") or "")
+
+        if aid == "disable_mods":
+            mods = list(action.get("mods") or [])
+            done, failed = [], []
+            for name in mods:
+                try:
+                    self.disable_mod(instance, name, version)
+                    done.append(name)
+                except Exception as exc:
+                    failed.append(f"{name}: {exc}")
+            if not done and failed:
+                return {"ok": False, "message": "未能禁用：" + "; ".join(failed)}
+            msg = f"已禁用 {len(done)} 个 Mod"
+            if failed:
+                msg += "；部分失败：" + "; ".join(failed)
+            return {"ok": True, "message": msg}
+
+        if aid == "repair_version":
+            if not version:
+                return {"ok": False, "message": "报告里没有版本号，无法修复"}
+            tid = self.repair_version(instance, version)
+            return {"ok": True, "message": f"已开始修复 {version}", "task_id": tid}
+
+        if aid == "need_java":
+            major = int(action.get("major") or 17)
+            tid = self.download_java(str(major), vendor="adoptium")
+            return {"ok": True, "message": f"已开始下载 Java {major}", "task_id": tid}
+
+        if aid == "bump_memory":
+            mb = int(action.get("memory_mb") or 6144)
+            mb = max(1024, min(32768, mb))
+            CONFIG.set("memory_mb", mb)
+            CONFIG.save()
+            self.ui_changed.emit()
+            return {"ok": True, "message": f"默认内存已设为 {mb} MB"}
+
+        if aid == "open_mods_folder":
+            inst = self._instance(instance)
+            folder = self._mods_folder(inst, version)
+            folder.mkdir(parents=True, exist_ok=True)
+            open_path(folder)
+            return {"ok": True, "message": "已打开 Mods 文件夹"}
+
+        if aid == "open_crash_file":
+            target = (action.get("path") or report.get("direct_file") or "").strip()
+            if not target:
+                return {"ok": False, "message": "没有可打开的崩溃文件"}
+            from pathlib import Path as _P
+            if not _P(target).is_file():
+                return {"ok": False, "message": f"文件不存在：{target}"}
+            open_path(target)
+            return {"ok": True, "message": "已打开崩溃报告"}
+
+        if aid == "open_gpu_hint":
+            tip = (
+                "显卡/OpenGL 相关崩溃：请更新显卡驱动，关闭独显强制、"
+                "超采样/滤镜，并确认不是远程桌面/虚拟机缺 OpenGL。"
+            )
+            return {"ok": True, "message": tip}
+
+        if aid == "reset_jvm_args":
+            CONFIG.set("default_jvm_args", "")
+            CONFIG.save()
+            try:
+                from mclauncher import version_settings as vs
+                inst = self._instance(instance)
+                if version:
+                    data = vs.load(inst, version)
+                    data["jvm_args"] = ""
+                    vs.save(inst, version, data)
+            except Exception:
+                pass
+            self.ui_changed.emit()
+            return {"ok": True, "message": "已清空自定义 JVM 参数"}
+
+        return {"ok": False, "message": f"未知动作: {aid}"}
 
     def export_modpack(self, instance: str, dest: str = "") -> str:
         return self.start_task(f"导出整合包 {instance}", self._export_pack_impl, instance, dest)
@@ -956,7 +1196,7 @@ class BackendAPI(QObject):
         return updater_mod.check()
 
     def start_self_update(self) -> str:
-        return self.start_task("更新启动器", self._self_update_impl)
+        return self.start_task(tr("更新启动器"), self._self_update_impl)
 
     def fetch_news(self) -> list:
         from mclauncher import news as news_mod
@@ -968,7 +1208,7 @@ class BackendAPI(QObject):
 
     def skin_urls(self, account_name: str = "") -> dict:
         from mclauncher import skin as skin_mod
-        if not account_name or account_name == "离线模式":
+        if not account_name or account_name == tr("离线模式"):
             acc = {"type": "offline", "name": "Steve"}
         else:
             acc = self.accounts.get_account(account_name) or {"type": "offline", "name": account_name}
@@ -1052,7 +1292,7 @@ class BackendAPI(QObject):
             meta = inst.meta() or {}
             pack = meta.get("modpack") if isinstance(meta.get("modpack"), dict) else {}
             pack_name = pack.get("name") if pack else None
-            mc = pack_name or meta.get("mc_version") or (ids[0] if ids else "未安装版本")
+            mc = pack_name or meta.get("mc_version") or (ids[0] if ids else tr("未安装版本"))
             rows.append({
                 "name": name,
                 "versions": len(ids),
@@ -1068,7 +1308,7 @@ class BackendAPI(QObject):
     @staticmethod
     def _catalog_source(source: str) -> str:
         s = (source or "").strip().lower()
-        if s in ("", "全部", "all"):
+        if s in ("", tr("全部"), "all"):
             return "all"
         if s.startswith("curse"):
             return "curseforge"
@@ -1106,9 +1346,9 @@ class BackendAPI(QObject):
                     "id": key if pack_src == "curseforge" else None,
                     "slug": slug if pack_src == "curseforge" else key,
                     "source": pack_src,
-                    "description": "热门推荐" if key != CBC_CF_ID
-                    else "Forge 1.20.1 黄铜协奏曲，不是 Create+/CDC",
-                    "tags": ["热门"],
+                    "description": tr("热门推荐") if key != CBC_CF_ID
+                    else tr("Forge 1.20.1 黄铜协奏曲，不是 Create+/CDC"),
+                    "tags": [tr("热门")],
                 }
                 mark = (row["source"], row["id"] or row["slug"])
                 if mark in seen:
@@ -1164,15 +1404,16 @@ class BackendAPI(QObject):
                     "id": key if mod_src == "curseforge" else None,
                     "slug": None if mod_src == "curseforge" else key,
                     "source": mod_src,
-                    "description": "热门推荐",
-                    "tags": ["热门"],
+                    "description": tr("热门推荐"),
+                    "tags": [tr("热门")],
+                    "icon_url": "",
                 })
             self._mod_cache = rows
             return rows
         dm = DownloadManager(threads=2)
         extra = extra or {}
         gv = extra.get("game_version") or extra.get("version") or ""
-        if isinstance(gv, str) and gv.startswith("全部"):
+        if isinstance(gv, str) and gv.startswith(tr("全部")):
             gv = ""
         from mclauncher.catalog_files import category_facets
         cats = category_facets(extra.get("category") or extra.get("type") or "")
@@ -1197,6 +1438,7 @@ class BackendAPI(QObject):
                 "description": h.get("description") or h.get("summary") or "",
                 "tags": h.get("tags") or [],
                 "updated": h.get("updated") or "",
+                "icon_url": h.get("icon_url") or "",
             })
         self._mod_cache = rows
         return rows
@@ -1213,14 +1455,15 @@ class BackendAPI(QObject):
             "description": hit.get("description") or hit.get("summary") or "",
             "tags": hit.get("tags") or [],
             "updated": hit.get("updated") or "",
+            "icon_url": hit.get("icon_url") or "",
         }
 
     def _search_content(self, kind: str, query: str, source: str, extra: dict | None = None) -> list[dict]:
         spec = mods_mod.CONTENT_KINDS[kind]
         extra = extra or {}
         src = (source or "").lower()
-        want_mr = src in ("", "全部", "all", "modrinth")
-        want_cf = src in ("", "全部", "all") or src.startswith("curse")
+        want_mr = src in ("", tr("全部"), "all", "modrinth")
+        want_cf = src in ("", tr("全部"), "all") or src.startswith("curse")
         if src.startswith("modrinth"):
             want_cf = False
         if src.startswith("curse"):
@@ -1229,7 +1472,7 @@ class BackendAPI(QObject):
         rows = []
         q = (query or "").strip()
         gv = extra.get("game_version") or extra.get("version") or ""
-        if isinstance(gv, str) and gv.startswith("全部"):
+        if isinstance(gv, str) and gv.startswith(tr("全部")):
             gv = ""
         from mclauncher.catalog_files import category_facets
         cats = category_facets(extra.get("category") or extra.get("type") or "")
@@ -1326,7 +1569,7 @@ class BackendAPI(QObject):
     # ==================================================================
     # 真实实现
     # ==================================================================
-    def _install_game_impl(self, progress, log, version, loader="无", loader_version="", instance="", extra=None):
+    def _install_game_impl(self, progress, log, version, loader=tr("无"), loader_version="", instance="", extra=None):
         extra = dict(extra or {})
         extra.setdefault("skip_assets", bool(CONFIG.get("skip_assets")))
         inst = self._instance(instance)
@@ -1340,7 +1583,7 @@ class BackendAPI(QObject):
         from mclauncher.game_install import install_game
         vid = install_game(installer, version, loader, loader_version, extra)
         log(f"版本安装完成: {vid}")
-        self._last_installed = {"instance": inst.name, "version": vid, "loader": loader or "无"}
+        self._last_installed = {"instance": inst.name, "version": vid, "loader": loader or tr("无")}
         iso = CONFIG.get("default_isolation") or "none"
         if iso and iso != "none":
             from mclauncher import version_settings as vs
@@ -1356,9 +1599,9 @@ class BackendAPI(QObject):
         path = extra.get("path") or name
         on_progress = dm.on_progress
         src_l = (source or "").lower()
-        log("整合包安装引擎：按声明的 Forge/Fabric 版本直装（不依赖残缺的 Maven 列表）")
+        log(tr("整合包安装引擎：按声明的 Forge/Fabric 版本直装（不依赖残缺的 Maven 列表）"))
 
-        if src_l.startswith("本地") or Path(str(path)).is_file():
+        if src_l.startswith(tr("本地")) or Path(str(path)).is_file():
             p = Path(path)
             log(f"从本地文件安装: {p}")
             log(f"实例: {inst.name}  路径: {inst.path}")
@@ -1375,9 +1618,9 @@ class BackendAPI(QObject):
             log(f"从 CurseForge 安装 {hit.get('name') or name} (id={addon_id} slug={slug})")
             log(f"实例: {inst.name}  路径: {inst.path}")
             if str(addon_id) == str(CBC_CF_ID) or (slug or "") == CBC_CF_SLUG:
-                log("目标包：机械动力：黄铜协奏曲（CBC），Minecraft 1.20.1 Forge。这不是 Create+ / CDC。")
+                log(tr("目标包：机械动力：黄铜协奏曲（CBC），Minecraft 1.20.1 Forge。这不是 Create+ / CDC。"))
             elif str(addon_id) == str(CDC_CF_ID) or (slug or "") == CDC_CF_SLUG:
-                log("目标包：机械动力：齿轮盛宴（CDC），Minecraft 1.20.1 Forge。")
+                log(tr("目标包：机械动力：齿轮盛宴（CDC），Minecraft 1.20.1 Forge。"))
             existing = (inst.meta() or {}).get("modpack")
             if isinstance(existing, dict) and existing.get("name"):
                 log(f"注意：实例 {inst.name} 当前已是 {existing.get('name')} "
@@ -1432,7 +1675,7 @@ class BackendAPI(QObject):
                 log(f"从 Modrinth 安装模组 {slug}" + (f" @{vid}" if vid else ""))
                 mods_mod.install_mod_from_source(
                     dm, str(slug), inst, mc_version=gv, on_progress=on_progress, version_id=vid)
-        log("模组安装完成")
+        log(tr("模组安装完成"))
 
     def _install_content_impl(self, progress, log, kind, name, instance, extra=None):
         extra = dict(extra or {})
@@ -1454,7 +1697,7 @@ class BackendAPI(QObject):
                     inst, (files or [name])[0], save_name, extra.get("version") or "")
                 log(f"已放入存档: {dest}")
             else:
-                log("数据包已放到实例 datapacks 目录。可在存档管理里选世界安装进去。")
+                log(tr("数据包已放到实例 datapacks 目录。可在存档管理里选世界安装进去。"))
 
     def _download_java_impl(self, progress, log, major):
         dm = self._dm(progress, log)
@@ -1468,25 +1711,52 @@ class BackendAPI(QObject):
     def _terracotta_prepare_impl(self, progress, log):
         dm = self._dm(progress, log)
         terracotta_mod.install(dm, log=log)
-        progress(1, 1, "启动内核")
+        progress(1, 1, tr("启动内核"))
         terracotta_mod.start(log=log)
-        return "陶瓦联机已就绪"
+        return tr("陶瓦联机已就绪")
 
     @staticmethod
     def _account_kind(props, acc=None):
         if (props or {}).get("user_type") == "msa":
-            return "正版"
+            return tr("正版")
         if (props or {}).get("authlib_api") or (acc or {}).get("type") == "authlib":
-            return "皮肤站"
+            return tr("皮肤站")
         if (props or {}).get("nide8_id") or (acc or {}).get("type") == "nide8":
-            return "统一通行证"
-        return "离线"
+            return tr("统一通行证")
+        return tr("离线")
 
     def _launch_game_impl(self, progress, log, instance, version, account,
-                          username, memory_mb, width, height, java="自动选择",
+                          username, memory_mb, width, height, java=tr("自动选择"),
                           extra_game_args=None):
         if not version:
-            raise LaunchError("请先选择版本（到「版本」页安装）")
+            raise LaunchError(tr("请先选择版本（到「版本」页安装）"))
+        # 多开检查
+        allow_multi = bool(CONFIG.get("allow_multi_instance", False))
+        if not allow_multi and self.is_game_running():
+            raise LaunchError(tr("游戏正在运行中\n若要同时运行多个游戏，请到设置开启「允许多开」"))
+
+        from mclauncher import preflight as preflight_mod
+        java_exe_hint = ""
+        if java and java != JAVA_AUTO:
+            java_exe_hint = self.normalize_java_pref(java)
+            if java_exe_hint == JAVA_AUTO:
+                java_exe_hint = ""
+        pf = preflight_mod.check_launch(
+            self._instance(instance), version,
+            memory_mb=int(memory_mb or 0), java_exe=java_exe_hint or "",
+        )
+        for it in pf.get("items") or []:
+            lvl = it.get("level")
+            line = f"[预检:{lvl}] {it.get('title')}: {it.get('detail')}"
+            if lvl == "error":
+                log(line)
+            elif lvl == "warn":
+                log(line)
+        if not pf.get("ok", True):
+            errs = [it for it in (pf.get("items") or []) if it.get("level") == "error"]
+            msg = "\n\n".join(f"· {e.get('title')}\n{e.get('detail')}" for e in errs) or tr("启动预检未通过")
+            raise LaunchError(tr("启动预检未通过") + "\n\n" + msg)
+
         inst = self._instance(instance)
         log(f"实例: {inst.name} | 版本: {version}")
         log(f"实例 Java 设置: {inst.java_pref()}")
@@ -1497,7 +1767,7 @@ class BackendAPI(QObject):
         if bound:
             account = bound
             log(f"该版本绑定账号: {bound}")
-        if account == "离线模式" or not account:
+        if account == tr("离线模式") or not account:
             acc = self.accounts.offline_account(
                 username or "Player", skin=CONFIG.get("offline_skin") or "default")
         else:
@@ -1531,7 +1801,7 @@ class BackendAPI(QObject):
             prep["settings"].get("pre_launch") or "", game_dir, log=log,
             wait=bool(prep.get("pre_launch_wait", True)))
 
-        progress(1, 4, "检查 Java")
+        progress(1, 4, tr("检查 Java"))
         vjson = inst.version_json(version) or {}
         try:
             resolved = manifest_mod.resolve_inherits(vjson, lambda pid: inst.version_json(pid))
@@ -1543,6 +1813,9 @@ class BackendAPI(QObject):
             java_choice = prep["settings"]["java"]
         if not java_choice or java_choice == JAVA_AUTO:
             java_choice = inst.java_pref()
+        if not java_choice or java_choice == JAVA_AUTO:
+            # 全局默认 Java：版本设置与实例偏好都是「自动」时才生效。
+            java_choice = CONFIG.get("default_java") or ""
         if java_choice and java_choice != JAVA_AUTO:
             for j in java_mod.all_javas():
                 if j.get("name") == java_choice or j.get("exe") == java_choice:
@@ -1562,7 +1835,7 @@ class BackendAPI(QObject):
         ver_line = next((ln.strip() for ln in (java_mod.java_version_output(java_exe) or "").splitlines() if ln.strip()), "?")
         log(f"Java -version: {ver_line}")
         log(f"使用 Java {java_mod.get_java_major(java_exe) or '?'}: {java_exe}")
-        progress(2, 4, "构建启动参数")
+        progress(2, 4, tr("构建启动参数"))
         if props.get("authlib_api"):
             from mclauncher import authlib as authlib_mod
             authlib_mod.ensure_injector(self._dm(progress, log), on_note=log)
@@ -1574,10 +1847,7 @@ class BackendAPI(QObject):
                 props = dict(props)
                 props["nide8_id"] = prep["nide8_id"]
             log(f"统一通行证: {props.get('nide8_id')}")
-        mode = prep.get("window_mode") or "window"
-        if mode == "maximize":
-            width, height = max(width or 1280, 1280), max(height or 720, 720)
-            extra_game_args = list(extra_game_args or []) + ["--fullscreen"]
+        width, height = launch_flow.resolve_resolution(prep, width, height)
         cmd, _natives, _vdir, game_dir = build_launch_command(
             inst, version, props, java_exe,
             memory_mb=memory_mb, width=width, height=height,
@@ -1587,23 +1857,39 @@ class BackendAPI(QObject):
             authlib_api=props.get("authlib_api"),
         )
         log(f"实际启动: {cmd[0]}")
-        log("正在启动游戏进程…")
-        progress(3, 4, "游戏启动中")
+        log(tr("正在启动游戏进程…"))
+        progress(3, 4, tr("游戏启动中"))
         worker = QThread.currentThread()
-        proc = GameProcess(cmd, cwd=game_dir, on_line=log, priority=prep["priority"])
+        proc = GameProcess(cmd, cwd=game_dir, on_line=log, priority=prep["priority"],
+                           window_title=prep.get("window_title") or "")
         with self._game_lock:
             self._game_proc = proc
         self.game_started.emit()
         code = None
+        # 游戏时长统计
+        try:
+            from mclauncher import playtime as playtime_mod
+            tracker = playtime_mod.PlaytimeTracker(inst.name, version)
+        except Exception:
+            tracker = None
+        if tracker is not None:
+            tracker.start()
         try:
             code = proc.wait()
         finally:
+            if tracker is not None:
+                try:
+                    dur = tracker.stop()
+                    if dur:
+                        log(f"本次游玩 {playtime_mod.format_duration(dur)}")
+                except Exception:
+                    pass
             with self._game_lock:
                 if self._game_proc is proc:
                     self._game_proc = None
             self.game_exited.emit(code)
         if getattr(worker, "_cancelled", False):
-            log("已停止游戏")
+            log(tr("已停止游戏"))
             return
         log(f"游戏已退出，退出码 {code}")
         launch_flow.run_hook(prep["settings"].get("post_launch") or "", game_dir, log=log)
@@ -1616,7 +1902,7 @@ class BackendAPI(QObject):
         if report.get("is_crash"):
             log(f"[崩溃分析] {report.get('summary') or report.get('headline')}")
             raise GameCrashError(report)
-        return "已正常退出"
+        return tr("已正常退出")
 
     def _microsoft_login_impl(self, progress, log):
         client_id = CONFIG.get("microsoft_client_id") or "00000000402b5328"
@@ -1640,9 +1926,9 @@ class BackendAPI(QObject):
 
     def _authlib_login_impl(self, progress, log, api, username, password):
         from mclauncher import authlib as authlib_mod
-        progress(0, 0, "下载 authlib-injector")
+        progress(0, 0, tr("下载 authlib-injector"))
         authlib_mod.ensure_injector(self._dm(progress, log), on_note=log)
-        progress(1, 2, "登录皮肤站")
+        progress(1, 2, tr("登录皮肤站"))
         account = authlib_mod.login(api, username, password)
         self.accounts.add_account(account)
         log(f"皮肤站登录成功：{account.get('name')}")
@@ -1671,8 +1957,8 @@ class BackendAPI(QObject):
         dm = self._dm(progress, log)
         rows = check_updates(inst, dm=dm)
         if not rows:
-            log("已装模组都是最新")
-            return "没有可更新的模组"
+            log(tr("已装模组都是最新"))
+            return tr("没有可更新的模组")
         for i, row in enumerate(rows):
             log(f"更新 {row.get('name')} {row.get('current')} → {row.get('latest')}")
             apply_update(inst, row, dm=dm)
@@ -1683,8 +1969,8 @@ class BackendAPI(QObject):
         from mclauncher import updater as updater_mod
         info = updater_mod.check(self._dm(progress, log))
         if not info.get("has_update"):
-            return info.get("message") or "已是最新"
-        log(info.get("message") or "发现更新")
+            return info.get("message") or tr("已是最新")
+        log(info.get("message") or tr("发现更新"))
         path = updater_mod.download(info, self._dm(progress, log))
         msg = updater_mod.apply_exe(path)
         log(msg)
@@ -1692,9 +1978,9 @@ class BackendAPI(QObject):
 
     def _nide8_login_impl(self, progress, log, server_id, username, password):
         from mclauncher import nide8 as nide8_mod
-        progress(0, 0, "下载 nide8auth")
+        progress(0, 0, tr("下载 nide8auth"))
         nide8_mod.ensure_jar(self._dm(progress, log), on_note=log)
-        progress(1, 2, "登录统一通行证")
+        progress(1, 2, tr("登录统一通行证"))
         account = nide8_mod.login(server_id, username, password)
         self.accounts.add_account(account)
         log(f"统一通行证登录成功：{account.get('name')}")
@@ -1740,3 +2026,275 @@ class BackendAPI(QObject):
         path = vops.export_launch_bat(Path(dest), cmd, gdir)
         log(f"已写出 {path}")
         return path
+
+    # ==================================================================
+    # 新增 API：服务器管理
+    # ==================================================================
+
+    def list_servers(self, instance: str = "") -> list[dict]:
+        from mclauncher import servers as servers_mod
+        inst = self._instance(instance)
+        return servers_mod.list_servers(inst)
+
+    def add_server(self, instance: str, name: str, ip: str, port: int = 25565,
+                   description: str = "") -> dict:
+        from mclauncher import servers as servers_mod
+        inst = self._instance(instance)
+        return servers_mod.add_server(inst, name, ip, port, description)
+
+    def update_server(self, instance: str, index: int, **kwargs) -> dict:
+        from mclauncher import servers as servers_mod
+        inst = self._instance(instance)
+        return servers_mod.update_server(inst, index, **kwargs)
+
+    def delete_server(self, instance: str, index: int):
+        from mclauncher import servers as servers_mod
+        inst = self._instance(instance)
+        servers_mod.delete_server(inst, index)
+
+    def import_servers(self, instance: str, text: str) -> int:
+        from mclauncher import servers as servers_mod
+        inst = self._instance(instance)
+        return servers_mod.import_servers_txt(inst, text)
+
+    def export_servers(self, instance: str) -> str:
+        from mclauncher import servers as servers_mod
+        inst = self._instance(instance)
+        return servers_mod.export_servers_txt(inst)
+
+    # ==================================================================
+    # 新增 API：游玩时长
+    # ==================================================================
+
+    def get_playtime(self, instance: str = "") -> dict:
+        from mclauncher import playtime as playtime_mod
+        inst_name = instance or CONFIG.get("default_instance", "default")
+        return playtime_mod.get_playtime(inst_name)
+
+    def get_all_playtime(self) -> dict:
+        from mclauncher import playtime as playtime_mod
+        return playtime_mod.get_all_playtime()
+
+    def get_total_playtime(self) -> int:
+        from mclauncher import playtime as playtime_mod
+        return playtime_mod.get_total_playtime()
+
+    def format_playtime(self, seconds: int) -> str:
+        from mclauncher import playtime as playtime_mod
+        return playtime_mod.format_duration(seconds)
+
+    def clear_playtime(self, instance: str = "", version: str = ""):
+        from mclauncher import playtime as playtime_mod
+        playtime_mod.clear_playtime(instance, version)
+
+    # ==================================================================
+    # 新增 API：缩略图
+    # ==================================================================
+
+    def thumb_path(self, url: str) -> str:
+        from mclauncher import thumbnails as thumb_mod
+        return thumb_mod.thumb_path(url)
+
+    def ensure_thumb(self, url: str) -> str:
+        from mclauncher import thumbnails as thumb_mod
+        return thumb_mod.ensure_thumb(url)
+
+    # ==================================================================
+    # 新增 API：Java 多发行版
+    # ==================================================================
+
+    def java_vendor_list(self) -> list[str]:
+        from mclauncher import java as java_mod
+        return java_mod.java_vendor_list()
+
+    def java_vendor_label(self, vendor: str) -> str:
+        from mclauncher import java as java_mod
+        return java_mod.java_vendor_label(vendor)
+
+    def install_java(self, major: int, vendor: str = "adoptium") -> str:
+        """异步下载 Java 运行时。"""
+        return self.start_task(
+            f"下载 {vendor} Java {major}",
+            self._install_java_impl, major, vendor,
+        )
+
+    def _install_java_impl(self, progress, log, major, vendor):
+        from mclauncher import java as java_mod
+        dm = self._dm(progress, log)
+        exe = java_mod.install_java_vendor(dm, major, vendor=vendor, on_progress=dm.on_progress)
+        log(f"Java 已安装: {exe}")
+        return f"Java {major} ({vendor}) 安装完成"
+
+    # ==================================================================
+    # 新增 API：多语言
+    # ==================================================================
+
+    def get_language(self) -> str:
+        from mclauncher import i18n
+        return i18n.current_language()
+
+    def set_language(self, lang: str):
+        from mclauncher import i18n
+        i18n.set_language(lang)
+        self.ui_changed.emit()
+
+    def available_languages(self) -> dict[str, str]:
+        from mclauncher import i18n
+        return i18n.available_languages()
+
+    def translate(self, key: str, lang: str = "") -> str:
+        from mclauncher import i18n
+        return i18n._(key, lang or None)
+
+    # ==================================================================
+    # 新增 API：主题包
+    # ==================================================================
+
+    def list_themes(self) -> list[dict]:
+        from mclauncher import themes as themes_mod
+        return themes_mod.list_themes()
+
+    def save_theme(self, name: str) -> dict:
+        from mclauncher import themes as themes_mod
+        return themes_mod.save_theme(name)
+
+    def load_theme(self, name: str) -> dict:
+        from mclauncher import themes as themes_mod
+        result = themes_mod.load_theme(name)
+        self.theme_changed.emit()
+        self.ui_changed.emit()
+        return result
+
+    def delete_theme(self, name: str):
+        from mclauncher import themes as themes_mod
+        themes_mod.delete_theme(name)
+
+    def import_theme(self, path: str) -> str:
+        from mclauncher import themes as themes_mod
+        return themes_mod.import_theme(path)
+
+    def export_theme(self, name: str, dest: str) -> str:
+        from mclauncher import themes as themes_mod
+        return themes_mod.export_theme(name, dest)
+
+    # ==================================================================
+    # 新增 API：官方启动器迁移
+    # ==================================================================
+
+    def detect_official_launcher(self) -> bool:
+        from mclauncher import official_migrate as om
+        return om.detect_official()
+
+    def official_launcher_dir(self) -> str:
+        from mclauncher import official_migrate as om
+        d = om.official_dir()
+        return str(d) if d else ""
+
+    def scan_official_versions(self) -> list[str]:
+        from mclauncher import official_migrate as om
+        d = om.official_dir()
+        if not d:
+            return []
+        return om.scan_versions(d)
+
+    def migrate_official_launcher(self, instance: str = "default") -> str:
+        return self.start_task(
+            tr("导入官方启动器"),
+            self._migrate_official_impl, instance,
+        )
+
+    def _migrate_official_impl(self, progress, log, instance):
+        from mclauncher import official_migrate as om
+        src = om.official_dir()
+        if not src:
+            raise FileNotFoundError(tr("未找到官方启动器目录"))
+        log(f"正在从 {src} 迁移…")
+        progress(1, 3, tr("扫描版本"))
+        versions = om.scan_versions(src)
+        if not versions:
+            log(tr("未发现版本"))
+            return tr("无版本可导入")
+        log(f"发现 {len(versions)} 个版本")
+        progress(2, 3, f"导入 {len(versions)} 个版本")
+        result = om.migrate(str(src), instance)
+        log(f"已导入 {len(result.get('versions', []))} 个版本")
+        return f"已导入 {len(result.get('versions', []))} 个版本"
+
+    # ==================================================================
+    # 新增 API：多开
+    # ==================================================================
+
+    def is_game_running(self) -> bool:
+        with self._game_lock:
+            proc = self._game_proc
+        return proc is not None and getattr(proc, "poll", lambda: 0)() is None
+
+    def allow_multi_instance(self) -> bool:
+        return bool(CONFIG.get("allow_multi_instance", False))
+
+    def set_multi_instance(self, allow: bool):
+        CONFIG.set("allow_multi_instance", bool(allow))
+        CONFIG.save()
+
+    # ==================================================================
+    # 新增 API：崩溃报告上传
+    # ==================================================================
+
+    def submit_crash_report(self, task_id: str = "") -> str:
+        report = self.get_crash(task_id)
+        if not report:
+            raise LaunchError(tr("没有可上传的崩溃报告"))
+        from mclauncher import feedback as fb
+        result = fb.submit_crash(report)
+        return result.get("message") or tr("已上传")
+
+    # ==================================================================
+    # 新增 API：启动命令展示
+    # ==================================================================
+
+    def get_launch_command(self, instance: str, version: str, account: str = "",
+                           username: str = "", memory_mb: int = 0) -> str:
+        """获取完整的启动命令文本（不实际启动游戏）。"""
+        from mclauncher import launch_flow, version_ops as vops
+        from mclauncher.launcher import build_launch_command
+        inst = self._instance(instance)
+        if not version:
+            raise LaunchError(tr("请先选择版本"))
+        vjson = inst.version_json(version) or {}
+        from mclauncher import manifest as manifest_mod
+        try:
+            resolved = manifest_mod.resolve_inherits(vjson, lambda pid: inst.version_json(pid))
+        except Exception:
+            resolved = vjson
+        java_exe = java_mod.resolve_launch_java(resolved, on_note=None)
+        if not java_exe:
+            java_exe = java_mod.resolve_launch_java(resolved, dm=DownloadManager(threads=2))
+        if not java_exe:
+            raise LaunchError(tr("无法确定 Java 路径"))
+        if not account or account == tr("离线模式"):
+            acc = self.accounts.offline_account(username or "Player")
+        else:
+            acc = self.accounts.get_account(account)
+            if acc:
+                acc = self.accounts.ensure_valid(acc)
+            else:
+                acc = self.accounts.offline_account(username or "Player")
+        props = self.accounts.launch_props(acc)
+        prep = launch_flow.prepare(inst, version, memory_mb=memory_mb or int(CONFIG.get("memory_mb") or 4096))
+        cmd, _n, _v, _g = build_launch_command(
+            inst, version, props, java_exe,
+            memory_mb=prep["memory_mb"],
+            extra_game_args=prep["extra_game_args"],
+            extra_jvm_args=prep["jvm_args"],
+            game_directory=prep["game_dir"],
+        )
+        return " ".join(cmd)
+
+    # ==================================================================
+    # 新增 API：首次运行智能推荐
+    # ==================================================================
+
+    def get_smart_recommendation(self) -> dict:
+        """根据硬件配置提供推荐值。"""
+        from mclauncher.sysinfo import get_smart_recommendation
+        return get_smart_recommendation()

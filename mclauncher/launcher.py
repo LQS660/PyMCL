@@ -179,6 +179,60 @@ def _set_priority(pid: int, level: str):
         ctypes.windll.kernel32.CloseHandle(handle)
 
 
+_GAME_WINDOW_CLASSES = ("LWJGL", "GLFW30")
+
+
+def _visible_windows_of(pid: int):
+    """按 pid 找可见的顶层窗口，优先 LWJGL/GLFW 这类游戏主窗口。"""
+    user32 = ctypes.windll.user32
+    hits = []
+
+    proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    def visit(hwnd, _lparam):
+        owner = ctypes.c_ulong(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value != pid or not user32.IsWindowVisible(hwnd):
+            return True
+        if user32.GetWindowTextLengthW(hwnd) <= 0:
+            return True
+        buf = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, buf, 64)
+        hits.append((buf.value in _GAME_WINDOW_CLASSES, hwnd))
+        return True
+
+    user32.EnumWindows(proc(visit), 0)
+    hits.sort(key=lambda x: not x[0])
+    return [h for _preferred, h in hits]
+
+
+def watch_window_title(proc, title: str, timeout: float = 90.0):
+    """把游戏窗口标题改成自定义值。
+
+    Minecraft 自己会在启动过程中反复设置标题，只改一次会被覆盖，
+    所以在窗口出现后的一段时间内持续回写，超时或进程退出即停。
+    """
+    title = (title or "").strip()
+    if os.name != "nt" or not title or proc is None:
+        return
+
+    def loop():
+        import time as _time
+        user32 = ctypes.windll.user32
+        deadline = _time.time() + timeout
+        pid = proc.pid
+        hwnd = None
+        while _time.time() < deadline and proc.poll() is None:
+            if hwnd is None or not user32.IsWindow(hwnd):
+                found = _visible_windows_of(pid)
+                hwnd = found[0] if found else None
+            if hwnd:
+                user32.SetWindowTextW(hwnd, title)
+            _time.sleep(1.0)
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def build_launch_command(instance, version_id, account_props, java_exe,
                          memory_mb=4096, width=None, height=None,
                          extra_game_args=None, extra_jvm_args=None,
@@ -356,7 +410,7 @@ def build_launch_command(instance, version_id, account_props, java_exe,
 class GameProcess:
     """运行中的游戏进程，支持读取输出与终止。"""
 
-    def __init__(self, cmd, cwd, on_line=None, env=None, priority="normal"):
+    def __init__(self, cmd, cwd, on_line=None, env=None, priority="normal", window_title=""):
         import collections
         import time as _time
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if utils.IS_WINDOWS else 0
@@ -374,6 +428,7 @@ class GameProcess:
             bufsize=1,
         )
         _set_priority(self.proc.pid, priority)
+        watch_window_title(self.proc, window_title)
         self.on_line = on_line
         self.started_at = _time.time()
         self.lines = collections.deque(maxlen=200)

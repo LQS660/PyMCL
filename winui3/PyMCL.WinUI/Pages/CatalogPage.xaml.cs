@@ -1,4 +1,4 @@
-using Microsoft.UI.Xaml;
+﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
@@ -54,7 +54,7 @@ public sealed partial class CatalogPage : UserControl
         ResultList.Children.Add(new TextBlock
         {
             Text = "输入名称后点击搜索",
-            Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)),
+            Foreground = ThemeBrushes.Mute,
             HorizontalAlignment = HorizontalAlignment.Center,
             Margin = new Thickness(0, 40, 0, 0),
         });
@@ -81,7 +81,7 @@ public sealed partial class CatalogPage : UserControl
         if (AppServices.Client is null) return;
         var token = ++_token;
         ResultList.Children.Clear();
-        ResultList.Children.Add(new TextBlock { Text = "正在搜索…", Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)), HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 40, 0, 0) });
+        ResultList.Children.Add(new TextBlock { Text = "正在搜索…", Foreground = ThemeBrushes.Mute, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 40, 0, 0) });
         var query = NameEdit.Text?.Trim() ?? "";
         var source = SourceBox.SelectedItem as string ?? "全部";
         if (!string.IsNullOrEmpty(_kind.DefaultSource)) source = _kind.DefaultSource;
@@ -96,7 +96,7 @@ public sealed partial class CatalogPage : UserControl
             ResultList.Children.Clear();
             if (rows.Count == 0)
             {
-                ResultList.Children.Add(new TextBlock { Text = _kind.EmptySearch, Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)), HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 40, 0, 0) });
+                ResultList.Children.Add(new TextBlock { Text = _kind.EmptySearch, Foreground = ThemeBrushes.Mute, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 40, 0, 0) });
                 return;
             }
             var i = 0;
@@ -112,13 +112,13 @@ public sealed partial class CatalogPage : UserControl
         {
             if (token != _token) return;
             ResultList.Children.Clear();
-            ResultList.Children.Add(new TextBlock { Text = "搜索失败: " + ex.Message, Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)), Margin = new Thickness(12) });
+            ResultList.Children.Add(new TextBlock { Text = "搜索失败: " + ex.Message, Foreground = ThemeBrushes.Mute, Margin = new Thickness(12) });
         }
     }
 
     private Border BuildRow(CatalogItem item)
     {
-        var row = new Border { MinHeight = 72, BorderBrush = new SolidColorBrush(Color.FromArgb(255, 238, 243, 247)), BorderThickness = new Thickness(0, 0, 0, 1), Padding = new Thickness(12, 10, 12, 10) };
+        var row = new Border { MinHeight = 72, BorderBrush = ThemeBrushes.Divider, BorderThickness = new Thickness(0, 0, 0, 1), Padding = new Thickness(12, 10, 12, 10) };
         var g = new Grid();
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -126,25 +126,25 @@ public sealed partial class CatalogPage : UserControl
         var tile = new Border
         {
             Width = 52, Height = 52, CornerRadius = new CornerRadius(10),
-            Background = new SolidColorBrush(Color.FromArgb(255, 46, 155, 107)),
+            Background = ThemeBrushes.Accent,
             Child = new TextBlock { Text = (item.Name.Length > 0 ? item.Name[..1] : "?").ToUpperInvariant(), Foreground = new SolidColorBrush(Microsoft.UI.Colors.White), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, FontWeight = Microsoft.UI.Text.FontWeights.Bold },
         };
         g.Children.Add(tile);
         var info = new StackPanel { Margin = new Thickness(12, 0, 12, 0) };
-        info.Children.Add(new TextBlock { Text = item.Name, Foreground = new SolidColorBrush(Color.FromArgb(255, 27, 122, 84)), FontSize = 14, FontWeight = Microsoft.UI.Text.FontWeights.Bold, TextWrapping = TextWrapping.Wrap });
+        info.Children.Add(new TextBlock { Text = item.Name, Foreground = ThemeBrushes.AccentText, FontSize = 14, FontWeight = Microsoft.UI.Text.FontWeights.Bold, TextWrapping = TextWrapping.Wrap });
         if (!string.IsNullOrWhiteSpace(item.Description))
-            info.Children.Add(new TextBlock { Text = item.Description, Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)), FontSize = 12, TextWrapping = TextWrapping.Wrap, MaxLines = 2 });
+            info.Children.Add(new TextBlock { Text = item.Description, Foreground = ThemeBrushes.Mute, FontSize = 12, TextWrapping = TextWrapping.Wrap, MaxLines = 2 });
         info.Children.Add(new TextBlock
         {
             Text = $"{FmtDownloads(item.Downloads)}  ·  {SrcLabel(item.Source)}",
-            Foreground = new SolidColorBrush(Color.FromArgb(255, 136, 136, 136)),
+            Foreground = ThemeBrushes.Mute,
             FontSize = 11,
             Margin = new Thickness(0, 4, 0, 0),
         });
         Grid.SetColumn(info, 1);
         g.Children.Add(info);
         var btn = new Button { Content = "选择版本", Width = 88, Height = 30, Style = (Style)Application.Current.Resources["AccentButtonStyle"] };
-        btn.Click += (_, _) => _ = Install(item);
+        btn.Click += (_, _) => _ = Install(item, tile);
         Grid.SetColumn(btn, 2);
         g.Children.Add(btn);
         row.Child = g;
@@ -166,7 +166,7 @@ public sealed partial class CatalogPage : UserControl
         return n == 0 ? "—" : n.ToString();
     }
 
-    private async Task Install(CatalogItem item)
+    private async Task Install(CatalogItem item, FrameworkElement? source = null)
     {
         if (AppServices.Client is null) return;
         var instance = InstanceBox.SelectedItem as string ?? "default";
@@ -192,6 +192,7 @@ public sealed partial class CatalogPage : UserControl
             if (pick is null) return;
             foreach (var kv in pick) extra[kv.Key] = kv.Value;
         }
+        AppServices.FlyToTasks?.Invoke(source, item.Name, null);
         try
         {
             if (_kind.IsModpack)
@@ -341,6 +342,9 @@ public sealed partial class CatalogPage : UserControl
                     var del = new Button { Content = "删除" };
                     del.Click += async (_, _) =>
                     {
+                        if (!await Dialogs.ConfirmAsync(XamlRoot, "删除文件",
+                                $"确定从实例「{inst}」删除「{name}」吗？文件会直接从磁盘移除。"))
+                            return;
                         try { await AppServices.Client.CallAsync("delete_mod", new { instance = inst, filename = name }); Installed_Click(sender, e); }
                         catch (Exception ex) { AppServices.Toast?.Invoke("删除失败", ex.Message, InfoBarSeverity.Error); }
                     };

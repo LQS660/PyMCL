@@ -259,6 +259,8 @@ def _memory_info() -> dict:
         "total_mb": int(total // (1024 * 1024)) if total else 0,
         "avail_mb": int(avail // (1024 * 1024)) if avail else 0,
         "load_percent": load,
+        "total_bytes": total,
+        "avail_bytes": avail,
     }
 
 
@@ -474,6 +476,42 @@ def collect(force: bool = False, scan_system_java: bool = False) -> dict:
         _CACHE["t"] = time.time()
         _CACHE["data"] = info
     return dict(info)
+
+
+def get_smart_recommendation() -> dict:
+    """根据硬件配置提供推荐值。"""
+    rec = {
+        "memory_mb": 4096,
+        "java_major": 17,
+        "window_width": 854,
+        "window_height": 480,
+        "gc_preset": "auto",
+        "cpu_count": 4,
+        "total_ram_gb": 8.0,
+    }
+    try:
+        info = collect()
+        mem = info.get("memory") or {}
+        total_bytes = mem.get("total_bytes") or 0
+        if total_bytes:
+            total_gb = total_bytes / (1024 ** 3)
+            if total_gb >= 32:
+                rec["memory_mb"] = 12288
+            elif total_gb >= 16:
+                rec["memory_mb"] = 8192
+            elif total_gb >= 8:
+                rec["memory_mb"] = 4096
+            else:
+                rec["memory_mb"] = 2048
+            safe = int(total_gb * 0.75 * 1024)
+            if rec["memory_mb"] > safe:
+                rec["memory_mb"] = max(1024, safe)
+            rec["total_ram_gb"] = round(total_gb, 1)
+        cpu = info.get("cpu") or {}
+        rec["cpu_count"] = cpu.get("cores_logical") or cpu.get("cores_physical") or 4
+    except Exception:
+        pass
+    return rec
 
 
 def format_text(info: dict | None = None) -> str:

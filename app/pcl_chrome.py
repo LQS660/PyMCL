@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """PCL 风格色板：细顶栏 + 左侧主导航。深浅色运行时切换。"""
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, Signal
+from PySide6.QtCore import (
+    QEasingCurve, QParallelAnimationGroup, QPoint, QPropertyAnimation, Qt, Signal,
+)
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton, QStackedWidget,
@@ -27,6 +29,7 @@ class Theme:
     btn_bg = "#FFFFFF"
     row_hover = "#F3F7F5"
     row_line = "#EEF3F7"
+    _version = 0  # 每次 apply 自增，方便 widget 检测主题变更
 
     @classmethod
     def apply(cls, dark: bool):
@@ -55,6 +58,7 @@ class Theme:
             cls.btn_bg = "#FFFFFF"
             cls.row_hover = "#F3F7F5"
             cls.row_line = "#EEF3F7"
+        cls._version += 1
         _sync_aliases()
 
 
@@ -82,6 +86,124 @@ PCL_TITLE = Theme.title
 PCL_HOVER = Theme.hover
 TITLE_H = 40
 SIDE_W = 188
+
+
+def paint_theme_surfaces(root) -> None:
+    """把 root 下承托 Fluent 卡片的容器刷成 Theme.bg。
+
+    注意：Qt 样式表若写成无选择器的 `background-color: ...`，会**级联到所有子控件**，
+    QLabel/Fluent 文字旁会出现一块深色底（实例卡、反馈 FAQ 就是这病）。
+    因此这里一律用 `#objectName { ... }` 只刷自身。
+    """
+    from PySide6.QtGui import QPalette
+    from PySide6.QtWidgets import QAbstractScrollArea, QFormLayout, QFrame, QLabel, QWidget
+
+    if root is None:
+        return
+    bg = Theme.bg
+    card = Theme.card
+    fg = Theme.text
+    bg_c = QColor(bg)
+    card_c = QColor(card)
+
+    def _ensure_name(w: QWidget, hint: str) -> str:
+        name = w.objectName()
+        if not name:
+            name = f"{hint}_{id(w)}"
+            w.setObjectName(name)
+        return name
+
+    def _set_palette(w: QWidget, color: QColor):
+        if w is None:
+            return
+        pal = w.palette()
+        pal.setColor(QPalette.ColorRole.Window, color)
+        pal.setColor(QPalette.ColorRole.Base, color)
+        w.setPalette(pal)
+        # 容器需要自绘底；子控件不要开 autoFill，否则字旁又出色块
+        w.setAutoFillBackground(True)
+
+    def _paint_one(w: QWidget, *, hint: str = "pymclSurf", fill: str | None = None):
+        if w is None:
+            return
+        color = fill or bg
+        name = _ensure_name(w, hint)
+        w.setAttribute(Qt.WA_StyledBackground, True)
+        # 只用 ID 选择器，禁止无选择器规则
+        w.setStyleSheet(f"#{name} {{ background-color: {color}; border: none; }}")
+        _set_palette(w, QColor(color))
+
+    _paint_one(root, hint="pymclPage")
+
+    for scroll in root.findChildren(QAbstractScrollArea):
+        sname = _ensure_name(scroll, "pymclScroll")
+        scroll.setAttribute(Qt.WA_StyledBackground, True)
+        scroll.setStyleSheet(f"#{sname} {{ background-color: {bg}; border: none; }}")
+        _set_palette(scroll, bg_c)
+        vp = scroll.viewport()
+        if vp is not None:
+            vname = _ensure_name(vp, "pymclVp")
+            vp.setAttribute(Qt.WA_StyledBackground, True)
+            vp.setStyleSheet(f"#{vname} {{ background-color: {bg}; border: none; }}")
+            _set_palette(vp, bg_c)
+        inner = scroll.widget() if hasattr(scroll, "widget") else None
+        if inner is not None:
+            _paint_one(inner, hint="pymclHost")
+
+    # SettingCard：补卡片底色（选择器限定在 SettingCard，不会灌进子 QLabel）
+    try:
+        from qfluentwidgets import SettingCard as FluentSettingCard
+    except Exception:
+        FluentSettingCard = type(None)
+    for card_w in root.findChildren(QFrame):
+        if FluentSettingCard is type(None) or not isinstance(card_w, FluentSettingCard):
+            continue
+        prev = card_w.styleSheet() or ""
+        marker = "/*pymcl-card*/"
+        if marker in prev:
+            prev = prev.split(marker)[0].rstrip()
+        card_w.setStyleSheet(
+            f"{prev}\n{marker}\nSettingCard {{ background-color: {card}; border-radius: 6px; }}"
+        )
+        _set_palette(card_w, card_c)
+
+    # 清掉子 QLabel 上被旧无选择器 QSS / palette 染上的实心底
+    for lab in root.findChildren(QLabel):
+        lab.setAutoFillBackground(False)
+        # Pill 等有意设了实心底的跳过
+        if lab.property("pymclKeepBg"):
+            continue
+        # FluentLabel 自己管 color；只确保不要 opaque Window 底
+        try:
+            pal = lab.palette()
+            pal.setColor(QPalette.ColorRole.Window, QColor(0, 0, 0, 0))
+            lab.setPalette(pal)
+        except Exception:
+            pass
+
+    # QFormLayout 系统标签：字色跟 Theme，底透明
+    for layout in root.findChildren(QWidget):
+        lay = layout.layout()
+        if not isinstance(lay, QFormLayout):
+            continue
+        for i in range(lay.rowCount()):
+            item = lay.itemAt(i, QFormLayout.ItemRole.LabelRole)
+            if item is None:
+                continue
+            lab = item.widget()
+            if isinstance(lab, QLabel) and "FluentLabel" not in type(lab).__name__:
+                lab.setAutoFillBackground(False)
+                lab.setStyleSheet(
+                    f"QLabel {{ color: {fg}; background: transparent; }}"
+                )
+
+
+def form_label(text: str):
+    """表单左侧标签：跟 Theme，切深浅色可 restyle。"""
+    from qfluentwidgets import BodyLabel
+    lab = BodyLabel(text)
+    lab.setProperty("pymclFormLabel", True)
+    return lab
 
 
 def ghost_btn_qss() -> str:
@@ -411,13 +533,13 @@ class PclSectionShell(QWidget):
 
 
 def fade_stack_to(stack, widget, holder, duration: int = 180):
-    """主栈切页：抓当前帧叠在新页上淡出。holder 必须长期持有动画对象。"""
-    from PySide6.QtWidgets import QLabel
+    """主栈切页：抓当前帧叠在新页上，淡出 + 轻微左移。holder 长期持有动画。"""
+    from .motion_prefs import ui_motion_ok
 
     old = stack.currentWidget()
     if widget is None or widget is old:
         return
-    if old is None or stack.width() < 8:
+    if old is None or stack.width() < 8 or not ui_motion_ok():
         _set_stack(stack, widget)
         return
     pix = old.grab()
@@ -425,6 +547,8 @@ def fade_stack_to(stack, widget, holder, duration: int = 180):
         _set_stack(stack, widget)
         return
     _set_stack(stack, widget)
+    gen = getattr(holder, "_nav_fade_gen", 0) + 1
+    holder._nav_fade_gen = gen
     cover = QLabel(stack)
     cover.setPixmap(pix)
     cover.setScaledContents(True)
@@ -433,17 +557,28 @@ def fade_stack_to(stack, widget, holder, duration: int = 180):
     cover.raise_()
     effect = QGraphicsOpacityEffect(cover)
     cover.setGraphicsEffect(effect)
-    anim = QPropertyAnimation(effect, b"opacity", cover)
-    anim.setDuration(duration)
-    anim.setStartValue(1.0)
-    anim.setEndValue(0.0)
-    anim.setEasingCurve(QEasingCurve.OutCubic)
+    group = QParallelAnimationGroup(cover)
+    a_op = QPropertyAnimation(effect, b"opacity", cover)
+    a_op.setDuration(duration)
+    a_op.setStartValue(1.0)
+    a_op.setEndValue(0.0)
+    a_op.setEasingCurve(QEasingCurve.OutCubic)
+    a_pos = QPropertyAnimation(cover, b"pos", cover)
+    a_pos.setDuration(duration)
+    a_pos.setStartValue(QPoint(0, 0))
+    a_pos.setEndValue(QPoint(-36, 0))
+    a_pos.setEasingCurve(QEasingCurve.OutCubic)
+    group.addAnimation(a_op)
+    group.addAnimation(a_pos)
 
     def done():
+        if getattr(holder, "_nav_fade_gen", 0) != gen:
+            return
         cover.hide()
         cover.deleteLater()
-        if getattr(holder, "_nav_fade", None) is anim:
+        if getattr(holder, "_nav_fade", None) is group:
             holder._nav_fade = None
+            holder._nav_cover = None
 
     prev = getattr(holder, "_nav_cover", None)
     if prev is not None:
@@ -453,9 +588,9 @@ def fade_stack_to(stack, widget, holder, duration: int = 180):
         except RuntimeError:
             pass
     holder._nav_cover = cover
-    holder._nav_fade = anim
-    anim.finished.connect(done)
-    anim.start()
+    holder._nav_fade = group
+    group.finished.connect(done)
+    group.start()
 
 
 def _stack_popout(stack, widget) -> bool:

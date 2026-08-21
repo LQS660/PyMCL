@@ -44,9 +44,15 @@ DEFAULTS = {
     "gc": "",
     "window_title": "",
     "window_mode": "window",
+    "window_width": None,
+    "window_height": None,
     "skip_assets": False,
     "offline_skin": "default",
 }
+
+# UI 历史上写过 "maximize"，启动链早期只认 "fullscreen"，两边对不上导致全屏静默失效。
+# 以 "maximize" 为准，另一个作为别名容错。
+FULLSCREEN_MODES = ("maximize", "fullscreen")
 
 
 def _file(instance, version_id) -> Path:

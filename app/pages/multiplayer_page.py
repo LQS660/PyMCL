@@ -10,7 +10,9 @@ from qfluentwidgets import (
     TransparentPushButton,
 )
 
+from ..ui_alive import widget_alive
 from ..widgets import IconTile, InputDialog, Pill
+from mclauncher.i18n import tr
 
 
 class ActionCard(SimpleCardWidget):
@@ -39,6 +41,7 @@ class MultiplayerPage(QWidget):
         self._busy = False
         self._auto_started = False
         self._last_state = ""
+        self._polling = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 20, 28, 20)
@@ -47,15 +50,15 @@ class MultiplayerPage(QWidget):
         head = QVBoxLayout()
         head.setSpacing(2)
         title_row = QHBoxLayout()
-        title_row.addWidget(SubtitleLabel("陶瓦联机"))
-        self.state_pill = Pill("未就绪", "#888888")
+        title_row.addWidget(SubtitleLabel(tr("陶瓦联机")))
+        self.state_pill = Pill(tr("未就绪"), "#888888", solid=True)
         title_row.addWidget(self.state_pill)
         title_row.addStretch(1)
         head.addLayout(title_row)
         head.addWidget(CaptionLabel(
-            "输入邀请码即可加入。陶瓦是 EasyTier P2P 打洞，不是 FRP 隧道；"
+            tr("输入邀请码即可加入。陶瓦是 EasyTier P2P 打洞，不是 FRP 隧道；"
             "会和 HMCL 一样传官方节点，并带上本机 HMCL 用过的自定义会合节点。"
-            "官方 PCL 联机大厅协议未开放，PCL 房间号无法互通；局域网请用下面地址。"
+            "官方 PCL 联机大厅协议未开放，PCL 房间号无法互通；局域网请用下面地址。")
         ))
         self.lan_hint = CaptionLabel(self.backend.lan_hint())
         self.lan_hint.setWordWrap(True)
@@ -63,7 +66,7 @@ class MultiplayerPage(QWidget):
         head.addWidget(self.lan_hint)
         root.addLayout(head)
 
-        self.status = BodyLabel("正在检查联机内核…")
+        self.status = BodyLabel(tr("正在检查联机内核…"))
         self.status.setWordWrap(True)
         root.addWidget(self.status)
 
@@ -71,21 +74,21 @@ class MultiplayerPage(QWidget):
         fw_box = QHBoxLayout(fw)
         fw_box.setContentsMargins(16, 12, 16, 12)
         fw_box.setSpacing(12)
-        fw_box.addWidget(IconTile("墙", "#E8862E", size=40))
+        fw_box.addWidget(IconTile(tr("墙"), "#E8862E", size=40))
         fw_text = QVBoxLayout()
         fw_text.setSpacing(2)
-        fw_text.addWidget(StrongBodyLabel("防火墙通常不会弹窗"))
+        fw_text.addWidget(StrongBodyLabel(tr("防火墙通常不会弹窗")))
         fw_hint = CaptionLabel(
-            "陶瓦在后台运行，Windows 不会提示。点「允许访问」后在 UAC 选是。"
-            "若装了 360 / 电脑管家 / 火绒，还要在它们的名单里放行陶瓦和 EasyTier。"
+            tr("陶瓦在后台运行，Windows 不会提示。点「允许访问」后在 UAC 选是。"
+            "若装了 360 / 电脑管家 / 火绒，还要在它们的名单里放行陶瓦和 EasyTier。")
         )
         fw_hint.setWordWrap(True)
         fw_text.addWidget(fw_hint)
         fw_box.addLayout(fw_text, 1)
-        self.fw_btn = PrimaryPushButton("允许访问")
+        self.fw_btn = PrimaryPushButton(tr("允许访问"))
         self.fw_btn.setFixedWidth(110)
         self.fw_btn.clicked.connect(self._allow_firewall)
-        fw_open = PushButton("打开设置")
+        fw_open = PushButton(tr("打开设置"))
         fw_open.setFixedWidth(90)
         fw_open.clicked.connect(self._open_firewall)
         fw_box.addWidget(self.fw_btn, 0, Qt.AlignVCenter)
@@ -96,11 +99,11 @@ class MultiplayerPage(QWidget):
         room_box = QVBoxLayout(self.room_card)
         room_box.setContentsMargins(18, 16, 18, 16)
         room_box.setSpacing(6)
-        room_box.addWidget(CaptionLabel("邀请码（点击复制）"))
+        room_box.addWidget(CaptionLabel(tr("邀请码（点击复制）")))
         self.room_label = SubtitleLabel("—")
         self.room_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.room_card.mousePressEvent = lambda e: self._copy(
-            self.room_label.text() if self.room_label.text() != "—" else "", "已复制")
+            self.room_label.text() if self.room_label.text() != "—" else "", tr("已复制"))
         room_box.addWidget(self.room_label)
         self.url_hint = CaptionLabel("")
         self.url_hint.setWordWrap(True)
@@ -113,7 +116,7 @@ class MultiplayerPage(QWidget):
         self.actions.setSpacing(10)
         root.addLayout(self.actions)
 
-        self.players_title = StrongBodyLabel("房间成员")
+        self.players_title = StrongBodyLabel(tr("房间成员"))
         root.addWidget(self.players_title)
         self.players = QVBoxLayout()
         self.players.setSpacing(8)
@@ -123,16 +126,16 @@ class MultiplayerPage(QWidget):
         root.addStretch(1)
 
         foot = QHBoxLayout()
-        link = TransparentPushButton("Terracotta 项目主页")
+        link = TransparentPushButton(tr("Terracotta 项目主页"))
         link.clicked.connect(self._open_home)
         foot.addWidget(link)
         foot.addStretch(1)
-        self.copy_label = CaptionLabel("Terracotta | 陶瓦联机  © burningtnt  ·  基于 EasyTier")
+        self.copy_label = CaptionLabel(tr("Terracotta | 陶瓦联机  © burningtnt  ·  基于 EasyTier"))
         foot.addWidget(self.copy_label)
         root.addLayout(foot)
 
         self.timer = QTimer(self)
-        self.timer.setInterval(700)
+        self.timer.setInterval(1200)
         self.timer.timeout.connect(self.reload)
         if hasattr(backend, "finished"):
             backend.finished.connect(self._on_task)
@@ -154,14 +157,14 @@ class MultiplayerPage(QWidget):
                 return fn() or {}
             except Exception as exc:
                 return {"state": "fatal", "label": str(exc), "error": str(exc)}
-        return {"state": "fatal", "label": "后端未接入陶瓦联机"}
+        return {"state": "fatal", "label": tr("后端未接入陶瓦联机")}
 
     def _on_task(self, task_id, success, message):
         title = ""
         fn = getattr(self.backend, "task_title", None)
         if callable(fn):
             title = str(fn(task_id) or "")
-        if "陶瓦" not in title:
+        if tr("陶瓦") not in title:
             return
         self._busy = False
         if not success:
@@ -184,7 +187,7 @@ class MultiplayerPage(QWidget):
         if source is not None:
             win = self.window()
             if hasattr(win, "fly_to_tasks"):
-                win.fly_to_tasks(source, "联", "#2E9B6B")
+                win.fly_to_tasks(source, tr("联"), "#2E9B6B")
         self.backend.terracotta_prepare()
 
     def _clear_layout(self, layout):
@@ -194,7 +197,7 @@ class MultiplayerPage(QWidget):
             if w is not None:
                 w.deleteLater()
 
-    def _copy(self, text: str, title="已复制"):
+    def _copy(self, text: str, title=tr("已复制")):
         text = (text or "").strip()
         if not text:
             return
@@ -217,10 +220,10 @@ class MultiplayerPage(QWidget):
             return
         try:
             msg = fn()
-            InfoBar.success("防火墙", str(msg), parent=self,
+            InfoBar.success(tr("防火墙"), str(msg), parent=self,
                             position=InfoBarPosition.TOP_RIGHT, duration=5000)
         except Exception as exc:
-            InfoBar.error("防火墙", str(exc), parent=self,
+            InfoBar.error(tr("防火墙"), str(exc), parent=self,
                           position=InfoBarPosition.TOP_RIGHT, duration=5000)
 
     def _host(self):
@@ -230,12 +233,12 @@ class MultiplayerPage(QWidget):
             try:
                 from qfluentwidgets import MessageBox
                 box = MessageBox(
-                    "您似乎忘记启动游戏了",
-                    "请先启动游戏，进入单人世界，按 ESC，选择对局域网开放。",
+                    tr("您似乎忘记启动游戏了"),
+                    tr("请先启动游戏，进入单人世界，按 ESC，选择对局域网开放。"),
                     self,
                 )
-                box.yesButton.setText("游戏已启动")
-                box.cancelButton.setText("取消")
+                box.yesButton.setText(tr("游戏已启动"))
+                box.cancelButton.setText(tr("取消"))
                 box_ok = bool(box.exec())
             except Exception:
                 box_ok = True
@@ -244,13 +247,13 @@ class MultiplayerPage(QWidget):
         try:
             self.backend.terracotta_host()
         except Exception as exc:
-            InfoBar.error("创建房间失败", str(exc), parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
+            InfoBar.error(tr("创建房间失败"), str(exc), parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
         self.reload()
 
     def _join(self):
         dlg = InputDialog(
-            "我想当房客",
-            "请输入房主提供的邀请码",
+            tr("我想当房客"),
+            tr("请输入房主提供的邀请码"),
             placeholder="U/XXXX-XXXX-XXXX-XXXX",
             parent=self,
         )
@@ -259,29 +262,29 @@ class MultiplayerPage(QWidget):
         try:
             self.backend.terracotta_join(dlg.value())
         except Exception as exc:
-            InfoBar.error("邀请码错误", str(exc), parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
+            InfoBar.error(tr("邀请码错误"), str(exc), parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
         self.reload()
 
     def _direct(self):
         dlg = InputDialog(
-            "公网直连",
-            "朋友需先对局域网开放世界，并在路由器映射该端口。然后输入他的公网地址。",
-            placeholder="例如 1.2.3.4:25565",
+            tr("公网直连"),
+            tr("朋友需先对局域网开放世界，并在路由器映射该端口。然后输入他的公网地址。"),
+            placeholder=tr("例如 1.2.3.4:25565"),
             parent=self,
         )
         if not (dlg.exec() and dlg.value()):
             return
         fn = getattr(self.backend, "terracotta_direct_connect", None)
         if not callable(fn):
-            InfoBar.error("直连失败", "当前版本没有公网直连。", parent=self,
+            InfoBar.error(tr("直连失败"), tr("当前版本没有公网直连。"), parent=self,
                           position=InfoBarPosition.TOP_RIGHT, duration=4000)
             return
         try:
             result = fn(dlg.value())
-            InfoBar.success("正在直连", str(result or "启动后会进入该服务器。"),
+            InfoBar.success(tr("正在直连"), str(result or tr("启动后会进入该服务器。")),
                             parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
         except Exception as exc:
-            InfoBar.error("直连失败", str(exc), parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
+            InfoBar.error(tr("直连失败"), str(exc), parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
 
     def _enter_world(self):
         fn = getattr(self.backend, "terracotta_enter_world", None)
@@ -290,24 +293,24 @@ class MultiplayerPage(QWidget):
         try:
             result = fn()
         except Exception as exc:
-            InfoBar.error("进入世界失败", str(exc), parent=self,
+            InfoBar.error(tr("进入世界失败"), str(exc), parent=self,
                           position=InfoBarPosition.TOP_RIGHT, duration=5000)
             return
         if isinstance(result, str) and result.startswith("task-"):
             win = self.window()
             if hasattr(win, "fly_to_tasks"):
-                win.fly_to_tasks(self, "进", "#2E9B6B")
-            InfoBar.success("正在启动游戏", "启动后会直接进入陶瓦联机大厅。",
+                win.fly_to_tasks(self, tr("进"), "#2E9B6B")
+            InfoBar.success(tr("正在启动游戏"), tr("启动后会直接进入陶瓦联机大厅。"),
                             parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
         else:
-            InfoBar.success("已加入房间", str(result or "请到多人游戏双击「陶瓦联机大厅」。"),
+            InfoBar.success(tr("已加入房间"), str(result or tr("请到多人游戏双击「陶瓦联机大厅」。")),
                             parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
 
     def _back(self):
         try:
             self.backend.terracotta_idle()
         except Exception as exc:
-            InfoBar.error("返回失败", str(exc), parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
+            InfoBar.error(tr("返回失败"), str(exc), parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
         self.reload()
 
     def _add_action(self, letter, color, title, desc, text, slot, primary=False):
@@ -317,7 +320,33 @@ class MultiplayerPage(QWidget):
         self.actions.addWidget(ActionCard(letter, color, title, desc, btn))
 
     def reload(self):
-        info = self._snapshot()
+        """定时轮询入口：快照放后台线程算，算完回 UI 线程渲染。
+
+        `terracotta.snapshot()` 会读包元数据、探安装状态、查进程存活，
+        原来每 700 ms 在 UI 线程里同步跑一次，页面开着就一直卡顿。
+        `_polling` 保证同一时刻只有一次在飞，慢一点也不会堆积。
+        """
+        call_async = getattr(self.backend, "call_async", None)
+        if not callable(call_async):
+            self._render(self._snapshot())
+            return
+        if self._polling:
+            return
+        self._polling = True
+
+        def done(info):
+            self._polling = False
+            if widget_alive(self):
+                self._render(info or {})
+
+        def failed(message):
+            self._polling = False
+            if widget_alive(self):
+                self._render({"state": "fatal", "label": str(message), "error": str(message)})
+
+        call_async(self._snapshot, done, failed)
+
+    def _render(self, info: dict):
         state = info.get("state") or "missing"
         if self._busy and state in ("missing", "idle"):
             state = "installing"
@@ -336,12 +365,9 @@ class MultiplayerPage(QWidget):
         }
         pill_text = info.get("label") or state
         if state in ("exception", "fatal"):
-            pill_text = "加入失败"
+            pill_text = tr("加入失败")
         self.state_pill.setText(pill_text)
-        self.state_pill.setStyleSheet(
-            f"color: white; background: {colors.get(state, '#888888')};"
-            " border-radius: 8px; padding: 1px 8px; font-size: 11px;"
-        )
+        self.state_pill.set_color(colors.get(state, "#888888"))
         status_text = info.get("error") or info.get("label") or ""
         if info.get("error_hint"):
             status_text = (info.get("error") or "") + "\n" + info["error_hint"]
@@ -352,11 +378,11 @@ class MultiplayerPage(QWidget):
         url = info.get("url") or ""
         if room or url:
             self.room_card.show()
-            self.room_label.setText(room or "陶瓦联机大厅")
+            self.room_label.setText(room or tr("陶瓦联机大厅"))
             if url:
-                self.url_hint.setText("请启动游戏，选择多人游戏，双击进入陶瓦联机大厅。")
+                self.url_hint.setText(tr("请启动游戏，选择多人游戏，双击进入陶瓦联机大厅。"))
             else:
-                self.url_hint.setText("请提醒好友在联机页选择「我想当房客」，并输入该邀请码。")
+                self.url_hint.setText(tr("请提醒好友在联机页选择「我想当房客」，并输入该邀请码。"))
         else:
             self.room_card.hide()
 
@@ -375,62 +401,62 @@ class MultiplayerPage(QWidget):
                 card = SimpleCardWidget()
                 line = QHBoxLayout(card)
                 line.setContentsMargins(14, 10, 14, 10)
-                kind = "房主" if str(row.get("kind") or "").upper() == "HOST" else "成员"
+                kind = tr("房主") if str(row.get("kind") or "").upper() == "HOST" else tr("成员")
                 line.addWidget(IconTile((row.get("name") or "?")[:1], "#2E9B6B", size=36))
                 box = QVBoxLayout()
                 box.setSpacing(1)
-                box.addWidget(StrongBodyLabel(row.get("name") or "玩家"))
+                box.addWidget(StrongBodyLabel(row.get("name") or tr("玩家")))
                 box.addWidget(CaptionLabel(row.get("vendor") or kind))
                 line.addLayout(box, 1)
                 line.addWidget(Pill(kind, "#4C8BF5"))
                 self.players.addWidget(card)
 
         if room and state == "host-ok" and self._last_state != "host-ok":
-            self._copy(room, "已将邀请码复制到剪贴板")
+            self._copy(room, tr("已将邀请码复制到剪贴板"))
         self._last_state = state
 
     def _fill_actions(self, state, info, room, url):
         if state == "unsupported":
-            self._add_action("!", "#D95568", "当前系统不支持", "陶瓦联机暂未提供此架构的官方内核。", "了解", self._open_home)
+            self._add_action("!", "#D95568", tr("当前系统不支持"), tr("陶瓦联机暂未提供此架构的官方内核。"), tr("了解"), self._open_home)
         elif state == "missing":
-            self._add_action("瓦", "#2E9B6B", "下载陶瓦联机内核",
-                             "首次使用需要下载约 8 MB 的官方内核，之后可直接开房。",
-                             "下载", lambda: self._prepare(self), primary=True)
+            self._add_action(tr("瓦"), "#2E9B6B", tr("下载陶瓦联机内核"),
+                             tr("首次使用需要下载约 8 MB 的官方内核，之后可直接开房。"),
+                             tr("下载"), lambda: self._prepare(self), primary=True)
         elif state == "idle":
-            self._add_action("▶", "#4C8BF5", "启动联机内核", "内核已安装，点一下即可开始联机。",
-                             "启动", lambda: self._prepare(self), primary=True)
+            self._add_action("▶", "#4C8BF5", tr("启动联机内核"), tr("内核已安装，点一下即可开始联机。"),
+                             tr("启动"), lambda: self._prepare(self), primary=True)
         elif state in ("launching", "unknown", "installing"):
-            self._add_action("…", "#888888", "请稍候", info.get("label") or "正在准备联机内核。", "刷新", self.reload)
+            self._add_action("…", "#888888", tr("请稍候"), info.get("label") or tr("正在准备联机内核。"), tr("刷新"), self.reload)
         elif state == "waiting":
-            self._add_action("房", "#2E9B6B", "我想当房主",
-                             "创建房间并生成邀请码，与好友一起畅玩。",
-                             "创建", self._host, primary=True)
-            self._add_action("客", "#4C8BF5", "我想当房客",
-                             "输入房主提供的邀请码加入游戏世界。",
-                             "加入", self._join)
+            self._add_action(tr("房"), "#2E9B6B", tr("我想当房主"),
+                             tr("创建房间并生成邀请码，与好友一起畅玩。"),
+                             tr("创建"), self._host, primary=True)
+            self._add_action(tr("客"), "#4C8BF5", tr("我想当房客"),
+                             tr("输入房主提供的邀请码加入游戏世界。"),
+                             tr("加入"), self._join)
         elif state in ("host-scanning", "host-starting"):
-            self._add_action("扫", "#E8862E", "正在扫描局域网世界",
-                             "请启动游戏，进入单人世界，按 ESC，选择对局域网开放。",
-                             "退出", self._back)
+            self._add_action(tr("扫"), "#E8862E", tr("正在扫描局域网世界"),
+                             tr("请启动游戏，进入单人世界，按 ESC，选择对局域网开放。"),
+                             tr("退出"), self._back)
         elif state == "host-ok":
-            self._add_action("复", "#2E9B6B", "复制邀请码", "好友在联机页选择房客并输入该邀请码即可加入。",
-                             "复制", lambda: self._copy(room, "已将邀请码复制到剪贴板"), primary=True)
-            self._add_action("返", "#888888", "退出", "这将同时彻底关闭房间，其他房客将退出。", "退出", self._back)
+            self._add_action(tr("复"), "#2E9B6B", tr("复制邀请码"), tr("好友在联机页选择房客并输入该邀请码即可加入。"),
+                             tr("复制"), lambda: self._copy(room, tr("已将邀请码复制到剪贴板")), primary=True)
+            self._add_action(tr("返"), "#888888", tr("退出"), tr("这将同时彻底关闭房间，其他房客将退出。"), tr("退出"), self._back)
         elif state in ("guest-connecting", "guest-starting"):
-            self._add_action("连", "#4C8BF5", "正在加入房间",
-                             info.get("difficulty_hint") or "正在与房主建立连接。",
-                             "退出", self._back)
+            self._add_action(tr("连"), "#4C8BF5", tr("正在加入房间"),
+                             info.get("difficulty_hint") or tr("正在与房主建立连接。"),
+                             tr("退出"), self._back)
         elif state == "guest-ok":
-            self._add_action("进", "#2E9B6B", "进入世界",
-                             "启动游戏后到多人游戏双击「陶瓦联机大厅」，或点这里直接进入。",
-                             "进入", self._enter_world, primary=True)
-            self._add_action("返", "#888888", "退出", "这不会影响其他房客加入当前房间。", "退出", self._back)
+            self._add_action(tr("进"), "#2E9B6B", tr("进入世界"),
+                             tr("启动游戏后到多人游戏双击「陶瓦联机大厅」，或点这里直接进入。"),
+                             tr("进入"), self._enter_world, primary=True)
+            self._add_action(tr("返"), "#888888", tr("退出"), tr("这不会影响其他房客加入当前房间。"), tr("退出"), self._back)
         elif state in ("exception", "fatal"):
-            self._add_action("!", "#D95568", "联机失败",
-                             info.get("error_hint") or info.get("error") or "请返回后重试，或检查网络。",
-                             "返回", self._back)
-            self._add_action("直", "#4C8BF5", "朋友是公网就直连",
-                             "让他把单人世界对局域网开放，并在路由映射该端口，然后填他的公网 IP:端口。",
-                             "直连", self._direct)
-            self._add_action("启", "#4C8BF5", "重新启动内核", "若内核已退出，点此重新拉起。",
-                             "重启", lambda: self._prepare(self))
+            self._add_action("!", "#D95568", tr("联机失败"),
+                             info.get("error_hint") or info.get("error") or tr("请返回后重试，或检查网络。"),
+                             tr("返回"), self._back)
+            self._add_action(tr("直"), "#4C8BF5", tr("朋友是公网就直连"),
+                             tr("让他把单人世界对局域网开放，并在路由映射该端口，然后填他的公网 IP:端口。"),
+                             tr("直连"), self._direct)
+            self._add_action(tr("启"), "#4C8BF5", tr("重新启动内核"), tr("若内核已退出，点此重新拉起。"),
+                             tr("重启"), lambda: self._prepare(self))

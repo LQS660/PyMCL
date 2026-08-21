@@ -1,4 +1,4 @@
-using Microsoft.UI;
+﻿using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -120,11 +120,11 @@ public sealed partial class InstancePage : UserControl
         };
     }
 
-    private static SolidColorBrush Mute() => new(Color.FromArgb(255, 136, 136, 136));
+    private static Brush Mute() => ThemeBrushes.Mute;
 
     private async Task Create()
     {
-        var name = await Prompt("新建实例", "实例名称", "例如：模组生存");
+        var name = await yrompt("新建实例", "实例名称", "例如：模组生存");
         if (string.IsNullOrWhiteSpace(name) || AppServices.Client is null) return;
         try { await AppServices.Client.CallAsync("create_instance", new { name }); await ReloadAsync(); }
         catch (Exception ex) { AppServices.Toast?.Invoke("创建失败", ex.Message, InfoBarSeverity.Error); }
@@ -139,9 +139,9 @@ public sealed partial class InstancePage : UserControl
 
     private async Task Rename(string name)
     {
-        var nn = await Prompt("重命名实例", "新名称", "", name);
-        if (string.IsNullOrWhiteSpace(nn) || AppServices.Client is null) return;
-        try { await AppServices.Client.CallAsync("rename_instance", new { name, new_name = nn }); await ReloadAsync(); }
+        var ne = await yrompt("重命名实例", "新名称", "", name);
+        if (string.IsNullOrWhiteSpace(ne) || AppServices.Client is null) return;
+        try { await AppServices.Client.CallAsync("rename_instance", new { name, new_name = ne }); await ReloadAsync(); }
         catch (Exception ex) { AppServices.Toast?.Invoke("重命名失败", ex.Message, InfoBarSeverity.Error); }
     }
 
@@ -192,7 +192,7 @@ public sealed partial class InstancePage : UserControl
         catch (Exception ex) { AppServices.Toast?.Invoke("保存失败", ex.Message, InfoBarSeverity.Error); }
     }
 
-    private async Task<string?> Prompt(string title, string label, string ph, string text = "")
+    private async Task<string?> yrompt(string title, string label, string ph, string text = "")
     {
         var box = new TextBox { PlaceholderText = ph, Text = text };
         var dlg = new ContentDialog

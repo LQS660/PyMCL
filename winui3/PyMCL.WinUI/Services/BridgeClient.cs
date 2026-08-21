@@ -8,6 +8,7 @@ namespace PyMCL.Services;
 
 public sealed class BridgeClient : IDisposable
 {
+    public const string TokenHeader = "X-PyMCL-Bridge-Token";
     private static readonly JsonSerializerOptions JsonOpt = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -17,22 +18,40 @@ public sealed class BridgeClient : IDisposable
 
     private readonly HttpClient _http;
     private readonly CancellationTokenSource _cts = new();
+    private readonly string _token;
     private int _id;
     private int _disposed;
 
     public Uri BaseUri { get; }
     public event EventHandler<BridgeEvent>? EventReceived;
 
-    public BridgeClient(Uri baseUri)
+    /// <summary>SSE 连接状态变化（true=已连上事件流）。断线期间进度/完成/角标全部收不到，界面需要据此提示。</summary>
+    public event EventHandler<bool>? EventStreamStateChanged;
+
+    public bool EventStreamConnected { get; private set; }
+
+    public BridgeClient(Uri baseUri, string token)
     {
+        if (baseUri.Scheme != Uri.UriSchemeHttp || baseUri.Host != "127.0.0.1" || baseUri.Port is < 1 or > 65535)
+            throw new ArgumentException("Bridge URI must use the local loopback HTTP endpoint.", nameof(baseUri));
+        if (string.IsNullOrWhiteSpace(token) || token.Length < 32)
+            throw new ArgumentException("Bridge token is missing or too short.", nameof(token));
         BaseUri = baseUri;
+        _token = token;
         _http = new HttpClient { BaseAddress = baseUri, Timeout = TimeSpan.FromMinutes(10) };
+        _http.DefaultRequestHeaders.TryAddWithoutValidation(TokenHeader, _token);
     }
 
     public async Task ConnectEventsAsync()
     {
         _ = Task.Run(ReadSseLoop);
         await Task.CompletedTask;
+    }
+
+    public async Task<bool> IsHealthyAsync(CancellationToken ct = default)
+    {
+        using var resp = await _http.GetAsync("/health", ct).ConfigureAwait(false);
+        return resp.IsSuccessStatusCode;
     }
 
     public async Task<JsonElement> CallAsync(string method, object? args = null, CancellationToken ct = default)
@@ -76,35 +95,69 @@ public sealed class BridgeClient : IDisposable
         return el.ToString();
     }
 
+    /// <summary>
+    /// 事件流读取 + 自动重连。以前读到流结束或抛异常就直接退出方法，此后进度、完成、
+    /// 角标、AI 流式全部静默失效，而界面上没有任何迹象——只能重开整个应用。
+    /// 现在按 1s→2s→…→15s 退避无限重连，与 Web 端行为一致。
+    /// </summary>
     private async Task ReadSseLoop()
     {
-        try
+        var attempt = 0;
+        while (!_cts.IsCancellationRequested)
         {
-            using var req = new HttpRequestMessage(HttpMethod.Get, "/events");
-            using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, _cts.Token).ConfigureAwait(false);
-            resp.EnsureSuccessStatusCode();
-            await using var stream = await resp.Content.ReadAsStreamAsync(_cts.Token).ConfigureAwait(false);
-            using var reader = new StreamReader(stream, Encoding.UTF8);
-            string? ev = null;
-            var data = new StringBuilder();
-            while (!_cts.IsCancellationRequested)
+            try
             {
-                var line = await reader.ReadLineAsync(_cts.Token).ConfigureAwait(false);
-                if (line is null) break;
-                if (line.StartsWith("event:", StringComparison.Ordinal))
-                    ev = line[6..].Trim();
-                else if (line.StartsWith("data:", StringComparison.Ordinal))
-                    data.Append(line[5..].Trim());
-                else if (line.Length == 0 && data.Length > 0)
-                {
-                    Raise(ev ?? "message", data.ToString());
-                    ev = null;
-                    data.Clear();
-                }
+                await ReadSseOnceAsync().ConfigureAwait(false);
+                attempt = 0;
+            }
+            catch (OperationCanceledException) { break; }
+            catch { /* 掉线，走下面的退避重连 */ }
+            finally
+            {
+                SetEventStreamState(false);
+            }
+
+            if (_cts.IsCancellationRequested) break;
+            attempt = Math.Min(attempt + 1, 5);
+            var delay = TimeSpan.FromSeconds(Math.Min(1 << (attempt - 1), 15));
+            try { await Task.Delay(delay, _cts.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) { break; }
+        }
+    }
+
+    private async Task ReadSseOnceAsync()
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/events");
+        req.Headers.TryAddWithoutValidation(TokenHeader, _token);
+        using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, _cts.Token).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+        await using var stream = await resp.Content.ReadAsStreamAsync(_cts.Token).ConfigureAwait(false);
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        SetEventStreamState(true);
+        string? ev = null;
+        var data = new StringBuilder();
+        while (!_cts.IsCancellationRequested)
+        {
+            var line = await reader.ReadLineAsync(_cts.Token).ConfigureAwait(false);
+            if (line is null) break;
+            if (line.StartsWith("event:", StringComparison.Ordinal))
+                ev = line[6..].Trim();
+            else if (line.StartsWith("data:", StringComparison.Ordinal))
+                data.Append(line[5..].Trim());
+            else if (line.Length == 0 && data.Length > 0)
+            {
+                Raise(ev ?? "message", data.ToString());
+                ev = null;
+                data.Clear();
             }
         }
-        catch (OperationCanceledException) { }
-        catch { /* 进程退出时断开 */ }
+    }
+
+    private void SetEventStreamState(bool connected)
+    {
+        if (EventStreamConnected == connected) return;
+        EventStreamConnected = connected;
+        try { EventStreamStateChanged?.Invoke(this, connected); } catch { }
     }
 
     private void Raise(string ev, string json)

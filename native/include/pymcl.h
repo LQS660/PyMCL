@@ -255,7 +255,7 @@ typedef void (*sse_emit_fn)(const char *event, cJSON *data);
 void backend_init(sse_emit_fn emit);
 cJSON *backend_call(const char *method, cJSON *params);
 void backend_shutdown(void);
-int server_run(const char *host, int port);
+int server_run(const char *host, int port, const char *token);
 
 #ifdef __cplusplus
 }

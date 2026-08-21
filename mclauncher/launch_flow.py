@@ -21,7 +21,7 @@ def prepare(instance, version_id, extra_game_args=None, memory_mb=None):
         extras += ["--server", str(settings["server"])]
         extras += ["--port", str(settings.get("port") or 25565)]
     mode = settings.get("window_mode") or CONFIG.get("window_mode") or "window"
-    if mode == "fullscreen" and "--fullscreen" not in extras:
+    if mode in version_settings.FULLSCREEN_MODES and "--fullscreen" not in extras:
         extras.append("--fullscreen")
     from . import gc as gc_mod
     jvm = gc_mod.apply(settings.get("gc") or CONFIG.get("gc_preset") or "auto",
@@ -39,7 +39,28 @@ def prepare(instance, version_id, extra_game_args=None, memory_mb=None):
         "nide8_id": settings.get("nide8_id") or "",
         "auth_server": settings.get("auth_server") or "",
         "window_mode": mode,
+        "window_width": _positive(settings.get("window_width")),
+        "window_height": _positive(settings.get("window_height")),
+        "window_title": (settings.get("window_title") or "").strip(),
     }
+
+
+def _positive(value):
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def resolve_resolution(prep, width=None, height=None):
+    """版本设置的窗口大小优先于调用方传入的全局分辨率；全屏时兜底到 1280x720。"""
+    w = prep.get("window_width") or width
+    h = prep.get("window_height") or height
+    if (prep.get("window_mode") or "window") in version_settings.FULLSCREEN_MODES:
+        w = max(int(w or 0), 1280)
+        h = max(int(h or 0), 720)
+    return w, h
 
 
 def run_hook(command: str, cwd, log=None, wait: bool = True) -> int:

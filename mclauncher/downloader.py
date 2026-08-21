@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""下载管理器：多线程、断点续传、sha1 校验、进度回调、失败换源。"""
+"""下载管理器：多线程、断点续传、哈希校验、进度回调、失败换源。"""
 import hashlib
 import os
 import re
@@ -306,7 +306,7 @@ class DownloadManager:
     # ------------------------------------------------------------ 单文件下载
 
     def download(self, url, dest, sha1=None, size=None, force=False, timeout=300,
-                 sha512=None, urls=None, expand=True) -> Path:
+                 sha512=None, sha256=None, urls=None, expand=True) -> Path:
         """
         下载单个文件到 dest。url 可以是单个地址，urls 为额外候选（默认展开 GitHub 镜像）。
         expand=False 时不改写候选（陶瓦等已自带国内源）。
@@ -329,7 +329,7 @@ class DownloadManager:
         try:
             with _path_lock(dest):
                 result, skipped = self._download_locked(
-                    candidates, dest, sha1, size, force, timeout, sha512, key,
+                    candidates, dest, sha1, size, force, timeout, sha512, sha256, key,
                 )
             self.tracker.finish_file(
                 key, size or (result.stat().st_size if result.is_file() else None),
@@ -342,17 +342,17 @@ class DownloadManager:
             self._notify_progress(force=True)
             raise
 
-    def _download_locked(self, urls, dest, sha1, size, force, timeout, sha512, key):
+    def _download_locked(self, urls, dest, sha1, size, force, timeout, sha512, sha256, key):
         if not force:
-            if sha1 or size is not None:
-                if utils.file_matches(dest, sha1, size):
-                    if not sha512 or utils.sha512_file(dest) == sha512.lower():
+            if sha1 or sha256 or size is not None:
+                if utils.file_matches(dest, sha1, size, sha256=sha256):
+                    if not sha512 or utils.sha512_file(dest).lower() == str(sha512).lower():
                         return dest, True
             elif dest.is_file() and _looks_complete(dest):
                 return dest, True
 
         part = dest.with_name(dest.name + ".part")
-        can_resume = bool(sha1 or sha512 or size is not None)
+        can_resume = bool(sha1 or sha256 or sha512 or size is not None)
         req_timeout = _request_timeout(timeout)
         last_err = None
         pending = deque((u, 0) for u in urls if u)
@@ -421,12 +421,15 @@ class DownloadManager:
                         self._notify_progress(force=True)
 
                         hasher_sha1 = hashlib.sha1() if sha1 else None
+                        hasher_sha256 = hashlib.sha256() if sha256 else None
                         hasher_sha512 = hashlib.sha512() if sha512 else None
-                        if resume and (hasher_sha1 or hasher_sha512):
+                        if resume and (hasher_sha1 or hasher_sha256 or hasher_sha512):
                             with open(part, "rb") as rf:
                                 for buf in iter(lambda: rf.read(1024 * 1024), b""):
                                     if hasher_sha1:
                                         hasher_sha1.update(buf)
+                                    if hasher_sha256:
+                                        hasher_sha256.update(buf)
                                     if hasher_sha512:
                                         hasher_sha512.update(buf)
 
@@ -440,22 +443,29 @@ class DownloadManager:
                                     f.write(chunk)
                                     if hasher_sha1:
                                         hasher_sha1.update(chunk)
+                                    if hasher_sha256:
+                                        hasher_sha256.update(chunk)
                                     if hasher_sha512:
                                         hasher_sha512.update(chunk)
                                     got += len(chunk)
                                     self.tracker.transfer(key, got, expected)
                                     self._notify_progress()
                                     self._pace(len(chunk))
-                        if expected and got != expected and not (sha1 or sha512):
+                        if expected and got != expected and not (sha1 or sha256 or sha512):
                             raise DownloadError(f"下载不完整 {url} ({got}/{expected})")
                     self.tracker.verify(dest.name)
                     self._notify_progress(force=True)
                     if hasher_sha1:
                         if hasher_sha1.hexdigest() != str(sha1).lower():
                             raise DownloadError(f"校验失败: {url} (期望 sha1={sha1}, size={size})")
-                    elif sha1 or size is not None:
-                        if not utils.file_matches(part, sha1, size):
+                    elif sha1 or sha256 or size is not None:
+                        if not utils.file_matches(part, sha1, size, sha256=sha256):
                             raise DownloadError(f"校验失败: {url} (期望 sha1={sha1}, size={size})")
+                    if hasher_sha256:
+                        if hasher_sha256.hexdigest() != str(sha256).lower():
+                            raise DownloadError(f"sha256 校验失败: {url}")
+                    elif sha256 and utils.sha256_file(part).lower() != str(sha256).lower():
+                        raise DownloadError(f"sha256 校验失败: {url}")
                     elif not _looks_complete(part):
                         raise DownloadError(f"下载内容无效: {url}")
                     if hasher_sha512:

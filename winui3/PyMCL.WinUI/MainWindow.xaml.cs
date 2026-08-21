@@ -19,8 +19,11 @@ public sealed partial class MainWindow : Window
     private InstancePage? _instance;
     private AccountPage? _account;
     private MultiplayerPage? _multiplayer;
+    private ServersPage? _servers;
+    private PlaytimePage? _playtime;
     private DownloadHubPage? _download;
     private AiPage? _ai;
+    private FeedbackPage? _feedback;
     private SettingsPage? _settings;
     private TasksPage? _tasks;
     private string _current = "launch";
@@ -37,9 +40,25 @@ public sealed partial class MainWindow : Window
         AppServices.Dispatcher = DispatcherQueue;
         AppServices.Toast = ShowToast;
         AppServices.OpenDownload = OpenDownload;
+        AppServices.FlyToTasks = FlyToTasks;
         ApplyChrome();
         if (Content is FrameworkElement root)
             root.Loaded += OnLoaded;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hwnd);
+
+    /// <summary>当前窗口的 DPI 缩放比（96 DPI = 1.0）。</summary>
+    private double WindowScale()
+    {
+        try
+        {
+            var dpi = GetDpiForWindow(AppServices.WindowHandle);
+            if (dpi >= 48) return dpi / 96.0;
+        }
+        catch { }
+        return 1.0;
     }
 
     private void ApplyChrome()
@@ -50,7 +69,11 @@ public sealed partial class MainWindow : Window
             AppServices.WindowHandle = hwnd;
             var id = Win32Interop.GetWindowIdFromWindow(hwnd);
             var app = AppWindow.GetFromWindowId(id);
-            app.Resize(new Windows.Graphics.SizeInt32(1180, 760));
+            // AppWindow.Resize 收的是物理像素。以前直接写死 1180x760，在 150% 缩放的屏幕上
+            // 只有 787x507 DIP，窗口明显偏小、内容挤成一团。这里按实际 DPI 折算。
+            var scale = WindowScale();
+            app.Resize(new Windows.Graphics.SizeInt32(
+                (int)Math.Round(1180 * scale), (int)Math.Round(760 * scale)));
             ExtendsContentIntoTitleBar = true;
             SetTitleBar(AppTitleBar);
             var tb = app.TitleBar;
@@ -59,6 +82,7 @@ public sealed partial class MainWindow : Window
             tb.ButtonInactiveBackgroundColor = Colors.Transparent;
             tb.ButtonHoverBackgroundColor = Color.FromArgb(24, 0, 0, 0);
             tb.ButtonPressedBackgroundColor = Color.FromArgb(48, 0, 0, 0);
+            UpdateTitleBarInset();
         }
         catch { }
 
@@ -79,12 +103,16 @@ public sealed partial class MainWindow : Window
             AppServices.Host = await BridgeHost.StartAsync();
             AppServices.Client = AppServices.Host.Client;
             AppServices.Client.EventReceived += OnBridgeEvent;
+            AppServices.Client.EventStreamStateChanged += OnEventStreamStateChanged;
             _launch = new LaunchPage();
             _instance = new InstancePage();
             _account = new AccountPage();
             _multiplayer = new MultiplayerPage();
+            _servers = new ServersPage();
+            _playtime = new PlaytimePage();
             _download = new DownloadHubPage();
             _ai = new AiPage();
+            _feedback = new FeedbackPage();
             _settings = new SettingsPage();
             _tasks = new TasksPage();
             NavView.SelectedItem = NavView.MenuItems[0];
@@ -113,12 +141,38 @@ public sealed partial class MainWindow : Window
 
     private void ContentRoot_SizeChanged(object sender, SizeChangedEventArgs e)
     {
+        // 跨屏拖动导致 DPI 变化时也会走到这里，顺便重算标题栏让位宽度。
+        UpdateTitleBarInset();
+        if (FlyLayer != null)
+        {
+            FlyLayer.Width = e.NewSize.Width;
+            FlyLayer.Height = e.NewSize.Height;
+        }
         if (_dockSizing) return;
         var next = Math.Clamp(Math.Max(0, e.NewSize.Width - 32), 1, 640);
         if (Math.Abs(DockHost.Width - next) < 0.5) return;
         _dockSizing = true;
         DockHost.Width = next;
         _dockSizing = false;
+    }
+
+    /// <summary>
+    /// 标题栏右侧要给系统的最小化/最大化/关闭三颗按钮让位。以前 XAML 里硬编码
+    /// Padding="0,0,138,0"，那是 100% 缩放下的经验值：放大后让不够、标题被按钮压住，
+    /// 缩小后又空出一大块。改成读系统给出的 RightInset（物理像素）再折算成 DIP。
+    /// </summary>
+    private void UpdateTitleBarInset()
+    {
+        try
+        {
+            var app = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(AppServices.WindowHandle));
+            var inset = app.TitleBar.RightInset;
+            if (inset <= 0) return;
+            var right = inset / WindowScale();
+            if (Math.Abs(AppTitleBar.Padding.Right - right) < 0.5) return;
+            AppTitleBar.Padding = new Thickness(0, 0, right, 0);
+        }
+        catch { }
     }
 
     private void Nav_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
@@ -137,8 +191,11 @@ public sealed partial class MainWindow : Window
             "instance" => _instance,
             "account" => _account,
             "multiplayer" => _multiplayer,
+            "servers" => _servers,
+            "playtime" => _playtime,
             "download" => _download,
             "ai" => _ai,
+            "feedback" => _feedback,
             "settings" => _settings,
             "tasks" => _tasks,
             _ => null,
@@ -161,19 +218,46 @@ public sealed partial class MainWindow : Window
         if (ReferenceEquals(ContentFrame.Content, page) && page.Opacity >= 0.99)
             return;
         var gen = ++_navGen;
-        ContentFrame.ContentTransitions.Clear();
         UIElement? old = ContentFrame.Content as UIElement;
-        if (old != null && !ReferenceEquals(old, page))
-            await Motion.PageOutAsync(old);
+        if (old != null && !ReferenceEquals(old, page) && Motion.AnimationsWanted())
+        {
+            var outTask = Motion.PageOutAsync(old);
+            await Task.WhenAny(outTask, Task.Delay(90));
+        }
+        else if (old != null && !ReferenceEquals(old, page))
+            Motion.ResetVisual(old);
         if (gen != _navGen)
         {
             Motion.ResetVisual(old);
             return;
         }
         ContentFrame.Content = page;
-        await Motion.PageInAsync(page);
+        if (Motion.AnimationsWanted())
+            await Motion.PageInAsync(page);
+        else
+            Motion.ResetVisual(page);
         if (gen != _navGen)
             Motion.ResetVisual(page);
+    }
+
+    public async void FlyToTasks(FrameworkElement? source, string text, string? colorHex = null)
+    {
+        try
+        {
+            if (AppServices.Client is null || FlyLayer is null) return;
+            var s = await AppServices.Client.CallAsync<SettingsDto>("get_settings");
+            if (s is not null && !s.UiFlyAnimation) return;
+            var duration = s?.UiFlyDurationMs is > 0 ? s.UiFlyDurationMs : 620;
+            var tasksItem = FindNav("tasks");
+            if (tasksItem is null || source is null) return;
+            var color = FlyAnim.ParseColor(colorHex, Color.FromArgb(255, 46, 155, 107));
+            var letter = string.IsNullOrWhiteSpace(text) ? "↓" : text.Trim()[..1];
+            FlyAnim.FlyTo(FlyLayer, source, tasksItem, letter, color, duration, () =>
+            {
+                _ = Motion.PulseOnceAsync(TaskBadge);
+            });
+        }
+        catch { }
     }
 
     private NavigationViewItem? FindNav(string key)
@@ -201,11 +285,40 @@ public sealed partial class MainWindow : Window
             else if (_current == "instance") await (_instance?.ReloadAsync() ?? Task.CompletedTask);
             else if (_current == "account") await (_account?.ReloadAsync() ?? Task.CompletedTask);
             else if (_current == "multiplayer") await (_multiplayer?.ReloadAsync() ?? Task.CompletedTask);
+            else if (_current == "servers") await (_servers?.ReloadAsync() ?? Task.CompletedTask);
+            else if (_current == "playtime") await (_playtime?.ReloadAsync() ?? Task.CompletedTask);
             else if (_current == "download") _download?.ReloadCurrent();
             else if (_current == "ai") await (_ai?.ReloadAsync() ?? Task.CompletedTask);
+            else if (_current == "feedback") await (_feedback?.ReloadAsync() ?? Task.CompletedTask);
             else if (_current == "settings") await (_settings?.ReloadAsync() ?? Task.CompletedTask);
         }
         catch { }
+    }
+
+    private bool _sseWasConnected;
+
+    /// <summary>
+    /// 事件流断开时进度/完成/角标全部收不到，界面必须说一声，否则用户只会觉得
+    /// 「下载卡住了」。重连成功后刷新一次当前页，把断线期间错过的状态补上。
+    /// </summary>
+    private void OnEventStreamStateChanged(object? sender, bool connected)
+    {
+        AppServices.OnUi(() =>
+        {
+            if (connected)
+            {
+                if (_sseWasConnected)
+                {
+                    ShowToast("已重新连接", "后端事件流恢复，正在刷新状态", InfoBarSeverity.Success);
+                    _ = ReloadCurrentAsync();
+                }
+                _sseWasConnected = true;
+            }
+            else if (_sseWasConnected)
+            {
+                ShowToast("后端连接中断", "正在自动重连，期间进度可能不更新", InfoBarSeverity.Warning);
+            }
+        });
     }
 
     private void OnBridgeEvent(object? sender, BridgeEvent ev)
@@ -240,7 +353,9 @@ public sealed partial class MainWindow : Window
                 var title = ev.Title;
                 if (!string.IsNullOrEmpty(ev.TaskId))
                     title = _tasks?.TitleOf(ev.TaskId) ?? title;
-                if (!string.IsNullOrEmpty(title) && title.StartsWith("启动游戏", StringComparison.Ordinal))
+                // 「启动游戏」和「微软登录」不是下载任务，退游戏/登录完成不该弹 toast。
+                // 以前只挡了前者，登录一完成就冒一条，PySide6 两个都挡。
+                if (!string.IsNullOrEmpty(title) && IsSilentTask(title))
                     return;
                 if (ev.Success)
                     ShowToast(string.IsNullOrEmpty(title) ? "完成" : title, ev.Message, InfoBarSeverity.Success);
@@ -250,17 +365,48 @@ public sealed partial class MainWindow : Window
         });
     }
 
+    /// <summary>非下载类任务：不进底部下载条、不列进任务页，也不弹完成 toast。</summary>
+    internal static bool IsSilentTask(string? title) =>
+        !string.IsNullOrEmpty(title)
+        && (title.StartsWith("启动游戏", StringComparison.Ordinal)
+            || title.StartsWith("微软登录", StringComparison.Ordinal));
+
+    private const int DockLogMaxLines = 2500;
+
+    /// <summary>
+    /// 往下载条日志里追加一行。以前是裸 <c>DockLog.Text +=</c>，字符串不可变，
+    /// 装大整合包上千行日志就是 O(n²) 拼接，越到后面越卡；而且永不清理。
+    /// 这里超过上限就丢掉最老的一批，对齐 PySide6 的 setMaximumBlockCount(2500)。
+    /// </summary>
+    private void AppendDockLog(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        _dockLogLines.Add(text);
+        if (_dockLogLines.Count > DockLogMaxLines)
+            _dockLogLines.RemoveRange(0, _dockLogLines.Count - DockLogMaxLines);
+        DockLog.Text = string.Join('\n', _dockLogLines);
+    }
+
+    private void ClearDockLog()
+    {
+        _dockLogLines.Clear();
+        DockLog.Text = "";
+    }
+
+    private readonly List<string> _dockLogLines = new();
+
     private void HandleDock(BridgeEvent ev)
     {
         if (ev.Event == "task_added" && !string.IsNullOrEmpty(ev.TaskId))
         {
+            if (IsSilentTask(ev.Title)) return;
             _dockActive[ev.TaskId] = ev.Title;
             DockTitle.Text = $"下载任务（{_dockActive.Count}）";
             DockStatus.Text = ev.Title;
             DockProgress.Value = 0;
             DockSpeed.Text = "";
-            if (_dockActive.Count == 1) DockLog.Text = "";
-            DockLog.Text += $"—— {ev.Title} ——\n";
+            if (_dockActive.Count == 1) ClearDockLog();
+            AppendDockLog($"—— {ev.Title} ——");
             if (ev.Title.Contains("整合包") && !_dockExpanded)
             {
                 _dockExpanded = true;
@@ -279,12 +425,14 @@ public sealed partial class MainWindow : Window
         }
         else if (ev.Event == "log" && _dockActive.ContainsKey(ev.TaskId) && !string.IsNullOrEmpty(ev.Text))
         {
-            DockLog.Text += ev.Text + "\n";
+            AppendDockLog(ev.Text);
         }
         else if (ev.Event == "finished")
         {
-            _dockActive.Remove(ev.TaskId);
-            if (!string.IsNullOrEmpty(ev.Message)) DockLog.Text += ev.Message + "\n";
+            // 只处理确实进过下载条的任务。以前这个分支对任何任务都执行，
+            // 于是退游戏时下载条会闪一下「✔ 全部完成」，日志区还被塞进游戏的退出消息。
+            if (!_dockActive.Remove(ev.TaskId)) return;
+            if (!string.IsNullOrEmpty(ev.Message)) AppendDockLog(ev.Message);
             if (_dockActive.Count == 0)
             {
                 DockTitle.Text = "下载任务";
@@ -339,12 +487,52 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private readonly Queue<(string Title, string Message, InfoBarSeverity Sev)> _toastQueue = new();
+    private DispatcherTimer? _toastTimer;
+
+    /// <summary>
+    /// 全局只有一个 InfoBar 当 toast。以前新消息直接盖掉旧消息（连着来两条就只看得到后一条），
+    /// 而且从不自动关闭，用户不点 X 就一直挂在界面上挡内容。
+    /// 现在改成排队逐条显示 + 到点自动关闭；错误留久一点，方便看清。
+    /// </summary>
     public void ShowToast(string title, string message, InfoBarSeverity sev)
     {
+        _toastQueue.Enqueue((title, message, sev));
+        if (!ToastBar.IsOpen) DequeueToast();
+    }
+
+    private void DequeueToast()
+    {
+        _toastTimer?.Stop();
+        if (_toastQueue.Count == 0)
+        {
+            ToastBar.IsOpen = false;
+            return;
+        }
+        var (title, message, sev) = _toastQueue.Dequeue();
         ToastBar.Title = title;
         ToastBar.Message = message;
         ToastBar.Severity = sev;
         ToastBar.IsOpen = true;
+
+        _toastTimer ??= new DispatcherTimer();
+        _toastTimer.Interval = TimeSpan.FromSeconds(sev == InfoBarSeverity.Error ? 8 : 4);
+        _toastTimer.Tick -= ToastTimer_Tick;
+        _toastTimer.Tick += ToastTimer_Tick;
+        _toastTimer.Start();
+    }
+
+    private void ToastTimer_Tick(object? sender, object e)
+    {
+        _toastTimer?.Stop();
+        ToastBar.IsOpen = false;
+        if (_toastQueue.Count > 0) DequeueToast();
+    }
+
+    private void ToastBar_Closed(InfoBar sender, InfoBarClosedEventArgs args)
+    {
+        _toastTimer?.Stop();
+        if (_toastQueue.Count > 0) DequeueToast();
     }
 
     public static void SplitMsg(string? message, out string status, out string speed)

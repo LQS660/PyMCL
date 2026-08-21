@@ -11,6 +11,7 @@ from qfluentwidgets import (
 from mclauncher.config import CONFIG
 from ..widgets import EmptyState, InputDialog, Pill
 from .modpack_page import ResultCard
+from mclauncher.i18n import tr
 
 
 class ModPage(QWidget):
@@ -25,14 +26,14 @@ class ModPage(QWidget):
 
         head = QHBoxLayout()
         title_box = QVBoxLayout()
-        title_box.addWidget(SubtitleLabel("模组"))
-        self.subtitle = CaptionLabel("为当前实例增添玩法")
+        title_box.addWidget(SubtitleLabel(tr("模组")))
+        self.subtitle = CaptionLabel(tr("为当前实例增添玩法"))
         title_box.addWidget(self.subtitle)
         head.addLayout(title_box, 1)
         self.instance_box = ComboBox()
         self.instance_box.setFixedWidth(160)
-        self.link_btn = TransparentPushButton(FIF.LINK, "从链接安装")
-        self.local_btn = TransparentPushButton(FIF.FOLDER, "导入本地 jar")
+        self.link_btn = TransparentPushButton(FIF.LINK, tr("从链接安装"))
+        self.local_btn = TransparentPushButton(FIF.FOLDER, tr("导入本地 jar"))
         head.addWidget(self.instance_box, 0)
         head.addWidget(self.link_btn, 0)
         head.addWidget(self.local_btn, 0)
@@ -45,7 +46,7 @@ class ModPage(QWidget):
         self.source_seg.addItem("curseforge", "CurseForge")
         self.source_seg.setCurrentItem("modrinth")
         self.search = SearchLineEdit()
-        self.search.setPlaceholderText("搜索模组，回车搜索…")
+        self.search.setPlaceholderText(tr("搜索模组，回车搜索…"))
         bar.addWidget(self.source_seg)
         bar.addWidget(self.search, 1)
         root.addLayout(bar)
@@ -57,7 +58,7 @@ class ModPage(QWidget):
         left = QVBoxLayout(left_card)
         left.setContentsMargins(16, 14, 16, 14)
         left.setSpacing(10)
-        left.addWidget(StrongBodyLabel("搜索结果（点击安装）"))
+        left.addWidget(StrongBodyLabel(tr("搜索结果（点击安装）")))
         scroll = ScrollArea()
         scroll.setWidgetResizable(True)
         host = QWidget()
@@ -73,9 +74,9 @@ class ModPage(QWidget):
         right.setContentsMargins(16, 14, 16, 14)
         right.setSpacing(10)
         head2 = QHBoxLayout()
-        head2.addWidget(StrongBodyLabel("已安装模组"))
+        head2.addWidget(StrongBodyLabel(tr("已安装模组")))
         head2.addStretch(1)
-        self.count_pill = Pill("0 个", "#4C8BF5")
+        self.count_pill = Pill(tr("0 个"), "#4C8BF5")
         head2.addWidget(self.count_pill)
         right.addLayout(head2)
         self.installed_layout = QVBoxLayout()
@@ -125,7 +126,7 @@ class ModPage(QWidget):
         if not query:
             self._render_mods(self.backend.search_mods("", source))
             return
-        self.list_layout.addWidget(EmptyState(FIF.SEARCH, "搜索中…"))
+        self.list_layout.addWidget(EmptyState(FIF.SEARCH, tr("搜索中…")))
         self.backend.call_async(
             lambda: self.backend.search_mods(query, source),
             self._render_mods,
@@ -138,7 +139,7 @@ class ModPage(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         if not results:
-            self.list_layout.addWidget(EmptyState(FIF.SEARCH, "没有找到相关模组"))
+            self.list_layout.addWidget(EmptyState(FIF.SEARCH, tr("没有找到相关模组")))
             return
         for m in results:
             self.list_layout.addWidget(ResultCard(m, self._install))
@@ -153,13 +154,13 @@ class ModPage(QWidget):
         mods = self.backend.get_installed_mods(self._current_instance())
         self.count_pill.setText(f"{len(mods)} 个")
         if not mods:
-            self.installed_layout.addWidget(EmptyState(FIF.TAG, "还没有安装模组"))
+            self.installed_layout.addWidget(EmptyState(FIF.TAG, tr("还没有安装模组")))
             return
         for name in mods:
             row = QHBoxLayout()
             row.addWidget(CaptionLabel(name), 1)
             btn = TransparentToolButton(FIF.DELETE)
-            btn.setToolTip("删除")
+            btn.setToolTip(tr("删除"))
             btn.clicked.connect(lambda _, n=name: self._delete_mod(n))
             row.addWidget(btn)
             wrap = QWidget()
@@ -170,7 +171,7 @@ class ModPage(QWidget):
         try:
             self.backend.delete_mod(self._current_instance(), name)
         except Exception as e:
-            MessageBox("删除失败", str(e), self).exec()
+            MessageBox(tr("删除失败"), str(e), self).exec()
         self.reload_installed()
 
     def _install(self, item: dict):
@@ -180,7 +181,7 @@ class ModPage(QWidget):
         self.backend.install_mod(item.get("name") or "", self._current_instance(), extra=extra)
 
     def _install_from_link(self):
-        dlg = InputDialog("从链接安装", "模组下载链接 (URL)",
+        dlg = InputDialog(tr("从链接安装"), tr("模组下载链接 (URL)"),
                           placeholder="https://…/mod.jar", parent=self)
         if dlg.exec() and dlg.value():
             url = dlg.value()
@@ -188,7 +189,7 @@ class ModPage(QWidget):
             self.backend.install_mod(url, self._current_instance(), extra=extra)
 
     def _import_local(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "选择模组 jar", "", "模组 (*.jar)")
+        paths, _ = QFileDialog.getOpenFileNames(self, tr("选择模组 jar"), "", tr("模组 (*.jar)"))
         for p in paths:
             extra = {"path": p, "instance": self._current_instance()}
             self.backend.install_mod(p, self._current_instance(), extra=extra)

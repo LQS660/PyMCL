@@ -1,68 +1,59 @@
 # -*- coding: utf-8 -*-
-"""内置帮助：启动、模组、隔离、账号、联机。"""
+"""轻量帮助 / 常见问题（对齐 PCL「能查到答案」的最低体验，不做独立帮助站）。"""
 from __future__ import annotations
 
-ARTICLES = [
+ARTICLES: list[dict] = [
     {
-        "id": "install",
-        "title": "安装游戏",
+        "id": "launch-fail",
+        "title": "启动失败 / 闪退怎么办",
         "body": (
-            "打开「下载 → 原版游戏」，选 Minecraft 版本后点安装。\n"
-            "安装向导可同时勾选 Forge / Fabric 与 OptiFine。\n"
-            "Forge + OptiFine：先装 Forge，再把 OptiFine 放进 mods。\n"
-            "加载器版本可在向导里挑选，不必总用最新。\n"
-            "「跳过资源校验」适合已经下过 assets 的机器，加快重装。"
+            "1. 看崩溃弹窗里的「建议操作」，能禁用嫌疑 Mod、提高内存、下载合适 Java、修复版本文件。\n"
+            "2. 启动页点启动前会做预检：磁盘不足、Mods 被解压成文件夹、Java 过旧会直接拦住。\n"
+            "3. 仍不行：到「反馈」页把错误报告发给开发者（同意上传后才会发送）。"
+        ),
+    },
+    {
+        "id": "java",
+        "title": "Java 怎么选",
+        "body": (
+            "启动时默认自动匹配。也可在「下载 → Java」按版本下载：\n"
+            "· Java 8：1.16 及更早\n"
+            "· Java 17：1.18 – 1.20.4\n"
+            "· Java 21：1.20.5+\n"
+            "发行版推荐 Adoptium；也可用 Zulu / Microsoft。"
         ),
     },
     {
         "id": "mods",
-        "title": "模组与整合包",
+        "title": "模组 / 整合包安装",
         "body": (
-            "搜索结果点「安装」会打开版本选择页，可按 MC 版本 / 加载器筛选文件。\n"
-            "点某一行即可安装指定 build，而不是永远装最新。\n"
-            "整合包建议新建实例再装，避免和旧模组混在一起。\n"
-            "已安装模组支持开关（.disabled）和检查更新（Modrinth + CurseForge）。"
-        ),
-    },
-    {
-        "id": "isolation",
-        "title": "版本隔离",
-        "body": (
-            "关闭：所有版本共用实例目录。\n"
-            "隔离存档：各版本独立 saves，mods 等仍共用。\n"
-            "隔离 Mod：独立 mods/config，存档共用。\n"
-            "隔离全部：该版本拥有完整游戏目录。\n"
-            "可在版本设置里改，也可以设「新版本默认隔离」。"
+            "到「下载」页搜索 Modrinth / CurseForge（国内走镜像）。\n"
+            "原版版本不会加载 mods 文件夹里的 jar，需要先装 Fabric / Forge / Quilt / NeoForge。\n"
+            "不要把 .jar 解压成文件夹，否则会预检失败。"
         ),
     },
     {
         "id": "account",
-        "title": "账号",
+        "title": "账号与正版登录",
         "body": (
-            "微软：设备码登录，会自动打开浏览器。\n"
-            "皮肤站：Little Skin 或自建 Yggdrasil，走 authlib-injector。\n"
-            "统一通行证：填写 32 位服务器 ID、账号密码。\n"
-            "离线：可指定 Steve / Alex 模型。\n"
-            "版本设置可绑定该版本启动时使用的账号。"
+            "支持离线、微软设备码、皮肤站（Yggdrasil）、统一通行证（Nide8）。\n"
+            "微软登录请按弹窗打开链接并输入代码；关掉窗口会取消后台轮询。"
         ),
     },
     {
-        "id": "launch",
-        "title": "启动与内存",
+        "id": "multiplayer",
+        "title": "陶瓦联机",
         "body": (
-            "启动器可见性：游戏启动后可关闭、隐藏、最小化或保持窗口。\n"
-            "GC：G1 / 调优 G1 / ZGC / 不指定，写在默认 JVM 或版本 JVM 前。\n"
-            "窗口模式：窗口、全屏、最大化、与启动器一致。\n"
-            "启动前命令可选「不等待」。\n"
-            "崩溃后可在帮助旁的崩溃对话框导出报告。"
+            "「联机」页可开房 / 加入。房间号形如 U/XXXX-XXXX-XXXX-XXXX。\n"
+            "双方都要用兼容的陶瓦内核；防火墙提示按页面指引放行。"
         ),
     },
     {
-        "id": "lan",
-        "title": "联机",
+        "id": "isolation",
+        "title": "版本隔离与存档",
         "body": (
-            "陶瓦联机用于 P2P 房间码。官方 PCL 联机大厅已关闭，不会再做旧房间互通。\n"
-            "局域网：对方用「直接连接」填你的 IP:端口。"
+            "每个实例是独立的 .minecraft。版本设置里可选隔离档位。\n"
+            "存档可在版本相关对话框里备份 / 还原；删世界前建议先备份。"
         ),
     },
 ]
@@ -72,8 +63,21 @@ def list_articles() -> list[dict]:
     return [{"id": a["id"], "title": a["title"]} for a in ARTICLES]
 
 
-def get_article(article_id: str) -> dict:
+def get_article(article_id: str) -> dict | None:
+    aid = (article_id or "").strip()
     for a in ARTICLES:
-        if a["id"] == article_id:
+        if a["id"] == aid:
             return dict(a)
-    return dict(ARTICLES[0])
+    return None
+
+
+def search_articles(query: str = "") -> list[dict]:
+    q = (query or "").strip().lower()
+    if not q:
+        return [dict(a) for a in ARTICLES]
+    out = []
+    for a in ARTICLES:
+        blob = (a["title"] + "\n" + a["body"]).lower()
+        if q in blob:
+            out.append(dict(a))
+    return out
