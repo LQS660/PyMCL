@@ -25,23 +25,62 @@ KIND_CF = {
 CF_CLASS_WORLD = 17
 _MC_VER = re.compile(r"^\d+\.\d+")
 _LOADERS = {"forge", "fabric", "quilt", "neoforge", "rift", "liteloader", "cauldron", "nonspecific"}
+# 类型筛选统一用 canonical key（英文），UI 层把下拉框的 key 传进来；
+# 中文键只作为旧调用方的兼容入口保留，避免 tr() 翻译后查表失配。
 TYPE_FACETS = {
-    "优化": ["optimization"],
-    "科技": ["technology"],
-    "魔法": ["magic"],
-    "冒险": ["adventure"],
-    "生存": ["utility", "food"],
-    "装饰": ["decoration"],
-    "写实": ["realistic"],
-    "卡通": ["cartoon"],
-    "高性能": ["performance"],
-    "光追": ["path-tracing", "pbr"],
+    "optimization": ["optimization"],
+    "technology": ["technology"],
+    "magic": ["magic"],
+    "adventure": ["adventure"],
+    "survival": ["utility", "food"],
+    "decoration": ["decoration"],
+    "realistic": ["realistic"],
+    "cartoon": ["cartoon"],
+    "performance": ["performance"],
+    "path-tracing": ["path-tracing", "pbr"],
     "16x": ["16x"],
     "32x": ["32x"],
     "64x": ["64x"],
-    "现代风": ["modern"],
-    "动态效果": ["animated"],
-    "空岛": ["skyblock"],
+    "modern": ["modern"],
+    "animated": ["animated"],
+    "skyblock": ["skyblock"],
+    "creation": ["creation"],
+}
+_TYPE_ALIASES = {
+    "优化": "optimization",
+    "科技": "technology",
+    "魔法": "magic",
+    "冒险": "adventure",
+    "生存": "survival",
+    "装饰": "decoration",
+    "写实": "realistic",
+    "卡通": "cartoon",
+    "高性能": "performance",
+    "光追": "path-tracing",
+    "现代风": "modern",
+    "动态效果": "animated",
+    "空岛": "skyblock",
+    "创造": "creation",
+}
+# canonical key 在 CurseForge 结果里做客户端过滤时的展示名碎片。
+CF_TYPE_TOKENS = {
+    "optimization": ["performance", "optimization"],
+    "technology": ["technology", "tech"],
+    "magic": ["magic"],
+    "adventure": ["adventure"],
+    "survival": ["survival", "util", "food"],
+    "decoration": ["decor"],
+    "realistic": ["realistic"],
+    "cartoon": ["cartoon", "animated"],
+    "performance": ["performance"],
+    "path-tracing": ["path tracing", "shader"],
+    "16x": ["16x"],
+    "32x": ["32x"],
+    "64x": ["64x"],
+    "modern": ["modern"],
+    "animated": ["animated"],
+    "skyblock": ["skyblock"],
+    "creation": ["creation"],
 }
 CF_RELEASE = {1: "release", 2: "beta", 3: "alpha"}
 
@@ -107,7 +146,7 @@ def _kind_of(extra: dict) -> str:
 def _game_version(extra: dict) -> str | None:
     gv = extra.get("game_version") or extra.get("mc_version") or extra.get("version") or ""
     gv = str(gv).strip()
-    if not gv or gv.startswith("全部"):
+    if not gv or gv.lower().startswith(("全部", "all")):
         return None
     return gv
 
@@ -204,10 +243,27 @@ def _list_cf(dm, extra):
     return rows
 
 
-def category_facets(label: str) -> list[str]:
-    if not label or label == "全部":
+def type_key(label) -> str:
+    """把 UI 传来的类型标签（canonical key / 中文 / 翻译文本）归一成 canonical key。"""
+    s = str(label or "").strip().lower()
+    if not s or s in ("全部", "all", "any"):
+        return ""
+    return _TYPE_ALIASES.get(s, s)
+
+
+def category_facets(label) -> list[str]:
+    key = type_key(label)
+    if not key:
         return []
-    return list(TYPE_FACETS.get(label) or [])
+    return list(TYPE_FACETS.get(key) or [])
+
+
+def cf_category_tokens(label) -> list[str]:
+    """CurseForge 客户端过滤用的展示名碎片。"""
+    key = type_key(label)
+    if not key:
+        return []
+    return list(CF_TYPE_TOKENS.get(key) or [])
 
 
 def search_projects(dm: DownloadManager | None, kind: str, query: str, source: str,
@@ -248,6 +304,7 @@ def search_projects(dm: DownloadManager | None, kind: str, query: str, source: s
                 dm, q or None, limit=30, api_key=api_key,
                 class_id=KIND_CF.get(kind, mods_mod.CF_CLASS_MOD),
                 game_version=gv,
+                categories=cf_category_tokens(extra.get("category") or extra.get("type") or ""),
             )
             for h in hits:
                 row = _hit_row(h, "curseforge")

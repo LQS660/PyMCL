@@ -31,7 +31,7 @@ public sealed partial class MultiplayerPage : UserControl
             if (snap.Supported && !snap.Installed && !_preparing)
             {
                 _preparing = true;
-                AppServices.FlyToTasks?.Invoke(this, "联", "#2E9B6B");
+                AppServices.FlyToTasks?.Invoke(this, "联", "#0B6E99");
                 await AppServices.Client.StartTaskAsync("terracotta_prepare");
             }
         }

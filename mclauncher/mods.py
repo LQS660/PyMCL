@@ -36,14 +36,16 @@ def modrinth_download_urls(urls) -> list:
 
 def install_modrinth_mod(dm: DownloadManager, slug, instance: Instance,
                          mc_version=None, loader=None, on_progress=None,
-                         use_mirror=True, version_id=None):
+                         use_mirror=True, version_id=None, mods_dir=None):
     """安装单个 Modrinth 模组：自动匹配 MC 版本与加载器，含必需依赖。
 
     use_mirror=True 时优先走 MCIM 国内镜像；镜像失败会自动回退官方 CDN。
     version_id 指定时安装该版本，不再自动挑最新。
+    mods_dir 指定安装目录（版本隔离时是 versions/<id>/mods），缺省用实例 mods。
     """
     inst = instance
     inst.ensure_standard_dirs()
+    dest_dir = _resolve_mods_dir(inst, mods_dir)
     if not mc_version:
         mc_version = detect_mc_version(inst)
     if loader is None:
@@ -69,7 +71,7 @@ def install_modrinth_mod(dm: DownloadManager, slug, instance: Instance,
         f = _primary_file(v)
         if not f or not f.get("url"):
             return
-        dest = inst.path / "mods" / f["filename"]
+        dest = dest_dir / f["filename"]
         if on_progress:
             on_progress(f"下载模组 {f['filename']}", 0, 1)
         url = f["url"]
@@ -639,13 +641,18 @@ def cf_files_by_ids(dm: DownloadManager, file_ids, api_key=None):
 
 
 def search_curseforge(dm: DownloadManager, query=None, limit=30, api_key=None,
-                      class_id=CF_CLASS_MOD, slug=None, game_version=None):
-    """搜索 CurseForge（官方 API 优先，国内镜像兜底）。"""
+                      class_id=CF_CLASS_MOD, slug=None, game_version=None,
+                      categories=None):
+    """搜索 CurseForge（官方 API 优先，国内镜像兜底）。
+
+    categories 是 canonical key 的展示名碎片（见 catalog_files.CF_TYPE_TOKENS）；
+    CF 的 categoryFilter 对 slug 约束不稳定，这里改为拉回结果后按分类名过滤。
+    """
     params = {
         "gameId": 432,
         "classId": class_id,
         "sortField": 2,      # 按人气排序
-        "pageSize": limit,
+        "pageSize": limit * 2 if categories else limit,
         "index": 0,
     }
     if query:
@@ -656,7 +663,13 @@ def search_curseforge(dm: DownloadManager, query=None, limit=30, api_key=None,
         params["gameVersion"] = game_version
 
     data = _cf_fetch(dm, "/mods/search", api_key=api_key, params=params)
-    return [_cf_norm(m) for m in _cf_items(data)]
+    hits = [_cf_norm(m) for m in _cf_items(data)]
+    if categories:
+        tokens = [str(t).lower() for t in categories if t]
+        hits = [h for h in hits if any(
+            tok and any(tok in c for c in h.get("cf_categories") or [])
+            for tok in tokens)]
+    return hits[:limit]
 
 
 def _cf_norm(m):
@@ -668,6 +681,8 @@ def _cf_norm(m):
         "author": ", ".join(a.get("name", "") for a in (m.get("authors") or [])) or "?",
         "downloads": m.get("downloadCount") or m.get("downloads") or 0,
         "summary": (m.get("summary") or "")[:120],
+        "cf_categories": [str((c or {}).get("name") or "").lower()
+                          for c in (m.get("categories") or []) if isinstance(c, dict)],
     }
 
 
@@ -739,12 +754,24 @@ def _cf_download_urls(addon_id, file_id, filename=None):
     return urls
 
 
+def _resolve_mods_dir(instance: Instance, mods_dir=None) -> Path:
+    """安装目标目录：显式 mods_dir 优先（版本隔离），否则实例 mods。"""
+    if mods_dir:
+        folder = Path(mods_dir)
+        utils.ensure_dir(folder)
+        return folder
+    folder = instance.path / "mods"
+    utils.ensure_dir(folder)
+    return folder
+
+
 def install_curseforge_mod(dm: DownloadManager, addon_id, instance: Instance,
                            mc_version=None, loader=None, api_key=None, on_progress=None,
-                           file_id=None):
+                           file_id=None, mods_dir=None):
     """安装 CurseForge 模组：自动匹配实例 MC 版本与加载器。"""
     inst = instance
     inst.ensure_standard_dirs()
+    dest_dir = _resolve_mods_dir(inst, mods_dir)
     if not mc_version:
         mc_version = detect_mc_version(inst)
     if loader is None:
@@ -790,7 +817,7 @@ def install_curseforge_mod(dm: DownloadManager, addon_id, instance: Instance,
         raise ModError("模组文件信息缺失")
     filename = f.get("fileName") or f"mod-{addon_id}-{file_id}.jar"
     download_url = f.get("downloadUrl")  # API 可能返回此字段
-    dest = inst.path / "mods" / filename
+    dest = dest_dir / filename
 
     last_err = None
     # 候选 URL：API 返回的 downloadUrl → 带文件名的 CDN 直链 → 不带文件名的通用 URL
@@ -817,8 +844,9 @@ def install_curseforge_mod(dm: DownloadManager, addon_id, instance: Instance,
     raise ModError(f"CurseForge 模组下载失败: {last_err}")
 
 
-def install_cf_mod(dm: DownloadManager, url, instance: Instance, on_progress=None):
+def install_cf_mod(dm: DownloadManager, url, instance: Instance, on_progress=None, mods_dir=None):
     """从 CurseForge 链接安装模组（文件页链接或模组主页链接都行）。"""
+    dest_dir = _resolve_mods_dir(instance, mods_dir)
     m = _CF_RE.search(url)
     if m:
         file_id = m.group(2)
@@ -829,7 +857,7 @@ def install_cf_mod(dm: DownloadManager, url, instance: Instance, on_progress=Non
         if not pm:
             raise ModError("无法从页面解析项目 ID（CurseForge 页面结构变化或网络受限），请改用 Modrinth 或本地文件")
         project_id = pm.group(1)
-        dest = instance.path / "mods" / f"mod-{project_id}-{file_id}.jar"
+        dest = dest_dir / f"mod-{project_id}-{file_id}.jar"
         if on_progress:
             on_progress("下载 CurseForge 模组", 0, 1)
         last_err = None
@@ -847,13 +875,14 @@ def install_cf_mod(dm: DownloadManager, url, instance: Instance, on_progress=Non
         hits = search_curseforge(dm, slug=slug, limit=5, class_id=CF_CLASS_MOD)
         if not hits:
             raise ModError("找不到该 CurseForge 模组")
-        return install_curseforge_mod(dm, hits[0]["id"], instance, on_progress=on_progress)
+        return install_curseforge_mod(dm, hits[0]["id"], instance, on_progress=on_progress,
+                                      mods_dir=mods_dir)
     raise ModError("无法识别的 CurseForge 链接")
 
 
 def install_mod_from_source(dm: DownloadManager, source, instance: Instance,
                             mc_version=None, loader=None, on_progress=None,
-                            version_id=None):
+                            version_id=None, mods_dir=None):
     """
     统一安装入口：支持
     - Modrinth 链接 (modrinth.com/mod/<slug>) 或直接 slug
@@ -862,27 +891,29 @@ def install_mod_from_source(dm: DownloadManager, source, instance: Instance,
     """
     inst = instance
     inst.ensure_standard_dirs()
+    dest_dir = _resolve_mods_dir(inst, mods_dir)
     s = str(source)
     if re.match(r"^https?://", s):
         m = re.search(r"modrinth\.com/mod(?:s)?/([^/?#]+)", s)
         if m:
             return install_modrinth_mod(dm, m.group(1), inst, mc_version, loader, on_progress,
-                                        version_id=version_id)
+                                        version_id=version_id, mods_dir=dest_dir)
         if "curseforge.com" in s:
-            return install_cf_mod(dm, s, inst, on_progress)
+            return install_cf_mod(dm, s, inst, on_progress, mods_dir=dest_dir)
         if s.split("?")[0].lower().endswith(".jar"):
             name = s.split("/")[-1].split("?")[0] or "mod.jar"
-            dm.download(s, inst.path / "mods" / name, timeout=600)
+            dm.download(s, dest_dir / name, timeout=600)
             return {"source": "url", "files": [name]}
         raise ModError("无法识别的链接：支持 Modrinth 模组链接、CurseForge 文件页链接、.jar 直链")
     p = Path(s)
     if p.is_file():
         if p.suffix.lower() != ".jar":
             raise ModError("本地文件只支持 .jar 模组")
-        shutil.copy2(p, inst.path / "mods" / p.name)
+        shutil.copy2(p, dest_dir / p.name)
         return {"source": "file", "files": [p.name]}
     # 不是链接也不是文件：当作 Modrinth slug
-    return install_modrinth_mod(dm, s, inst, mc_version, loader, on_progress, version_id=version_id)
+    return install_modrinth_mod(dm, s, inst, mc_version, loader, on_progress,
+                                version_id=version_id, mods_dir=dest_dir)
 
 
 # ================================================================ 光影 / 资源包 / 数据包

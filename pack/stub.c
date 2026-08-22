@@ -1,5 +1,11 @@
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
+#include <shellapi.h>
+#include <wininet.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -118,6 +124,165 @@ static int ui_ready(const wchar_t *ui, const wchar_t *dll, const wchar_t *bridge
     return file_nonempty(ui) && file_nonempty(dll) && file_nonempty(bridge);
 }
 
+static int slim_ready(const wchar_t *www, const wchar_t *bridge) {
+    return file_nonempty(www) && file_nonempty(bridge);
+}
+
+static int read_bridge_port(HANDLE out_read, DWORD timeout_ms) {
+    char buf[1024];
+    DWORD got = 0, total = 0;
+    ULONGLONG start = GetTickCount64();
+    while (GetTickCount64() - start < timeout_ms) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(out_read, NULL, 0, NULL, &avail, NULL)) break;
+        if (avail == 0) { Sleep(50); continue; }
+        if (total + avail >= sizeof(buf) - 1) avail = (DWORD)(sizeof(buf) - 1 - total);
+        if (!ReadFile(out_read, buf + total, avail, &got, NULL) || got == 0) break;
+        total += got;
+        buf[total] = 0;
+        char *p = strstr(buf, "port=");
+        if (p) {
+            int port = atoi(p + 5);
+            if (port > 0 && port < 65536) return port;
+        }
+    }
+    return 0;
+}
+
+static int tcp_port_open(int port) {
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 0;
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    int ok = 0;
+    if (s != INVALID_SOCKET) {
+        struct sockaddr_in a;
+        memset(&a, 0, sizeof(a));
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        a.sin_port = htons((u_short)port);
+        DWORD timeout = 500;
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout));
+        if (connect(s, (struct sockaddr *)&a, sizeof(a)) == 0) ok = 1;
+        closesocket(s);
+    }
+    WSACleanup();
+    return ok;
+}
+
+static int http_health_ok(int port) {
+    if (tcp_port_open(port)) {
+        HINTERNET ses = InternetOpenW(L"PyMCL", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
+        if (!ses) return 1; /* port open is enough if WinINet unavailable */
+        HINTERNET con = InternetConnectW(ses, L"127.0.0.1", (INTERNET_PORT)port, NULL, NULL,
+                                         INTERNET_SERVICE_HTTP, 0, 0);
+        int ok = 0;
+        if (con) {
+            HINTERNET req = HttpOpenRequestW(con, L"GET", L"/health", NULL, NULL, NULL,
+                                             INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE |
+                                             INTERNET_FLAG_NO_UI | INTERNET_FLAG_PRAGMA_NOCACHE, 0);
+            if (req) {
+                if (HttpSendRequestW(req, NULL, 0, NULL, 0)) {
+                    DWORD status = 0, slen = sizeof(status);
+                    if (HttpQueryInfoW(req, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &status, &slen, NULL))
+                        ok = (status == 200);
+                }
+                InternetCloseHandle(req);
+            }
+            InternetCloseHandle(con);
+        }
+        InternetCloseHandle(ses);
+        return ok;
+    }
+    return 0;
+}
+
+static int bridge_dlls_ok(const wchar_t *bridgedir, wchar_t *missing, size_t miss_n) {
+    const wchar_t *need[] = {
+        L"libcurl-4.dll", L"zlib1.dll", L"libwinpthread-1.dll",
+        L"libssl-3-x64.dll", L"libcrypto-3-x64.dll", NULL
+    };
+    missing[0] = 0;
+    for (int i = 0; need[i]; i++) {
+        wchar_t p[MAX_PATH];
+        _snwprintf(p, MAX_PATH, L"%s\\%s", bridgedir, need[i]);
+        if (GetFileAttributesW(p) == INVALID_FILE_ATTRIBUTES) {
+            _snwprintf(missing, (int)miss_n, L"%s", need[i]);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static LRESULT CALLBACK stay_wnd_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
+    if (m == WM_CLOSE || m == WM_DESTROY) {
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(w, m, wp, lp);
+}
+
+/* Keep bridge alive; Edge's CreateProcess handle often exits immediately when
+   an existing msedge instance takes the --app window. Do NOT kill bridge on that. */
+static int stay_until_closed(HANDLE bridge_proc, int port) {
+    WNDCLASSW wc;
+    memset(&wc, 0, sizeof(wc));
+    wc.lpfnWndProc = stay_wnd_proc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"PyMCLStay";
+    RegisterClassW(&wc);
+    HWND w = CreateWindowExW(0, L"PyMCLStay", L"PyMCL 运行中",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        CW_USEDEFAULT, CW_USEDEFAULT, 360, 140, NULL, NULL, wc.hInstance, NULL);
+    CreateWindowExW(0, L"STATIC",
+        L"启动器后端已在运行。\r\n关闭本窗口将退出 PyMCL。\r\n界面在 Edge 应用窗中。",
+        WS_CHILD | WS_VISIBLE | SS_LEFT, 16, 24, 320, 70, w, NULL, wc.hInstance, NULL);
+    ShowWindow(w, SW_SHOW);
+    UpdateWindow(w);
+
+    MSG msg;
+    for (;;) {
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                TerminateProcess(bridge_proc, 0);
+                return 0;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (WaitForSingleObject(bridge_proc, 0) == WAIT_OBJECT_0) {
+            MessageBoxW(NULL, L"C 桥已退出，界面将无法连接。", L"PyMCL", MB_ICONERROR);
+            return 1;
+        }
+        /* If health dies unexpectedly, still keep the stay window. */
+        Sleep(200);
+        (void)port;
+    }
+}
+
+static HANDLE open_edge_app(const wchar_t *url) {
+    const wchar_t *cands[] = {
+        L"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+        L"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+    };
+    for (int i = 0; i < 2; i++) {
+        if (GetFileAttributesW(cands[i]) == INVALID_FILE_ATTRIBUTES) continue;
+        STARTUPINFOW si; PROCESS_INFORMATION pi;
+        memset(&si, 0, sizeof(si)); memset(&pi, 0, sizeof(pi));
+        si.cb = sizeof(si);
+        wchar_t cline[4096];
+        _snwprintf(cline, 4096, L"\"%s\" --app=\"%s\" --disable-features=msSmartScreenProtection", cands[i], url);
+        if (CreateProcessW(cands[i], cline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+            CloseHandle(pi.hThread);
+            return pi.hProcess;
+        }
+    }
+    ShellExecuteW(NULL, L"open", url, NULL, NULL, SW_SHOWNORMAL);
+    return NULL;
+}
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show) {
     (void)inst; (void)prev; (void)cmdline; (void)show;
     wchar_t self[MAX_PATH];
@@ -149,20 +314,37 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show) {
 
     wchar_t local[MAX_PATH];
     if (!GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH)) die(L"找不到 LOCALAPPDATA");
-    wchar_t runtime[MAX_PATH], marker[MAX_PATH], zip[MAX_PATH], ui[MAX_PATH], uidll[MAX_PATH], bridge[MAX_PATH];
+    wchar_t runtime[MAX_PATH], marker[MAX_PATH], zip[MAX_PATH], ui[MAX_PATH], uidll[MAX_PATH], bridge[MAX_PATH], www[MAX_PATH];
+    wchar_t ui_wpf[MAX_PATH], uidll_wpf[MAX_PATH], ui_winui[MAX_PATH], uidll_winui[MAX_PATH];
     _snwprintf(runtime, MAX_PATH, L"%s\\PyMCL\\runtime\\%s", local, ver);
     _snwprintf(marker, MAX_PATH, L"%s\\%s", runtime, VER_NAME);
-    _snwprintf(ui, MAX_PATH, L"%s\\ui\\PyMCL.WinUI.exe", runtime);
-    _snwprintf(uidll, MAX_PATH, L"%s\\ui\\PyMCL.WinUI.dll", runtime);
+    _snwprintf(ui_wpf, MAX_PATH, L"%s\\ui\\PyMCL.Wpf.exe", runtime);
+    _snwprintf(uidll_wpf, MAX_PATH, L"%s\\ui\\PyMCL.Wpf.dll", runtime);
+    _snwprintf(ui_winui, MAX_PATH, L"%s\\ui\\PyMCL.WinUI.exe", runtime);
+    _snwprintf(uidll_winui, MAX_PATH, L"%s\\ui\\PyMCL.WinUI.dll", runtime);
     _snwprintf(bridge, MAX_PATH, L"%s\\native\\build\\pymcl-bridge.exe", runtime);
+    _snwprintf(www, MAX_PATH, L"%s\\www\\index.html", runtime);
+    /* Prefer WPF (PCL UI stack) over WinUI over Edge/www. */
+    if (ui_ready(ui_wpf, uidll_wpf, bridge)) {
+        wcsncpy(ui, ui_wpf, MAX_PATH);
+        wcsncpy(uidll, uidll_wpf, MAX_PATH);
+    } else {
+        wcsncpy(ui, ui_winui, MAX_PATH);
+        wcsncpy(uidll, uidll_winui, MAX_PATH);
+    }
 
     char have[32] = {0};
     char want[32];
     snprintf(want, sizeof(want), "%llu", (unsigned long long)zlen);
     int need = 1;
+    int slim = 0;
+    int use_winui = 0;
     if (ui_ready(ui, uidll, bridge) && file_exists(marker)) {
         read_all(marker, have, sizeof(have));
-        if (strcmp(have, want) == 0) need = 0;
+        if (strcmp(have, want) == 0) { need = 0; use_winui = 1; }
+    } else if (slim_ready(www, bridge) && file_exists(marker)) {
+        read_all(marker, have, sizeof(have));
+        if (strcmp(have, want) == 0) { need = 0; slim = 1; }
     }
     HWND splash = NULL;
     if (need) {
@@ -218,18 +400,129 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show) {
             RemoveDirectoryW(tools);
         }
         write_all(marker, want, strlen(want));
-        if (!ui_ready(ui, uidll, bridge)) {
+        if (ui_ready(ui_wpf, uidll_wpf, bridge)) {
+            wcsncpy(ui, ui_wpf, MAX_PATH);
+            wcsncpy(uidll, uidll_wpf, MAX_PATH);
+        } else {
+            wcsncpy(ui, ui_winui, MAX_PATH);
+            wcsncpy(uidll, uidll_winui, MAX_PATH);
+        }
+        use_winui = ui_ready(ui, uidll, bridge);
+        slim = !use_winui && slim_ready(www, bridge);
+        if (!use_winui && !slim) {
             if (splash) DestroyWindow(splash);
             die(L"解压后缺少 UI 或 C 桥");
         }
         if (splash) { DestroyWindow(splash); splash = NULL; }
     } else {
         fclose(f);
+        if (ui_ready(ui_wpf, uidll_wpf, bridge)) {
+            wcsncpy(ui, ui_wpf, MAX_PATH);
+            wcsncpy(uidll, uidll_wpf, MAX_PATH);
+        } else {
+            wcsncpy(ui, ui_winui, MAX_PATH);
+            wcsncpy(uidll, uidll_winui, MAX_PATH);
+        }
+        use_winui = ui_ready(ui, uidll, bridge);
+        slim = !use_winui && slim_ready(www, bridge);
     }
 
-    SetEnvironmentVariableW(L"PYMCL_HOME", home);
+    /* Slim fallback only when native UI is absent (legacy Edge --app pack). */
+    if (slim && !use_winui) {
+        SetEnvironmentVariableW(L"PYMCL_HOME", runtime);
+        SetEnvironmentVariableW(L"PYMCL_BRIDGE_EXE", bridge);
+        wchar_t bridgedir[MAX_PATH];
+        wcsncpy(bridgedir, bridge, MAX_PATH);
+        wchar_t *bs = wcsrchr(bridgedir, L'\\');
+        if (bs) *bs = 0;
+        wchar_t pathenv[32768];
+        DWORD pn = GetEnvironmentVariableW(L"PATH", pathenv, 32768);
+        if (pn == 0 || pn >= 32000) pathenv[0] = 0;
+        wchar_t newpath[32768];
+        _snwprintf(newpath, 32768, L"%s;%s", bridgedir, pathenv);
+        SetEnvironmentVariableW(L"PATH", newpath);
+
+        wchar_t miss[64];
+        if (!bridge_dlls_ok(bridgedir, miss, 64)) {
+            wchar_t msg[256];
+            _snwprintf(msg, 256, L"缺少依赖 DLL：%s\n目录：%s", miss, bridgedir);
+            die(msg);
+        }
+
+        SECURITY_ATTRIBUTES sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.nLength = sizeof(sa);
+        sa.bInheritHandle = TRUE;
+        HANDLE rd = NULL, wr = NULL;
+        if (!CreatePipe(&rd, &wr, &sa, 0)) die(L"无法创建管道");
+        SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+
+        STARTUPINFOW si; PROCESS_INFORMATION pi;
+        memset(&si, 0, sizeof(si)); memset(&pi, 0, sizeof(pi));
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        si.hStdOutput = wr;
+        si.hStdError = wr;
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        wchar_t cline[2048];
+        _snwprintf(cline, 2048, L"\"%s\" --root \"%s\" --host 127.0.0.1 --port 0", bridge, runtime);
+        if (!CreateProcessW(bridge, cline, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, bridgedir, &si, &pi)) {
+            CloseHandle(rd); CloseHandle(wr);
+            die(L"无法启动 C 桥");
+        }
+        CloseHandle(wr);
+        int port = read_bridge_port(rd, 15000);
+        CloseHandle(rd);
+        if (port <= 0) {
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+            die(L"C 桥未输出端口");
+        }
+        /* Wait until /health actually answers — banner alone is not enough. */
+        int healthy = 0;
+        for (int i = 0; i < 50; i++) {
+            if (WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0) break;
+            if (http_health_ok(port)) { healthy = 1; break; }
+            Sleep(100);
+        }
+        if (!healthy) {
+            DWORD exit_code = 0;
+            GetExitCodeProcess(pi.hProcess, &exit_code);
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+            wchar_t msg[320];
+            _snwprintf(msg, 320,
+                L"C 桥已启动但 /health 无响应（port=%d, exit=0x%08X）。\n"
+                L"请确认 native/build 旁 DLL 齐全，或查看杀软是否拦截。",
+                port, (unsigned)exit_code);
+            die(msg);
+        }
+        wchar_t url[128];
+        _snwprintf(url, 128, L"http://127.0.0.1:%d/", port);
+        HANDLE edge = open_edge_app(url);
+        if (edge) CloseHandle(edge); /* Edge launcher often exits immediately — ignore */
+        CloseHandle(pi.hThread);
+        int code = stay_until_closed(pi.hProcess, port);
+        CloseHandle(pi.hProcess);
+        return code;
+    }
+
+    SetEnvironmentVariableW(L"PYMCL_HOME", runtime);
     SetEnvironmentVariableW(L"PYMCL_BRIDGE_EXE", bridge);
     set_dotnet_root();
+
+    /* Ensure curl DLLs resolve when WinUI spawns the C bridge. */
+    {
+        wchar_t bridgedir[MAX_PATH], pathenv[32768], newpath[32768];
+        wcsncpy(bridgedir, bridge, MAX_PATH);
+        wchar_t *bs = wcsrchr(bridgedir, L'\\');
+        if (bs) *bs = 0;
+        DWORD pn = GetEnvironmentVariableW(L"PATH", pathenv, 32768);
+        if (pn == 0 || pn >= 32000) pathenv[0] = 0;
+        _snwprintf(newpath, 32768, L"%s;%s", bridgedir, pathenv);
+        SetEnvironmentVariableW(L"PATH", newpath);
+    }
 
     wchar_t uidir[MAX_PATH];
     wcsncpy(uidir, ui, MAX_PATH);

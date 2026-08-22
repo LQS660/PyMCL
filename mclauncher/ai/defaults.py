@@ -26,6 +26,13 @@ WRITE_TOOLS = {
     "write_mod_config",
 }
 
+# 「完全访问」下仍然必须确认的破坏性操作：删了就找不回来或会覆盖用户手改的内容
+DANGEROUS_TOOLS = {
+    "delete_instance",
+    "delete_mod",
+    "write_mod_config",
+}
+
 MAX_TOOL_ROUNDS = 10
 MAX_HISTORY = 24
 MAX_TOOL_RESULT = 8000

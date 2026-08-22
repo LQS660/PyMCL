@@ -88,6 +88,8 @@ def build_stub(root: Path, out: Path) -> None:
         "-lshell32",
         "-lgdi32",
         "-luser32",
+        "-lwininet",
+        "-lws2_32",
     ]
     subprocess.check_call(cmd)
 

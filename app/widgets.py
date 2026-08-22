@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """widgets.py — 公共视觉组件：图标磁贴、胶囊徽章、渐变 Banner。"""
 
-from PySide6.QtCore import Qt, QRectF, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QLinearGradient, QPainter, QPainterPath
+import os
+
+from PySide6.QtCore import QObject, QRectF, QRunnable, Qt, QThreadPool, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QLinearGradient, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, ComboBox, LineEdit, MessageBoxBase, StrongBodyLabel, SubtitleLabel,
@@ -218,8 +220,69 @@ class Pill(QLabel):
         super().paintEvent(event)
 
 
+class _ThumbHub(QObject):
+    """缩略图线程池 → UI 线程的回传通道。worker 线程 emit，槽在主线程执行。"""
+
+    loaded = Signal(str, str)  # url, 本地路径（失败为空串）
+
+
+_THUMB_HUB = None
+_THUMB_POOL = None
+_THUMB_PIXCACHE: dict[str, QPixmap] = {}
+_THUMB_PIXCACHE_CAP = 240
+
+
+def _thumb_hub() -> _ThumbHub:
+    global _THUMB_HUB
+    if _THUMB_HUB is None:
+        _THUMB_HUB = _ThumbHub()
+    return _THUMB_HUB
+
+
+def _thumb_pool() -> QThreadPool:
+    global _THUMB_POOL
+    if _THUMB_POOL is None:
+        _THUMB_POOL = QThreadPool()
+        _THUMB_POOL.setMaxThreadCount(4)
+        _THUMB_POOL.setExpiryTimeout(20000)
+    return _THUMB_POOL
+
+
+def _pixcache_get(key: str):
+    return _THUMB_PIXCACHE.get(key)
+
+
+def _pixcache_put(key: str, pix: QPixmap):
+    cache = _THUMB_PIXCACHE
+    cache[key] = pix
+    while len(cache) > _THUMB_PIXCACHE_CAP:
+        cache.pop(next(iter(cache)), None)
+
+
+class _ThumbJob(QRunnable):
+    def __init__(self, url: str):
+        super().__init__()
+        self._url = url
+        self.setAutoDelete(True)
+
+    def run(self):
+        path = ""
+        try:
+            from mclauncher.thumbnails import ensure_thumb
+            path = ensure_thumb(self._url) or ""
+        except Exception:
+            path = ""
+        _thumb_hub().loaded.emit(self._url, path)
+
+
 class ThumbnailTile(QWidget):
-    """圆角缩略图磁贴，从 URL 加载图片。"""
+    """圆角缩略图磁贴，从 URL 加载图片。
+
+    加载顺序：内存像素缓存 → 本地缓存文件（同步，纯磁盘）→ 线程池
+    异步下载后回主线程贴图。绝不在 UI 线程发起网络请求——搜索结果
+    一页二三十行，以前每行构造时同步 `ensure_thumb`（超时 20s），
+    首次搜索整页假死就是这么来的。
+    """
 
     def __init__(self, text: str, thumb_url: str, size: int = 52, parent=None):
         super().__init__(parent)
@@ -232,22 +295,57 @@ class ThumbnailTile(QWidget):
         self._color = QColor(pick_color(text))
         self._load_thumb()
 
+    def _set_pixmap_from(self, path: str) -> bool:
+        pix = QPixmap(path)
+        if pix.isNull():
+            return False
+        pix = pix.scaled(self._size, self._size,
+                         Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._pixmap = pix
+        self._loaded = True
+        if self._thumb_url:
+            _pixcache_put(f"{self._thumb_url}|{self._size}", pix)
+        self.update()
+        return True
+
     def _load_thumb(self):
         if not self._thumb_url:
             return
+        cached = _pixcache_get(f"{self._thumb_url}|{self._size}")
+        if cached is not None:
+            self._pixmap = cached
+            self._loaded = True
+            return
         try:
-            from mclauncher.thumbnails import ensure_thumb
-            path = ensure_thumb(self._thumb_url)
-            if path:
-                from PySide6.QtGui import QPixmap
-                pix = QPixmap(path)
-                if not pix.isNull():
-                    self._pixmap = pix.scaled(self._size, self._size,
-                                              Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    self._loaded = True
-                    self.update()
+            from mclauncher.thumbnails import thumb_path
+            local = thumb_path(self._thumb_url)
         except Exception:
+            local = ""
+        if local and os.path.isfile(local) and self._set_pixmap_from(local):
+            return
+        hub = _thumb_hub()
+        hub.loaded.connect(self._on_thumb_loaded)
+        # 连接以本控件为接收者，行删除（C++ 销毁）后自动断；但 Python
+        # 包装器和 _pixmap 会被 bound method 拽住，这里显式断干净，
+        # 不然每搜一次页就攒一批 52px pixmap 释放不掉。
+        self.destroyed.connect(lambda *_: self._disconnect_thumb_hub())
+        _thumb_pool().start(_ThumbJob(self._thumb_url))
+
+    def _disconnect_thumb_hub(self):
+        try:
+            _thumb_hub().loaded.disconnect(self._on_thumb_loaded)
+        except (TypeError, RuntimeError):
             pass
+
+    def _on_thumb_loaded(self, url: str, path: str):
+        if url != self._thumb_url or not path:
+            return
+        try:
+            if self._loaded:
+                return
+            self._set_pixmap_from(path)
+        except RuntimeError:
+            pass  # C++ 对象已随所在行一起销毁
 
     def paintEvent(self, event):
         painter = QPainter(self)

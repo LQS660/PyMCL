@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal
@@ -93,6 +94,12 @@ class BackendWorker(QThread):
         self._args = args
         self._kwargs = kwargs or {}
         self._cancelled = False
+        # 进度节流：下载器每个分块都会回调，全量跨线程 emit 会把 UI
+        # 事件循环淹没（界面卡、CPU 高）。80ms 或 0.5% 变化才发一条，
+        # 取消检查不受节流影响，每回调必查。
+        self._last_emit_t = 0.0
+        self._last_emit_ratio = -1.0
+        self._last_emit_msg = None
 
     def cancel(self):
         self._cancelled = True
@@ -101,7 +108,20 @@ class BackendWorker(QThread):
         if self._cancelled:
             raise TaskCancelled()
         cur, tot = _qt_progress(current, total)
-        self.progress.emit(self.task_id, cur, tot, str(message or ""))
+        msg = str(message or "")
+        now = time.monotonic()
+        done = tot > 0 and cur >= tot
+        ratio = (cur / tot) if tot > 0 else 0.0
+        if not done:
+            if now - self._last_emit_t < 0.08:
+                return
+            if self._last_emit_ratio >= 0 and abs(ratio - self._last_emit_ratio) < 0.005 \
+                    and msg == self._last_emit_msg:
+                return
+        self._last_emit_t = now
+        self._last_emit_ratio = ratio
+        self._last_emit_msg = msg
+        self.progress.emit(self.task_id, cur, tot, msg)
 
     def _log(self, text):
         self.log.emit(self.task_id, str(text))
@@ -155,12 +175,32 @@ class BackendAPI(QObject):
         self._crashes: dict[str, dict] = {}
         self._settings_cache: dict | None = None
         self._settings_rev = -1
+        # 实例快照缓存：get_instances() 每次都要 iterdir 实例根目录、
+        # 逐实例读 meta / 扫 versions，启动页一次 reload 还会调它两遍
+        # （reload + _sync_banner）。UI 线程同步扫，这是导航卡顿的大头之一。
+        self._inst_cache: list[dict] | None = None
+        self._inst_cache_at: float = 0.0
         self._ensure_default_instance()
         try:
             from mclauncher.source import warmup_async
             warmup_async()
         except Exception:
             pass
+        # 系统 Java 扫描冷启动要 glob Program Files + 逐个跑
+        # `java -version` 子进程，秒级起步。提前在后台把缓存灌满，
+        # UI 上的 Java 标签 / 下拉框此后都走 cached_* 只读路径。
+        try:
+            java_mod.warm_system_javas_async()
+        except Exception:
+            pass
+
+    def _emit_ui_changed(self):
+        """数据变了：失效实例快照再广播。改数据的入口一律走这个。"""
+        self._inst_cache = None
+        BackendAPI.ui_changed.emit(self)
+
+    def invalidate_instances(self):
+        self._inst_cache = None
 
     def _ensure_default_instance(self):
         names = list_instances()
@@ -244,7 +284,7 @@ class BackendAPI(QObject):
         self.finished.emit(task_id, success, message)
         self.task_count_changed.emit(self._download_task_count())
         if success:
-            self.ui_changed.emit()
+            self._emit_ui_changed()
 
     def wait_task(self, task_id: str, timeout: float = 1800, cancelled=None) -> dict:
         """后台线程里等任务结束。启动游戏不要用这个（会等到退出）。"""
@@ -486,19 +526,19 @@ class BackendAPI(QObject):
     def rename_version(self, instance: str, version: str, new_id: str) -> str:
         from mclauncher import version_ops as vops
         out = vops.rename_version(self._instance(instance), version, new_id)
-        self.ui_changed.emit()
+        self._emit_ui_changed()
         return out
 
     def copy_version(self, instance: str, version: str, new_id: str) -> str:
         from mclauncher import version_ops as vops
         out = vops.copy_version(self._instance(instance), version, new_id)
-        self.ui_changed.emit()
+        self._emit_ui_changed()
         return out
 
     def hide_version(self, instance: str, version: str, hidden: bool = True) -> dict:
         from mclauncher import version_ops as vops
         out = vops.set_hidden(self._instance(instance), version, hidden)
-        self.ui_changed.emit()
+        self._emit_ui_changed()
         return out
 
     def open_version_folder(self, instance: str, version: str = "", which: str = "root") -> str:
@@ -520,7 +560,7 @@ class BackendAPI(QObject):
     def delete_save(self, instance: str, name: str, version: str = ""):
         from mclauncher import saves as saves_mod
         saves_mod.delete_save(self._instance(instance), name, version)
-        self.ui_changed.emit()
+        self._emit_ui_changed()
 
     def backup_save(self, instance: str, name: str, version: str = "") -> str:
         return self.start_task(f"备份存档 {name}", self._backup_save_impl, instance, name, version)
@@ -531,7 +571,7 @@ class BackendAPI(QObject):
             self._instance(instance), name, version,
             on_progress=lambda text, cur, total: progress(cur, total, text))
         log(f"备份完成: {info['path']}")
-        self.ui_changed.emit()
+        self._emit_ui_changed()
         return f"已备份到 {info['name']}"
 
     def list_save_backups(self, instance: str, name: str = "", version: str = "") -> list[dict]:
@@ -543,13 +583,13 @@ class BackendAPI(QObject):
         from mclauncher import saves as saves_mod
         out = saves_mod.restore_backup(
             self._instance(instance), backup_name, version, overwrite=overwrite)
-        self.ui_changed.emit()
+        self._emit_ui_changed()
         return out
 
     def delete_save_backup(self, instance: str, backup_name: str, version: str = ""):
         from mclauncher import saves as saves_mod
         saves_mod.delete_backup(self._instance(instance), backup_name, version)
-        self.ui_changed.emit()
+        self._emit_ui_changed()
 
     def export_save(self, instance: str, name: str, dest: str, version: str = "") -> str:
         from mclauncher import saves as saves_mod
@@ -578,7 +618,7 @@ class BackendAPI(QObject):
         if not isinstance(pack, dict) or not pack.get("name"):
             raise InstanceError(tr("该实例没有已安装整合包"))
         inst.delete()
-        self.ui_changed.emit()
+        self._emit_ui_changed()
 
     def list_global_mods(self) -> list[dict]:
         from mclauncher import global_mods as gm
@@ -587,7 +627,7 @@ class BackendAPI(QObject):
     def set_global_mod_enabled(self, filename: str, enabled: bool) -> str:
         from mclauncher import global_mods as gm
         name = gm.set_enabled(filename, enabled)
-        self.ui_changed.emit()
+        self._emit_ui_changed()
         return name
 
     def start_nide8_login(self, server_id: str, username: str, password: str) -> str:
@@ -620,7 +660,7 @@ class BackendAPI(QObject):
         p = Path(path).expanduser()
         CONFIG.set("instances_dir", str(p) if p.is_absolute() else path)
         CONFIG.save()
-        self.ui_changed.emit()
+        self._emit_ui_changed()
         return str(CONFIG.instances_dir)
 
     def download_java(self, major: str, vendor: str = "adoptium") -> str:
@@ -730,10 +770,15 @@ class BackendAPI(QObject):
             acc = self.accounts.ensure_valid(acc)
         props = self.accounts.launch_props(acc)
         from mclauncher import launcher
+        from mclauncher import version_settings as _vs
+        auth_server = str(_vs.load(inst, version).get("auth_server") or "").strip()
+        if auth_server and not props.get("authlib_api"):
+            props = dict(props)
+            props["authlib_api"] = auth_server
         java_exe = tr("自动选择") if java in (tr("自动选择"), "") else java
         cmd, _natives, _vdir, _gdir = launcher.build_launch_command(
             inst, version, props, java_exe, memory_mb=memory_mb,
-            width=width, height=height)
+            width=width, height=height, authlib_api=props.get("authlib_api"))
         return cmd
 
     def start_microsoft_login(self) -> str:
@@ -745,19 +790,19 @@ class BackendAPI(QObject):
         else:
             inst_name, vid = CONFIG.get("default_instance", "default"), spec
         Installer(self._instance(inst_name)).uninstall_version(vid.strip())
-        self.ui_changed.emit()
+        self._emit_ui_changed()
 
     def create_instance(self, name: str):
         Instance(name).create()
-        self.ui_changed.emit()
+        self._emit_ui_changed()
 
     def delete_instance(self, name: str):
         Instance(name).delete()
-        self.ui_changed.emit()
+        self._emit_ui_changed()
 
     def rename_instance(self, name: str, new_name: str):
         Instance(name).rename(new_name)
-        self.ui_changed.emit()
+        self._emit_ui_changed()
 
     def open_instance_folder(self, name: str):
         path = self._instance(name).path
@@ -768,22 +813,29 @@ class BackendAPI(QObject):
         else:
             subprocess.Popen(["xdg-open", str(path)])
 
+    def open_mods_folder(self, instance: str, version: str = "") -> str:
+        folder = self._mods_folder(self._instance(instance), version)
+        utils.ensure_dir(folder)
+        if not open_path(folder):
+            raise LaunchError(f"无法打开: {folder}")
+        return str(folder)
+
     def delete_mod(self, instance: str, filename: str, version: str = ""):
         inst = self._instance(instance)
         folder = self._mods_folder(inst, version)
         mods_mod.delete_mod(inst, filename, mods_dir=folder)
-        self.ui_changed.emit()
+        self._emit_ui_changed()
 
     def disable_mod(self, instance: str, filename: str, version: str = "") -> str:
         inst = self._instance(instance)
         name = mods_mod.set_mod_enabled(inst, filename, False, mods_dir=self._mods_folder(inst, version))
-        self.ui_changed.emit()
+        self._emit_ui_changed()
         return name
 
     def enable_mod(self, instance: str, filename: str, version: str = "") -> str:
         inst = self._instance(instance)
         name = mods_mod.set_mod_enabled(inst, filename, True, mods_dir=self._mods_folder(inst, version))
-        self.ui_changed.emit()
+        self._emit_ui_changed()
         return name
 
     def _mods_folder(self, inst, version: str = ""):
@@ -801,6 +853,17 @@ class BackendAPI(QObject):
         if version:
             return mods_mod.list_mod_entries_at(self._mods_folder(inst, version))
         return mods_mod.list_instance_mod_entries(inst)
+
+    def get_mods_targets(self, instance: str) -> list[dict]:
+        """Mod 安装目标列表：实例共享 mods + 开了版本隔离的版本各自目录。"""
+        from mclauncher import version_settings as vs
+        inst = self._instance(instance)
+        rows = [{"label": tr("实例共享 mods 目录"), "value": ""}]
+        for vid in inst.installed_ids():
+            iso = vs.load(inst, vid).get("isolation")
+            if iso in (vs.ISOLATION_MODS, vs.ISOLATION_ALL):
+                rows.append({"label": f"{vid} · {tr('独立 mods')}", "value": vid})
+        return rows
 
     def get_installed_shaders(self, instance: str) -> list[str]:
         return [p.name for p in mods_mod.list_content_files(self._instance(instance), "shaderpacks")]
@@ -823,15 +886,15 @@ class BackendAPI(QObject):
 
     def delete_shader(self, instance: str, filename: str):
         mods_mod.delete_content_file(self._instance(instance), "shaderpacks", filename)
-        self.ui_changed.emit()
+        self._emit_ui_changed()
 
     def delete_resourcepack(self, instance: str, filename: str):
         mods_mod.delete_content_file(self._instance(instance), "resourcepacks", filename)
-        self.ui_changed.emit()
+        self._emit_ui_changed()
 
     def delete_datapack(self, instance: str, filename: str):
         mods_mod.delete_content_file(self._instance(instance), "datapacks", filename)
-        self.ui_changed.emit()
+        self._emit_ui_changed()
 
     def get_setting(self, key: str, default=None):
         # get_settings() 会重建整份字典（含两次模块 import 和几次 Path→str），
@@ -862,6 +925,8 @@ class BackendAPI(QObject):
             "ai_base_url": CONFIG.get("ai_base_url") or "",
             "ai_api_key": CONFIG.get("ai_api_key") or "",
             "ai_model": CONFIG.get("ai_model") or DEFAULT_MODEL,
+            "ai_confirm_writes": bool(CONFIG.get("ai_confirm_writes", True)),
+            "ai_permission_mode": CONFIG.get("ai_permission_mode") or "standard",
             "download_source": CONFIG.get("download_source") or "auto",
             "community_source": CONFIG.get("community_source") or "auto",
             "use_system_proxy": bool(CONFIG.get("use_system_proxy", True)),
@@ -908,6 +973,11 @@ class BackendAPI(QObject):
                 return data[key]
             return CONFIG.get(cfg_key or key, default)
 
+        perm_mode = (data.get("ai_permission_mode") if "ai_permission_mode" in data
+                     else CONFIG.get("ai_permission_mode") or "standard")
+        if perm_mode not in ("standard", "full"):
+            perm_mode = "standard"
+
         CONFIG.update({
             "shared_libraries": bool(data.get("share_libraries", CONFIG.get("shared_libraries", False))),
             "shared_assets": bool(data.get("share_assets", CONFIG.get("shared_assets", False))),
@@ -924,6 +994,9 @@ class BackendAPI(QObject):
             "ai_api_key": (data.get("ai_api_key") if "ai_api_key" in data
                            else CONFIG.get("ai_api_key") or ""),
             "ai_model": (data.get("ai_model") or CONFIG.get("ai_model") or "deepseek-v4-flash"),
+            "ai_confirm_writes": bool(data["ai_confirm_writes"]) if "ai_confirm_writes" in data
+                                  else bool(CONFIG.get("ai_confirm_writes", True)),
+            "ai_permission_mode": perm_mode,
             "download_source": (data.get("download_source") or CONFIG.get("download_source") or "auto"),
             "community_source": (data.get("community_source") or CONFIG.get("community_source") or "auto"),
             "use_system_proxy": bool(data.get("use_system_proxy", CONFIG.get("use_system_proxy", True))),
@@ -972,11 +1045,14 @@ class BackendAPI(QObject):
         from mclauncher.net import apply_proxy_policy
         apply_proxy_policy()
         warmup_async()
-        # 主题相关键变了就通知主窗口刷 UI（设置页开关也会直接调 apply_theme，双保险）
-        if "ui_dark" in data or "theme_color" in data or "ui_background" in data:
-            self.theme_changed.emit()
-        self._settings_cache = None
-        self._settings_rev = -1
+        # 主题相关键变了就通知主窗口刷 UI（设置页开关也会直接调 apply_theme，双保险）。
+        # self 相关收尾必须容忍 self=None：save_settings 只依赖模块级 CONFIG，
+        # 测试（test_pcl_quality）按这个契约不构造真 backend 直接以 None 调进来。
+        if self is not None:
+            if "ui_dark" in data or "theme_color" in data or "ui_background" in data:
+                self.theme_changed.emit()
+            self._settings_cache = None
+            self._settings_rev = -1
 
     def test_ai_connection(self, settings: dict | None = None) -> str:
         """试连 AI。传 settings 就用它，让设置页能测「还没保存的值」而不必先落盘。"""
@@ -1039,18 +1115,18 @@ class BackendAPI(QObject):
 
     def remove_account(self, name: str):
         self.accounts.remove_account(name)
-        self.ui_changed.emit()
+        self._emit_ui_changed()
 
     def set_active_account(self, name: str):
         self.accounts.set_active(name)
-        self.ui_changed.emit()
+        self._emit_ui_changed()
         return self.accounts.active
 
     def add_offline_account(self, username: str, skin: str = ""):
         acc = self.accounts.offline_account(
             username, skin=skin or CONFIG.get("offline_skin") or "default")
         self.accounts.add_account({**acc, "type": "offline"})
-        self.ui_changed.emit()
+        self._emit_ui_changed()
         return acc["name"]
 
     def start_authlib_login(self, api: str, username: str, password: str) -> str:
@@ -1063,7 +1139,7 @@ class BackendAPI(QObject):
     def save_version_settings(self, instance: str, version: str, data: dict) -> dict:
         from mclauncher import version_settings as vs
         out = vs.save(self._instance(instance), version, data or {})
-        self.ui_changed.emit()
+        self._emit_ui_changed()
         return out
 
     def repair_version(self, instance: str, version: str) -> str:
@@ -1123,7 +1199,7 @@ class BackendAPI(QObject):
             mb = max(1024, min(32768, mb))
             CONFIG.set("memory_mb", mb)
             CONFIG.save()
-            self.ui_changed.emit()
+            self._emit_ui_changed()
             return {"ok": True, "message": f"默认内存已设为 {mb} MB"}
 
         if aid == "open_mods_folder":
@@ -1162,7 +1238,7 @@ class BackendAPI(QObject):
                     vs.save(inst, version, data)
             except Exception:
                 pass
-            self.ui_changed.emit()
+            self._emit_ui_changed()
             return {"ok": True, "message": "已清空自定义 JVM 参数"}
 
         return {"ok": False, "message": f"未知动作: {aid}"}
@@ -1180,7 +1256,7 @@ class BackendAPI(QObject):
     def apply_mod_update(self, instance: str, row: dict) -> str:
         from mclauncher.mod_update import apply_update
         name = apply_update(self._instance(instance), row)
-        self.ui_changed.emit()
+        self._emit_ui_changed()
         return name
 
     def cleaner_preview(self) -> dict:
@@ -1284,6 +1360,16 @@ class BackendAPI(QObject):
         return out
 
     def get_instances(self) -> list[dict]:
+        """实例快照（带 2.5s TTL 缓存）。
+
+        每个使用方（启动页 reload / banner、六个资源页的实例下拉框、
+        实例页）以前都是现场 iterdir + 逐实例读 meta/扫 versions，
+        同一轮 UI 刷新里会被叫五六次。数据变更走 _emit_ui_changed
+        立即失效，所以 TTL 只是把「没人改数据」时的重复扫描合并掉。
+        """
+        now = time.monotonic()
+        if self._inst_cache is not None and now - self._inst_cache_at < 2.5:
+            return self._inst_cache
         self._ensure_default_instance()
         rows = []
         for name in list_instances():
@@ -1303,6 +1389,8 @@ class BackendAPI(QObject):
                 "java": inst.java_pref(),
                 "java_label": self.instance_java_label(name),
             })
+        self._inst_cache = rows
+        self._inst_cache_at = now
         return rows
 
     @staticmethod
@@ -1326,9 +1414,16 @@ class BackendAPI(QObject):
             "description": hit.get("description") or "",
         }
 
-    def search_modpacks(self, query: str, source: str) -> list[dict]:
+    def search_modpacks(self, query: str, source: str, extra: dict | None = None) -> list[dict]:
+        """搜索整合包。extra 携带 game_version / category（下载页的筛选框）。"""
+        extra = extra or {}
         src = self._catalog_source(source)
         q = (query or "").strip()
+        from mclauncher.catalog_files import category_facets
+        cats = category_facets(extra.get("category") or extra.get("type") or "")
+        gv = extra.get("game_version") or extra.get("version") or ""
+        if isinstance(gv, str) and gv.startswith(tr("全部")):
+            gv = ""
         if not q:
             rows = []
             seen = set()
@@ -1364,7 +1459,9 @@ class BackendAPI(QObject):
         key = CONFIG.get("curseforge_api_key")
         hits = []
         try:
-            hits = modpack_mod.search_modpacks_chinese(dm, q, limit=25, api_key=key)
+            hits = modpack_mod.search_modpacks_chinese(
+                dm, q, limit=25, api_key=key, game_version=gv or None,
+                categories=cats or None)
         except Exception:
             hits = []
         if hits and any(h.get("matched_alias") for h in hits):
@@ -1374,9 +1471,13 @@ class BackendAPI(QObject):
         if not hits:
             try:
                 if src == "curseforge":
-                    hits = modpack_mod.search_cf_modpacks(dm, q, limit=25, api_key=key)
+                    hits = modpack_mod.search_cf_modpacks(
+                        dm, q, limit=25, api_key=key, game_version=gv or None,
+                        categories=cats or None)
                 else:
-                    hits = modpack_mod.modrinth_search(dm, q, limit=25)
+                    hits = modpack_mod.modrinth_search(
+                        dm, q, limit=25, game_version=gv or None,
+                        categories=cats or None)
             except Exception:
                 hits = []
         else:
@@ -1522,7 +1623,7 @@ class BackendAPI(QObject):
     def normalize_java_pref(self, java: str) -> str:
         if not java or java in (JAVA_AUTO, "auto", "default"):
             return JAVA_AUTO
-        for j in java_mod.all_javas():
+        for j in java_mod.cached_all_javas():
             if j.get("name") == java or j.get("exe") == java:
                 return j.get("exe") or java
         p = Path(java)
@@ -1561,7 +1662,8 @@ class BackendAPI(QObject):
         stored = self.get_instance_java(name)
         if stored == JAVA_AUTO:
             return JAVA_AUTO
-        for j in java_mod.all_javas():
+        # 只读缓存（后台预热灌满）：绝不在 UI 线程触发系统扫描。
+        for j in java_mod.cached_all_javas():
             if j.get("exe") == stored:
                 return f"Java {j.get('major') or '?'}"
         return Path(stored).name
@@ -1654,27 +1756,34 @@ class BackendAPI(QObject):
         vid = extra.get("version_id")
         fid = extra.get("file_id")
         gv = extra.get("game_version") or extra.get("mc_version")
+        # extra["version"] 是安装目标版本（版本隔离时装进 versions/<id>/mods）
+        target = str(extra.get("version") or "").strip()
+        mods_dir = self._mods_folder(inst, target) if target else None
+        if target:
+            log(f"安装目标: {inst.name} / {target}")
         if extra.get("path") or extra.get("url"):
             source = extra.get("path") or extra.get("url")
             log(f"安装模组: {source}")
             mods_mod.install_mod_from_source(dm, str(source), inst, on_progress=on_progress,
-                                             version_id=vid)
+                                             version_id=vid, mods_dir=mods_dir)
         elif src_kind.startswith("curse") and extra.get("id"):
             log(f"从 CurseForge 安装模组 id={extra.get('id')}" + (f" file={fid}" if fid else ""))
             mods_mod.install_curseforge_mod(
-                dm, extra["id"], inst, mc_version=gv, on_progress=on_progress, file_id=fid)
+                dm, extra["id"], inst, mc_version=gv, on_progress=on_progress, file_id=fid,
+                mods_dir=mods_dir)
         else:
             hit = extra if extra.get("slug") else self._lookup_mod(str(name), extra.get("source") or "Modrinth")
             if hit.get("id") and str(hit.get("source") or src_kind).lower().startswith("curse"):
                 log(f"从 CurseForge 安装模组 id={hit.get('id')}")
                 mods_mod.install_curseforge_mod(
                     dm, hit["id"], inst, mc_version=gv, on_progress=on_progress,
-                    file_id=fid or extra.get("version_id"))
+                    file_id=fid or extra.get("version_id"), mods_dir=mods_dir)
             else:
                 slug = hit.get("slug") or name
                 log(f"从 Modrinth 安装模组 {slug}" + (f" @{vid}" if vid else ""))
                 mods_mod.install_mod_from_source(
-                    dm, str(slug), inst, mc_version=gv, on_progress=on_progress, version_id=vid)
+                    dm, str(slug), inst, mc_version=gv, on_progress=on_progress,
+                    version_id=vid, mods_dir=mods_dir)
         log(tr("模组安装完成"))
 
     def _install_content_impl(self, progress, log, kind, name, instance, extra=None):
@@ -1836,6 +1945,12 @@ class BackendAPI(QObject):
         log(f"Java -version: {ver_line}")
         log(f"使用 Java {java_mod.get_java_major(java_exe) or '?'}: {java_exe}")
         progress(2, 4, tr("构建启动参数"))
+        auth_server = str(prep.get("auth_server") or "").strip()
+        if auth_server and not props.get("authlib_api"):
+            # 版本设置里的「认证服」：账号不是皮肤站时也按自定义 Yggdrasil 注入
+            props = dict(props)
+            props["authlib_api"] = auth_server
+            log(f"认证服: {auth_server}")
         if props.get("authlib_api"):
             from mclauncher import authlib as authlib_mod
             authlib_mod.ensure_injector(self._dm(progress, log), on_note=log)
@@ -2007,6 +2122,10 @@ class BackendAPI(QObject):
         props = self.accounts.launch_props(acc)
         prep = launch_flow.prepare(inst, version, memory_mb=int(CONFIG.get("memory_mb") or 4096))
         java_exe = java_mod.resolve_launch_java(inst.version_json(version) or {}, on_note=log)
+        auth_server = str(prep.get("auth_server") or "").strip()
+        if auth_server and not props.get("authlib_api"):
+            props = dict(props)
+            props["authlib_api"] = auth_server
         if props.get("authlib_api"):
             from mclauncher import authlib as authlib_mod
             authlib_mod.ensure_injector(self._dm(progress, log), on_note=log)
@@ -2053,7 +2172,17 @@ class BackendAPI(QObject):
         servers_mod.delete_server(inst, index)
 
     def import_servers(self, instance: str, text: str) -> int:
+        """导入服务器列表：JSON 数组（UI 导入对话框允许选 .json）或逐行文本。"""
         from mclauncher import servers as servers_mod
+        import json as _json
+        stripped = (text or "").lstrip()
+        if stripped.startswith("["):
+            try:
+                data = _json.loads(text)
+            except _json.JSONDecodeError:
+                data = None
+            if isinstance(data, list):
+                return servers_mod.import_servers_json(self._instance(instance), data)
         inst = self._instance(instance)
         return servers_mod.import_servers_txt(inst, text)
 
@@ -2136,7 +2265,7 @@ class BackendAPI(QObject):
     def set_language(self, lang: str):
         from mclauncher import i18n
         i18n.set_language(lang)
-        self.ui_changed.emit()
+        self._emit_ui_changed()
 
     def available_languages(self) -> dict[str, str]:
         from mclauncher import i18n
@@ -2162,7 +2291,7 @@ class BackendAPI(QObject):
         from mclauncher import themes as themes_mod
         result = themes_mod.load_theme(name)
         self.theme_changed.emit()
-        self.ui_changed.emit()
+        self._emit_ui_changed()
         return result
 
     def delete_theme(self, name: str):

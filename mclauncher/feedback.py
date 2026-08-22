@@ -218,7 +218,9 @@ def heartbeat_once(status: str = "online") -> dict:
         "device_id": device_id(),
         "status": status if status in ("online", "offline") else "online",
         "app_version": APP_VERSION,
-        "sysinfo": sysinfo_mod.collect(scan_system_java=False) if status != "offline" else {},
+        # 心跳 30 秒一拍：快照用 10 分钟缓存，别每拍都起 PowerShell 探硬件。
+        "sysinfo": sysinfo_mod.collect(scan_system_java=False, max_age=600)
+        if status != "offline" else {},
     }
     return _post("/api/v1/heartbeat", payload, timeout=12)
 

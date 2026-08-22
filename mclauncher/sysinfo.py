@@ -20,6 +20,13 @@ from .config import CONFIG
 _LOCK = threading.Lock()
 _CACHE = {"t": 0.0, "data": None}
 
+# CPU / GPU 探测要各拉一个 PowerShell（WMI），一块硬件不会热插拔，
+# 进程内缓存半小时足够。反馈心跳以前每 2 分钟就重探一遍——常驻
+# CPU/磁盘 churn 就是这么来的。
+_STATIC_TTL = 1800.0
+_STATIC_LOCK = threading.Lock()
+_STATIC = {"cpu": None, "cpu_t": 0.0, "gpus": None, "gpus_t": 0.0}
+
 
 def _run(cmd, timeout=7) -> str:
     try:
@@ -85,6 +92,30 @@ def _winreg_value(hive, path, name, default=""):
         return default
 
 
+def _cpu_info() -> dict:
+    now = time.time()
+    with _STATIC_LOCK:
+        if _STATIC["cpu"] is not None and now - _STATIC["cpu_t"] < _STATIC_TTL:
+            return dict(_STATIC["cpu"])
+    info = _probe_cpu()
+    with _STATIC_LOCK:
+        _STATIC["cpu"] = info
+        _STATIC["cpu_t"] = time.time()
+    return dict(info)
+
+
+def _gpu_info() -> list:
+    now = time.time()
+    with _STATIC_LOCK:
+        if _STATIC["gpus"] is not None and now - _STATIC["gpus_t"] < _STATIC_TTL:
+            return list(_STATIC["gpus"])
+    gpus = _probe_gpus()
+    with _STATIC_LOCK:
+        _STATIC["gpus"] = gpus
+        _STATIC["gpus_t"] = time.time()
+    return list(gpus)
+
+
 def _os_info() -> dict:
     display = platform.platform()
     build = platform.version() or ""
@@ -139,7 +170,7 @@ def _os_info() -> dict:
     }
 
 
-def _cpu_info() -> dict:
+def _probe_cpu() -> dict:
     name = platform.processor() or ""
     if utils.IS_WINDOWS:
         import winreg
@@ -277,7 +308,7 @@ def _prefer_physical_gpus(gpus: list) -> list:
     return sorted(gpus, key=rank)
 
 
-def _gpu_info() -> list:
+def _probe_gpus() -> list:
     gpus = []
     if utils.IS_WINDOWS:
         data = _ps_json(
@@ -441,12 +472,16 @@ def summarize(info: dict) -> str:
     return " · ".join(p for p in parts if p)
 
 
-def collect(force: bool = False, scan_system_java: bool = False) -> dict:
-    """返回本机配置快照。失败字段留空，不抛异常。"""
+def collect(force: bool = False, scan_system_java: bool = False, max_age: float = 120) -> dict:
+    """返回本机配置快照。失败字段留空，不抛异常。
+
+    max_age：缓存有效期。心跳这类高频低价值调用传大值（如 600），
+    避免反复起 PowerShell 探硬件、扫实例目录。
+    """
     now = time.time()
     with _LOCK:
         cached = _CACHE.get("data")
-        if (not force) and cached and now - float(_CACHE.get("t") or 0) < 120:
+        if (not force) and cached and now - float(_CACHE.get("t") or 0) < max_age:
             return dict(cached)
     info = {
         "collected_at": time.strftime("%Y-%m-%dT%H:%M:%S"),

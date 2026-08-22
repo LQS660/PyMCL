@@ -49,6 +49,9 @@ DEFAULT_CONFIG = {
     "ai_base_url": "",
     "ai_api_key": "",
     "ai_model": "deepseek-v4-flash",
+    # AI 权限：写操作是否逐条弹确认；standard=全部确认 full=只确认破坏性操作
+    "ai_confirm_writes": True,
+    "ai_permission_mode": "standard",
     # HMCL 自定义 EasyTier 会合节点（官方 /nodes 表往往不够）
     "terracotta_extra_nodes": [
         "https://terracotta.glavo.site/acebc7d8-1208-47fd-b212-d03ac49e36e0",

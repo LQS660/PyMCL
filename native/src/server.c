@@ -17,6 +17,79 @@ static sse_cli *g_sse;
 static pthread_mutex_t g_sse_mu = PTHREAD_MUTEX_INITIALIZER;
 static SOCKET g_listen = INVALID_SOCKET;
 static char g_token[TOKEN_MAX];
+static int g_port;
+
+static int send_all(SOCKET s, const char *p, int n);
+static void send_error(SOCKET s, int code, const char *message);
+
+static int origin_is_loopback(const char *origin) {
+    if (!origin || !*origin) return 0;
+    return strncmp(origin, "http://127.0.0.1", 15) == 0
+        || strncmp(origin, "http://localhost", 16) == 0
+        || strncmp(origin, "http://[::1]", 12) == 0;
+}
+
+static const char *mime_for(const char *path) {
+    const char *dot = strrchr(path, '.');
+    if (!dot) return "application/octet-stream";
+    if (pymcl_ieq(dot, ".html") || pymcl_ieq(dot, ".htm")) return "text/html; charset=utf-8";
+    if (pymcl_ieq(dot, ".js") || pymcl_ieq(dot, ".mjs")) return "application/javascript; charset=utf-8";
+    if (pymcl_ieq(dot, ".css")) return "text/css; charset=utf-8";
+    if (pymcl_ieq(dot, ".json")) return "application/json; charset=utf-8";
+    if (pymcl_ieq(dot, ".svg")) return "image/svg+xml";
+    if (pymcl_ieq(dot, ".png")) return "image/png";
+    if (pymcl_ieq(dot, ".jpg") || pymcl_ieq(dot, ".jpeg")) return "image/jpeg";
+    if (pymcl_ieq(dot, ".ico")) return "image/x-icon";
+    if (pymcl_ieq(dot, ".woff2")) return "font/woff2";
+    if (pymcl_ieq(dot, ".map")) return "application/json";
+    return "application/octet-stream";
+}
+
+static int safe_rel_path(const char *url_path, char *out, size_t n) {
+    if (!url_path || url_path[0] != '/') return -1;
+    const char *p = url_path + 1;
+    if (!*p || strcmp(p, "/") == 0) p = "index.html";
+    if (strstr(p, "..") || strchr(p, '\\')) return -1;
+    snprintf(out, n, "%s", p);
+    for (char *c = out; *c; c++) if (*c == '/') *c = '\\';
+    return 0;
+}
+
+static int send_file(SOCKET s, const char *fs_path, const char *mime) {
+    char *data = NULL;
+    size_t len = 0;
+    if (pymcl_read_file(fs_path, &data, &len) != 0 || !data) {
+        send_error(s, 404, "not found");
+        return -1;
+    }
+    char hdr[320];
+    int n = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
+        "Cache-Control: no-cache\r\nConnection: close\r\n\r\n",
+        mime ? mime : "application/octet-stream", len);
+    send_all(s, hdr, n);
+    send_all(s, data, (int)len);
+    free(data);
+    return 0;
+}
+
+static int try_serve_www(SOCKET s, const char *url_path) {
+    char rel[260], full[PYMCL_PATH], www[PYMCL_PATH];
+    if (safe_rel_path(url_path, rel, sizeof(rel)) != 0) return -1;
+    pymcl_path_join(www, sizeof(www), g_root, "www");
+    if (!pymcl_dir_exists(www)) return -1;
+    pymcl_path_join(full, sizeof(full), www, rel);
+    if (!pymcl_file_exists(full)) {
+        /* SPA fallback */
+        if (strchr(rel, '.') == NULL) {
+            pymcl_path_join(full, sizeof(full), www, "index.html");
+            if (pymcl_file_exists(full))
+                return send_file(s, full, "text/html; charset=utf-8");
+        }
+        return -1;
+    }
+    return send_file(s, full, mime_for(rel));
+}
 
 static void sse_add(SOCKET s) {
     sse_cli *c = (sse_cli *)calloc(1, sizeof(*c));
@@ -265,20 +338,34 @@ static void *client_th(void *p) {
     char *body = strstr(req, "\r\n\r\n");
     if (body) body += 4;
 
-    /* Native bridge is consumed by the WinUI client, not a browser. Reject
-       Origin-bearing requests instead of exposing any CORS surface. */
-    if (has_browser_origin(req)) {
+    /* Routing: public endpoints first, then token-gated RPC/SSE. */
+    char origin[256] = {0};
+    int has_origin = header_value(req, "Origin", origin, sizeof(origin)) && origin[0];
+    if (has_origin && !origin_is_loopback(origin)) {
         send_error(s, 403, "browser origins are not allowed");
+    } else if (strcmp(method, "GET") == 0 &&
+               (strcmp(path, "/health") == 0 || strcmp(path, "/health/") == 0)) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddTrueToObject(o, "ok");
+        cJSON_AddStringToObject(o, "name", "pymcl-bridge");
+        cJSON_AddNumberToObject(o, "port", g_port);
+        send_json(s, 200, o);
+        cJSON_Delete(o);
+    } else if (strcmp(method, "GET") == 0 && strcmp(path, "/bridge-config.json") == 0) {
+        cJSON *o = cJSON_CreateObject();
+        char rpc[128];
+        snprintf(rpc, sizeof(rpc), "http://127.0.0.1:%d", g_port);
+        cJSON_AddStringToObject(o, "rpc_url", rpc);
+        cJSON_AddStringToObject(o, "token", g_token);
+        send_json(s, 200, o);
+        cJSON_Delete(o);
+    } else if (strcmp(method, "GET") == 0 && strcmp(path, "/rpc") != 0
+               && strcmp(path, "/events") != 0 && try_serve_www(s, path) == 0) {
+        /* static UI from www/ — public */
     } else if (!authenticated(req, target, strcmp(path, "/events") == 0)) {
         send_error(s, 401, "authentication required");
     } else if (strcmp(method, "OPTIONS") == 0) {
         send_error(s, 405, "method not allowed");
-    } else if (strcmp(method, "GET") == 0 && (strcmp(path, "/health") == 0 || strcmp(path, "/") == 0)) {
-        cJSON *o = cJSON_CreateObject();
-        cJSON_AddTrueToObject(o, "ok");
-        cJSON_AddStringToObject(o, "name", "pymcl-bridge");
-        send_json(s, 200, o);
-        cJSON_Delete(o);
     } else if (strcmp(method, "GET") == 0 && strcmp(path, "/events") == 0) {
         const char *h =
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n"
@@ -340,6 +427,7 @@ int server_run(const char *host, int port, const char *token) {
     int alen = sizeof(a);
     getsockname(g_listen, (struct sockaddr *)&a, &alen);
     int real = ntohs(a.sin_port);
+    g_port = real;
     char banner[PYMCL_PATH + 96];
     snprintf(banner, sizeof(banner), "PYMCL_BRIDGE port=%d host=127.0.0.1 root=%s auth=token\n", real, g_root);
     fputs(banner, stdout); fflush(stdout);

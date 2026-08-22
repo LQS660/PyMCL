@@ -165,10 +165,12 @@ def main():
     check("远古类型展示", "old_alpha" in vp)
     lp = (ROOT / "app" / "pages" / "launch_page.py").read_text(encoding="utf-8")
     check("登录成功始终 reload", "task_id == self._login_task_id" in lp and "self.reload()" in lp)
-    mp = (ROOT / "app" / "pages" / "modpack_page.py").read_text(encoding="utf-8")
+    mp = (ROOT / "app" / "pages" / "catalog_page.py").read_text(encoding="utf-8")
     check("整合包搜索走后台", "call_async" in mp)
+    # Mod 搜索在重构后由 catalog_page.ModPage 承担（mod_page 只管已装列表），
+    # 断言跟着搬：搜索入口与后台调用都必须在 catalog_page 里。
+    check("模组搜索走后台", "search_mods" in mp and "call_async" in mp)
     md = (ROOT / "app" / "pages" / "mod_page.py").read_text(encoding="utf-8")
-    check("模组搜索走后台", "call_async" in md)
     check("删模组失败有提示", "删除失败" in md)
     inst_src = (ROOT / "mclauncher" / "instances.py").read_text(encoding="utf-8")
     check("rename 写回 meta.name", 'set_meta("name"' in inst_src)

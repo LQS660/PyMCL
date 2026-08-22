@@ -28,20 +28,21 @@ from pathlib import Path
 
 from mclauncher import APP_DISPLAY_NAME, APP_VERSION, utils
 from mclauncher.guard import install as install_guard
-from mclauncher.auth import AccountManager, AuthError
 from mclauncher.config import CONFIG
-from mclauncher.downloader import DownloadManager
-from mclauncher.instances import Instance, InstanceError, list_instances
-from mclauncher.installer import Installer, InstallError
-from mclauncher import java as java_mod
-from mclauncher import manifest as manifest_mod
-from mclauncher import modpack as modpack_mod
-from mclauncher.launcher import LaunchError, build_launch_command, GameProcess
+
+# GUI 启动也会走本模块（launcher_entry -> import main）。CLI 专属的重依赖
+# （downloader 连带 requests/urllib3、installer、launcher 等）在用到它的
+# 函数体内局部 import，GUI 冷启动不会加载。
+#
+# 注意不能用「模块级 __getattr__ + 函数体裸引用」的假懒加载：PEP 562 只在
+# 属性访问时生效，函数内 LOAD_GLOBAL 不经过它，首次调用就是 NameError
+# （此前 `python main.py list / versions` 就是这么崩的）。
 
 
 # ---------------------------------------------------------------- 工具
 
 def make_dm(cancel=None):
+    from mclauncher.downloader import DownloadManager
     threads = CONFIG.get("download_threads", 8)
     return DownloadManager(threads=threads, on_progress=_cli_progress, cancel=cancel)
 
@@ -65,6 +66,7 @@ def _cli_progress(message, done, total):
 
 
 def get_instance(name=None):
+    from mclauncher.instances import Instance, InstanceError
     name = name or CONFIG.get("default_instance", "default")
     inst = Instance(name)
     if not inst.path.is_dir():
@@ -91,6 +93,7 @@ def _exit(msg, code=1):
 # ---------------------------------------------------------------- 子命令
 
 def cmd_versions(args):
+    from mclauncher import manifest as manifest_mod
     dm = make_dm()
     print("正在获取 Minecraft 版本清单…")
     versions = manifest_mod.list_remote_versions(dm, force=args.refresh)
@@ -109,6 +112,7 @@ def cmd_versions(args):
 
 
 def cmd_install(args):
+    from mclauncher.installer import Installer
     inst = get_instance(args.instance)
     dm = make_dm()
     installer = Installer(inst, dm, on_progress=_cli_progress)
@@ -121,6 +125,7 @@ def cmd_install(args):
 
 
 def _install_loader_cmd(args, kind):
+    from mclauncher.installer import Installer
     inst = get_instance(args.instance)
     dm = make_dm()
     installer = Installer(inst, dm, on_progress=_cli_progress)
@@ -140,12 +145,16 @@ def _install_loader_cmd(args, kind):
 
 
 def cmd_uninstall(args):
+    from mclauncher.installer import Installer
     inst = get_instance(args.instance)
     Installer(inst).uninstall_version(args.version)
     print(f"已卸载 {args.version}")
 
 
 def cmd_list(args):
+    from mclauncher.instances import Instance, list_instances
+    from mclauncher.auth import AccountManager
+    from mclauncher import java as java_mod
     print(f"启动器主目录: {utils.ROOT}")
     names = list_instances()
     if not names:
@@ -164,6 +173,9 @@ def cmd_list(args):
 
 
 def cmd_launch(args):
+    from mclauncher.auth import AccountManager
+    from mclauncher import java as java_mod, manifest as manifest_mod
+    from mclauncher.launcher import LaunchError, build_launch_command, GameProcess
     inst = get_instance(args.instance)
     if not inst.has_version(args.version):
         _exit(f"版本 {args.version} 未安装。先运行: python main.py install {args.version} --instance {inst.name}")
@@ -249,6 +261,7 @@ def cmd_launch(args):
 
 
 def cmd_java(args):
+    from mclauncher import java as java_mod
     dm = make_dm()
     if args.java_cmd == "list":
         javas = java_mod.all_javas()
@@ -269,6 +282,7 @@ def cmd_java(args):
 
 
 def cmd_login(args):
+    from mclauncher.auth import AccountManager
     manager = AccountManager()
     client_id = args.client_id or CONFIG.get("microsoft_client_id")
     from mclauncher.auth import MicrosoftAuthenticator
@@ -285,6 +299,7 @@ def cmd_login(args):
 
 
 def cmd_search(args):
+    from mclauncher import modpack as modpack_mod
     dm = make_dm()
     source = getattr(args, "source", "modrinth")
     print(f"搜索 {'CurseForge' if source == 'curseforge' else '中文' if source == 'chinese' else 'Modrinth'} 整合包: {args.query}")
@@ -309,6 +324,7 @@ def cmd_search(args):
 
 
 def cmd_modpack(args):
+    from mclauncher import modpack as modpack_mod
     inst = get_instance(args.instance)
     dm = make_dm()
     src = args.source
@@ -369,6 +385,7 @@ def cmd_mods(args):
 
 
 def cmd_instance(args):
+    from mclauncher.instances import Instance, InstanceError, list_instances
     if args.inst_cmd == "create":
         inst = Instance(args.name)
         try:

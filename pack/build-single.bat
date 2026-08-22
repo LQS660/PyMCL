@@ -27,13 +27,25 @@ if errorlevel 1 exit /b 1
 
 echo [3/5] stage payload
 if exist "%STAGE%" rmdir /s /q "%STAGE%"
-mkdir "%STAGE%\ui" "%STAGE%\native\build" "%STAGE%\native\data"
+mkdir "%STAGE%\ui" "%STAGE%\native\build" "%STAGE%\native\data" "%STAGE%\native\tools"
 xcopy /e /y /q "%PUB%\*" "%STAGE%\ui\" >nul
 copy /y "%ROOT%\native\build\pymcl-bridge.exe" "%STAGE%\native\build\" >nul
 copy /y "%ROOT%\native\data\catalog.json" "%STAGE%\native\data\" >nul
+copy /y "%ROOT%\native\tools\py_rpc.py" "%STAGE%\native\tools\" >nul
 if exist "%ROOT%\native\build\curl-ca-bundle.crt" copy /y "%ROOT%\native\build\curl-ca-bundle.crt" "%STAGE%\native\build\" >nul
 for %%D in (libcurl-4.dll zlib1.dll libwinpthread-1.dll libssl-3-x64.dll libcrypto-3-x64.dll libzstd.dll libbrotlidec.dll libbrotlicommon.dll libnghttp2-14.dll libidn2-0.dll libpsl-5.dll libssh2-1.dll libiconv-2.dll libintl-8.dll libgcc_s_seh-1.dll) do (
   if exist "%ROOT%\native\build\%%D" copy /y "%ROOT%\native\build\%%D" "%STAGE%\native\build\" >nul
+)
+rem Python 对齐层：外置，不进 C 二进制；有本机 Python 时 C 桥可调全量 RPC
+mkdir "%STAGE%\mclauncher" "%STAGE%\bridge"
+xcopy /e /y /q "%ROOT%\mclauncher\*" "%STAGE%\mclauncher\" >nul
+xcopy /e /y /q "%ROOT%\bridge\*" "%STAGE%\bridge\" >nul
+
+echo [3b] also copy bridge exe next to dist (UI-less native deliverable)
+if not exist "%DIST%" mkdir "%DIST%"
+copy /y "%ROOT%\native\build\pymcl-bridge.exe" "%DIST%\pymcl-bridge.exe" >nul
+for %%D in (libcurl-4.dll zlib1.dll libwinpthread-1.dll libssl-3-x64.dll libcrypto-3-x64.dll libzstd.dll libbrotlidec.dll libbrotlicommon.dll libnghttp2-14.dll libidn2-0.dll libpsl-5.dll libssh2-1.dll libiconv-2.dll libintl-8.dll libgcc_s_seh-1.dll curl-ca-bundle.crt) do (
+  if exist "%ROOT%\native\build\%%D" copy /y "%ROOT%\native\build\%%D" "%DIST%\%%D" >nul
 )
 
 echo [4/5] 7z + stub

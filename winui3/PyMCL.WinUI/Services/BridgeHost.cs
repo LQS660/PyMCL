@@ -43,10 +43,15 @@ public sealed class BridgeHost : IDisposable
             psi.FileName = native;
             psi.ArgumentList.Add("--root");
             psi.ArgumentList.Add(root);
-            var mingw = @"C:\msys64\mingw64\bin";
+            var bridgeDir = Path.GetDirectoryName(native) ?? "";
             var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+            if (!string.IsNullOrEmpty(bridgeDir) &&
+                path.IndexOf(bridgeDir, StringComparison.OrdinalIgnoreCase) < 0)
+                psi.Environment["PATH"] = bridgeDir + Path.PathSeparator + path;
+            var mingw = @"C:\msys64\mingw64\bin";
             if (Directory.Exists(mingw) && path.IndexOf(mingw, StringComparison.OrdinalIgnoreCase) < 0)
-                psi.Environment["PATH"] = mingw + Path.PathSeparator + path;
+                psi.Environment["PATH"] = (psi.Environment.ContainsKey("PATH") ? psi.Environment["PATH"]! : path)
+                    .Insert(0, mingw + Path.PathSeparator);
         }
         else if (File.Exists(server))
         {

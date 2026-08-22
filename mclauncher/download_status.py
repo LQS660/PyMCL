@@ -7,13 +7,11 @@ from collections import deque
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from requests.adapters import HTTPAdapter
-from urllib3.connection import HTTPConnection, HTTPSConnection
-from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
-from urllib3.exceptions import ConnectTimeoutError, NameResolutionError, NewConnectionError
-from urllib3.util.connection import create_connection
-
 from .utils import format_size
+
+# requests / urllib3 相关的类（连接类、StatusHTTPAdapter）在
+# make_status_adapter() 里才定义：这个模块被 downloader 顶层引用，
+# eager 拉 requests 会拖慢整条 GUI 启动导入链。
 
 PHASE_LABELS = {
     "idle": "就绪",
@@ -500,7 +498,14 @@ def _connect_timeout(conn):
     return 30
 
 
-def _make_connection_classes(tracker: DownloadTracker):
+def make_status_adapter(tracker: DownloadTracker, **adapter_kwargs):
+    """构造带握手状态上报的 HTTPAdapter（此时才 import requests/urllib3）。"""
+    from requests.adapters import HTTPAdapter
+    from urllib3.connection import HTTPConnection, HTTPSConnection
+    from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+    from urllib3.exceptions import ConnectTimeoutError, NameResolutionError, NewConnectionError
+    from urllib3.util.connection import create_connection
+
     def _new_conn(conn):
         host = getattr(conn, "_dns_host", None) or conn.host
         port = conn.port
@@ -581,37 +586,34 @@ def _make_connection_classes(tracker: DownloadTracker):
                 ver = ""
             tracker.tls_ok(ver)
 
-    return StatusHTTPConnection, StatusHTTPSConnection
+    class StatusHTTPAdapter(HTTPAdapter):
+        """带握手状态上报的 HTTPAdapter，保留原有连接池与重试。"""
 
+        def __init__(self, tr, *args, **kwargs):
+            self._tracker = tr
+            super().__init__(*args, **kwargs)
 
-class StatusHTTPAdapter(HTTPAdapter):
-    """带握手状态上报的 HTTPAdapter，保留原有连接池与重试。"""
+        def _patch_manager(self, manager):
+            class StatusHTTPPool(HTTPConnectionPool):
+                ConnectionCls = StatusHTTPConnection
 
-    def __init__(self, tracker: DownloadTracker, *args, **kwargs):
-        self._tracker = tracker
-        super().__init__(*args, **kwargs)
+            class StatusHTTPSPool(HTTPSConnectionPool):
+                ConnectionCls = StatusHTTPSConnection
 
-    def _patch_manager(self, manager):
-        http_cls, https_cls = _make_connection_classes(self._tracker)
+            manager.pool_classes_by_scheme = {
+                "http": StatusHTTPPool,
+                "https": StatusHTTPSPool,
+            }
+            return manager
 
-        class StatusHTTPPool(HTTPConnectionPool):
-            ConnectionCls = http_cls
+        def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+            super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+            self._patch_manager(self.poolmanager)
 
-        class StatusHTTPSPool(HTTPSConnectionPool):
-            ConnectionCls = https_cls
+        def proxy_manager_for(self, proxy, **proxy_kwargs):
+            manager = super().proxy_manager_for(proxy, **proxy_kwargs)
+            if hasattr(manager, "pool_classes_by_scheme"):
+                self._patch_manager(manager)
+            return manager
 
-        manager.pool_classes_by_scheme = {
-            "http": StatusHTTPPool,
-            "https": StatusHTTPSPool,
-        }
-        return manager
-
-    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
-        super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
-        self._patch_manager(self.poolmanager)
-
-    def proxy_manager_for(self, proxy, **proxy_kwargs):
-        manager = super().proxy_manager_for(proxy, **proxy_kwargs)
-        if hasattr(manager, "pool_classes_by_scheme"):
-            self._patch_manager(manager)
-        return manager
+    return StatusHTTPAdapter(tracker, **adapter_kwargs)

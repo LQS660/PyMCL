@@ -128,6 +128,15 @@ class SavesDialog(MessageBoxBase):
         if kind == tr("存档") and name:
             self.backend.open_save(self.instance, name, self.version)
             return
+        if kind == tr("备份"):
+            for r in self.backend.list_save_backups(self.instance, "", self.version):
+                if r.get("name") == name:
+                    try:
+                        self.backend.open_media(r["path"])
+                    except Exception as e:
+                        MessageBox(tr("打开失败"), str(e), self).exec()
+                    return
+            return
         mapk = {tr("截图"): "screenshots", tr("崩溃报告"): "crash-reports", tr("日志"): "logs"}
         if kind in mapk:
             rows = self.backend.list_media(self.instance, mapk[kind], self.version)

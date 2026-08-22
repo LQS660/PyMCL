@@ -27,6 +27,8 @@ def _datas(pkg):
 
 
 datas = _datas("qfluentwidgets") + _datas("qframelesswindow")
+# 语言包是 JSON 数据文件，collect_submodules 带不进来
+datas += [("mclauncher/locales", "mclauncher/locales")]
 hiddenimports = (
     _hidden("app")
     + _hidden("mclauncher")

@@ -695,6 +695,8 @@ class PclCatalogPage(QWidget):
             "install_world": "world",
         }.get(self.spec.get("install") or "", "mod")
         gv = self.version_box.currentText()
+        item = dict(item)
+        item.setdefault("instance", self._current_instance())
         dlg = FilePickDialog(self.backend, item, kind, gv, self)
         if dlg.exec():
             extra = dlg.selected_extra()
@@ -763,7 +765,8 @@ class PclCatalogPage(QWidget):
             win.fly_to_tasks(tile, name)
         fn = getattr(self.backend, self.spec["install"], None)
         extra = dict(item)
-        extra["instance"] = self._current_instance()
+        # FilePickDialog 里选过的安装目标（实例/版本）不能被页面当前值覆盖
+        extra.setdefault("instance", self._current_instance())
         extra["source"] = item.get("source") or self._source()
         gv = self.version_box.currentText()
         extra.setdefault("game_version", "" if (not gv or str(gv).startswith(tr("全部"))) else gv)

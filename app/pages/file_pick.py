@@ -56,6 +56,33 @@ class FilePickDialog(MessageBoxBase):
         host.setLayout(filt)
         self.viewLayout.addWidget(host)
 
+        # Mod 装进哪个实例 / 哪个版本（版本隔离时是各自的 mods 目录）
+        self.target_box = None
+        self.target_inst_box = None
+        if kind == "mod":
+            target = QHBoxLayout()
+            target.addWidget(BodyLabel(tr("安装到")))
+            self.target_inst_box = ComboBox()
+            self.target_inst_box.setFixedWidth(140)
+            for i in (backend.get_instances() or []):
+                self.target_inst_box.addItem(i.get("name") or "?")
+            cur_inst = self.item.get("instance") or ""
+            if cur_inst:
+                self.target_inst_box.setCurrentText(cur_inst)
+            self.target_box = ComboBox()
+            self.target_box.setFixedWidth(200)
+            self._reload_targets()
+            target.addWidget(self.target_inst_box)
+            target.addWidget(self.target_box)
+            target.addStretch(1)
+            tip = BodyLabel(tr("开启版本隔离的版本会出现在这里"))
+            tip.setStyleSheet("color: rgba(128,128,128,0.9); font-size: 11px;")
+            target.addWidget(tip)
+            thost = QWidget(self)
+            thost.setLayout(target)
+            self.viewLayout.addWidget(thost)
+            self.target_inst_box.currentTextChanged.connect(lambda _t: self._reload_targets())
+
         scroll = ScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFixedHeight(320)
@@ -96,6 +123,21 @@ class FilePickDialog(MessageBoxBase):
 
         self.gv.currentTextChanged.connect(self._on_filter)
         self.loader.currentTextChanged.connect(self._on_filter)
+
+    def _reload_targets(self):
+        if self.target_box is None or self.target_inst_box is None:
+            return
+        inst = self.target_inst_box.currentText() or ""
+        try:
+            rows = self.backend.get_mods_targets(inst) or []
+        except Exception:
+            rows = [{"label": tr("实例共享 mods 目录"), "value": ""}]
+        self.target_box.blockSignals(True)
+        self.target_box.clear()
+        for r in rows:
+            self.target_box.addItem(r.get("label") or "?")
+        self.target_box.blockSignals(False)
+        self._target_rows = rows
 
     def reject(self):
         self._dismissed = True
@@ -214,6 +256,14 @@ class FilePickDialog(MessageBoxBase):
 
     def selected_extra(self) -> dict:
         extra = dict(self.item)
+        if self.target_inst_box is not None and self.target_box is not None:
+            inst = self.target_inst_box.currentText() or ""
+            rows = getattr(self, "_target_rows", None) or []
+            idx = self.target_box.currentIndex()
+            vid = rows[idx].get("value", "") if 0 <= idx < len(rows) else ""
+            if inst:
+                extra["instance"] = inst
+            extra["version"] = vid or ""
         if not self.chosen or self.chosen.get("latest"):
             return extra
         src = str(extra.get("source") or self.chosen.get("source") or "").lower()

@@ -62,3 +62,13 @@ winui3/**/bin/
 winui3/**/obj/
 *.user
 *.suo
+
+# 本地产物与敏感数据（勿推送）
+accounts.json
+/.workbuddy/
+/archive/
+/0*.zip
+/0*.exe
+pymcl-feedback-client-src.zip
+wpf/**/bin/
+wpf/**/obj/

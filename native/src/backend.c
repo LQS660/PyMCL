@@ -659,10 +659,8 @@ cJSON *backend_call(const char *method, cJSON *params) {
         cJSON *root = accounts_load();
         cJSON *it;
         cJSON_ArrayForEach(it, cJSON_GetObjectItem(root, "accounts")) {
-            if (strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(it, "type")) ?: "", "microsoft") == 0) {
-                const char *nm = cJSON_GetStringValue(cJSON_GetObjectItem(it, "name"));
-                if (nm) cJSON_AddItemToArray(out, cJSON_CreateString(nm));
-            }
+            const char *nm = cJSON_GetStringValue(cJSON_GetObjectItem(it, "name"));
+            if (nm && nm[0]) cJSON_AddItemToArray(out, cJSON_CreateString(nm));
         }
         cJSON_Delete(root);
         return out;
@@ -750,6 +748,16 @@ cJSON *backend_call(const char *method, cJSON *params) {
         return start_task("启动游戏", method, params);
     if (strcmp(method, "start_microsoft_login") == 0)
         return start_task("微软登录", method, params);
+
+    /* Align remaining RPC with Python bridge/api.py (native first, then py_rpc). */
+    {
+        cJSON *aligned = rpc_align_call(method, params, emit);
+        if (aligned) return aligned;
+    }
+    {
+        cJSON *via_py = py_rpc_call(method, params);
+        if (via_py) return via_py;
+    }
     pymcl_set_error("unknown method: %s", method);
     return NULL;
 }

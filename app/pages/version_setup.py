@@ -153,7 +153,8 @@ class VersionSetupDialog(MessageBoxBase):
         self.yesButton.setText(tr("保存"))
         self.cancelButton.setText(tr("取消"))
         self.widget.setMinimumWidth(540)
-        paint_theme_surfaces(form_host)
+        # 对话框里保持实底，不透出主窗背景图
+        paint_theme_surfaces(form_host, allow_transparent=False)
 
     def _fill_java(self, opts):
         self._java_opts = opts or []

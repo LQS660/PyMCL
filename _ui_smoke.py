@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""UI 冒烟测试：离屏构造主窗口、逐页切换，抓 Python 异常与 Qt 告警。"""
+"""UI 冒烟测试：离屏构造主窗口、逐页切换，抓 Python 异常与 Qt 告警。
+
+页面懒加载改造后：主窗口只带 4 个首屏页，这里会显式把每个子页
+（含 AI 页）构造一遍再切换，覆盖面与旧版全量构造等价。
+"""
 import faulthandler
 import os
 import sys
@@ -49,9 +53,11 @@ except Exception:
 win.resize(1180, 760)
 win.show()
 app.processEvents()
-say("MainWindow constructed, pages:", len(win._pages))
+say("MainWindow constructed, first-screen pages:", len(win._pages))
+say("lazy sub-pages built at boot:", len(win._built))
 
-for key in list(win._pages):
+# 顶部导航逐个切（含懒加载的 AI 页）
+for key in ("launch", "download", "ai", "more", "tasks"):
     try:
         win.side.set_current(key, emit=True)
         app.processEvents()
@@ -60,19 +66,18 @@ for key in list(win._pages):
         say("  NAV FAIL:", key)
         say(traceback.format_exc())
 
-# 下载分区的子页逐个切
-try:
-    sec = win.download_section
-    for page, title in list(sec._by_widget.items()):
+# 下载/更多分区的子页：先经 getter 构造（等价旧版 bind 时构造），再切换
+for sec_name in ("download_section", "more_section"):
+    sec = getattr(win, sec_name)
+    for title, getter in sec.pending_specs():
         try:
+            page = getter()
             sec.show_page(page)
             app.processEvents()
             say("  sub ok:", title)
         except Exception:
             say("  SUB FAIL:", title)
             say(traceback.format_exc())
-except Exception:
-    say(traceback.format_exc())
 
 # 深色模式往返
 for dark in (True, False):
@@ -98,8 +103,6 @@ for w, h in ((820, 600), (1600, 900), (1180, 760)):
         say(traceback.format_exc())
 
 # 关窗：走一遍真实的 closeEvent（含后台线程收拢）。
-# 以前脚本直接 os._exit(0) 跳过退出链路，结果「关闭时后台线程还在跑」这类问题
-# 一次都测不到——而它真实存在，表现是进程偶发以 0xC0000005 退出。
 try:
     win.close()
     app.processEvents()

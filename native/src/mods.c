@@ -502,7 +502,8 @@ cJSON *list_instance_files(const char *instance, const char *subdir) {
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         char *n = pymcl_wide_to_u8(fd.cFileName);
-        if (pymcl_endswith(n, ".jar") || pymcl_endswith(n, ".zip"))
+        if (pymcl_endswith(n, ".jar") || pymcl_endswith(n, ".zip")
+            || pymcl_endswith(n, ".jar.disabled") || pymcl_endswith(n, ".zip.disabled"))
             cJSON_AddItemToArray(out, cJSON_CreateString(n));
         free(n);
     } while (FindNextFileW(h, &fd));

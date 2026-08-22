@@ -132,8 +132,52 @@ class SlideHStack(QStackedWidget):
             self._finish_now(target)
 
 
+NAV_MIME = "application/x-pymcl-nav"
+
+
+class _DragButton(QPushButton):
+    """分类按钮 + 拖拽源：拖到侧栏即"固定为一级导航项"。"""
+
+    def __init__(self, title: str, nav_key: str = "", parent=None):
+        super().__init__(title, parent)
+        self._nav_key = nav_key
+        if nav_key:
+            self.setProperty("navkey", nav_key)
+        self._press_pos = None
+
+    def mousePressEvent(self, e):
+        self._press_pos = e.position().toPoint() if self._nav_key else None
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        self._press_pos = None
+        super().mouseReleaseEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._press_pos is not None and (e.position().toPoint() - self._press_pos).manhattanLength() > 8:
+            self._press_pos = None
+            self._start_nav_drag()
+            return
+        super().mouseMoveEvent(e)
+
+    def _start_nav_drag(self):
+        from PySide6.QtCore import QMimeData, QPoint
+        from PySide6.QtGui import QDrag
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(NAV_MIME, self._nav_key.encode("utf-8"))
+        mime.setText(self.text())
+        drag.setMimeData(mime)
+        pix = self.grab()
+        if not pix.isNull():
+            drag.setPixmap(pix)
+            drag.setHotSpot(QPoint(pix.width() // 2, pix.height() // 2))
+        drag.exec(Qt.CopyAction)
+
+
 class DownloadCatBar(QFrame):
     currentChanged = Signal(object)
+    unpinRequested = Signal(str)   # 拖回分类条：取消固定
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -154,6 +198,7 @@ class DownloadCatBar(QFrame):
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self._buttons = {}
+        self._lazy = {}  # index -> (btn, title)：bind 先建的懒按钮，页面构造后 wire
         self._layout.addStretch(1)
         self._scroll.setWidget(self._host)
 
@@ -162,6 +207,7 @@ class DownloadCatBar(QFrame):
         root.setSpacing(0)
         root.addWidget(self._scroll)
 
+        self.setAcceptDrops(True)
         self._indicator = QFrame(self._host)
         self._indicator.setObjectName("catIndicator")
         self._indicator.setFixedHeight(2)
@@ -186,6 +232,8 @@ class DownloadCatBar(QFrame):
         )
         for btn, _ in self._buttons.values():
             self._style_btn(btn)
+        for btn, _ in self._lazy.values():
+            self._style_btn(btn)
 
     def _style_btn(self, btn):
         btn.setStyleSheet(
@@ -196,14 +244,42 @@ class DownloadCatBar(QFrame):
         )
 
     def add_item(self, title: str, page):
-        btn = QPushButton(title)
+        btn = self._make_btn(title)
+        self._buttons[id(page)] = (btn, page)
+        btn.clicked.connect(lambda _, p=page: self.currentChanged.emit(p))
+        self._add_btn(btn)
+
+    def add_lazy_item(self, title: str, owner, index: int, nav_key: str = ""):
+        """bind 阶段先建按钮（页面还没构造）：点击时回调 owner._open_pending。"""
+        btn = self._make_btn(title, nav_key)
+        self._lazy[index] = (btn, title)
+        btn.clicked.connect(lambda _, o=owner, i=index: o._open_pending(i))
+        self._add_btn(btn)
+
+    def wire_item(self, title: str, page) -> bool:
+        """页面真正构造好后，把同名的懒建按钮接到页面上（不重复建按钮）。"""
+        for index, (btn, t) in list(self._lazy.items()):
+            if t == title:
+                del self._lazy[index]
+                self._buttons[id(page)] = (btn, page)
+                try:
+                    btn.clicked.disconnect()
+                except TypeError:
+                    pass
+                btn.clicked.connect(lambda _, p=page: self.currentChanged.emit(p))
+                return True
+        return False
+
+    def _make_btn(self, title: str, nav_key: str = "") -> QPushButton:
+        btn = _DragButton(title, nav_key)
         btn.setCheckable(True)
         btn.setCursor(Qt.PointingHandCursor)
         btn.setFixedHeight(40)
         self._style_btn(btn)
         self._group.addButton(btn)
-        self._buttons[id(page)] = (btn, page)
-        btn.clicked.connect(lambda _, p=page: self.currentChanged.emit(p))
+        return btn
+
+    def _add_btn(self, btn):
         self._layout.insertWidget(self._layout.count() - 1, btn)
         self._host.adjustSize()
         self._host.setMinimumWidth(max(self._host.sizeHint().width(), self._layout.sizeHint().width()))
@@ -218,6 +294,16 @@ class DownloadCatBar(QFrame):
         btn.setChecked(True)
         self._move_indicator(btn, animate=animate)
         self._scroll.ensureWidgetVisible(btn, 24, 0)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasFormat(NAV_MIME):
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        key = bytes(e.mimeData().data(NAV_MIME)).decode("utf-8", "ignore")
+        if key:
+            self.unpinRequested.emit(key)
+        e.acceptProposedAction()
 
     def _indicator_rect(self, btn) -> QRect:
         r = btn.geometry()
@@ -253,7 +339,12 @@ class DownloadCatBar(QFrame):
 
 
 class DownloadSection(QWidget):
-    """侧栏「下载」：分类横条切换子页。"""
+    """侧栏「下载」：分类横条切换子页。
+
+    子页懒加载：bind 收 (标题, getter)，第一次进入分区或点开某页时
+    getter 才真正构造页面（MainWindow._ensure_sub 负责构造+注册+回填
+    本分区）。冷启动不用再为 8 个搜索页各建一整套表单。
+    """
 
     def __init__(self, backend, parent=None):
         super().__init__(parent)
@@ -261,6 +352,7 @@ class DownloadSection(QWidget):
         self.backend = backend
         self.hub = self
         self._by_widget = {}
+        self._pending = []  # [(title, getter)]，按声明顺序
 
         self.cat = DownloadCatBar()
         self.cat.currentChanged.connect(self.show_page)
@@ -277,7 +369,8 @@ class DownloadSection(QWidget):
             return
         self.stack.addWidget(page)
         self._by_widget[page] = title
-        if title:
+        if title and not self.cat.wire_item(title, page):
+            # bind 没建过懒按钮（如重建分区时顺序错位）才直接补一个
             self.cat.add_item(title, page)
         if self.stack.count() == 1:
             self.stack.setCurrentWidget(page)
@@ -286,11 +379,28 @@ class DownloadSection(QWidget):
     def bind(self, items: list, opener=None):
         del opener
         for spec in items:
-            if len(spec) == 2:
-                title, page = spec
-            else:
-                title, page = spec[2], spec[4]
-            self.add_page(page, title)
+            title, getter = spec[0], spec[1]
+            key = spec[2] if len(spec) > 2 else ""
+            index = len(self._pending)
+            self._pending.append((title, getter))
+            # 按钮立刻建（横条完整），页面留到第一次点击/进入才构造
+            self.cat.add_lazy_item(title, self, index, key)
+
+    def _open_pending(self, index: int):
+        """懒按钮被点：先构造对应子页（getter → _ensure_sub → add_page），再切换。"""
+        if not (0 <= index < len(self._pending)):
+            return
+        _title, getter = self._pending[index]
+        page = getter()
+        if page is not None:
+            self.show_page(page)
+
+    def ensure_first(self):
+        """第一次进入分区时构造第一个子页（add_page 会把它设为当前页）。"""
+        if self._by_widget or not self._pending:
+            return
+        _title, getter = self._pending[0]
+        getter()
 
     def has_page(self, page) -> bool:
         return page is self or page in self._by_widget
@@ -298,10 +408,16 @@ class DownloadSection(QWidget):
     def current_page(self):
         return self.stack.currentWidget()
 
+    def pages(self) -> list:
+        return list(self._by_widget)
+
+    def pending_specs(self) -> list:
+        return list(self._pending)
+
     def show_hub(self):
-        pages = list(self._by_widget)
-        if pages:
-            self.show_page(pages[0])
+        self.ensure_first()
+        if self._by_widget:
+            self.show_page(next(iter(self._by_widget)))
 
     def show_page(self, page):
         if page is self:
@@ -316,3 +432,7 @@ class DownloadSection(QWidget):
         fn = getattr(win, "_reload_page", None)
         if callable(fn):
             fn(page)
+
+
+class MoreSection(DownloadSection):
+    """侧栏「更多」：杂项页（实例/模组/账号/联机/服务器/时长/反馈/设置）共用横条切换壳。"""

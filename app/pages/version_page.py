@@ -50,11 +50,18 @@ class VersionPage(QWidget):
         self._all_versions: list[dict] = []
         self._fetched = False
         self._cols = 0
-        self._limit = 80
+        # 首屏只建一屏卡片：每张 Fluent 卡 ~7ms，一次建 80 张光构造就
+        # 500ms+，还占内存。翻页用「加载更多」补，步长 80。
+        self._limit = 24
         self._show_hidden = bool(CONFIG.get("show_hidden_versions"))
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(self._refill)
+        # 搜索 / 筛选防抖：每个键入都全量重建网格是输入卡顿的直接来源。
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(150)
+        self._filter_timer.timeout.connect(self._refill)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 20, 28, 20)
@@ -115,8 +122,8 @@ class VersionPage(QWidget):
         ic_layout.addLayout(self.installed_area)
         root.addWidget(installed_card, 1)
 
-        self.search.textChanged.connect(self._refill)
-        self.pivot.currentItemChanged.connect(self._refill)
+        self.search.textChanged.connect(self._on_filter_changed)
+        self.pivot.currentItemChanged.connect(self._on_filter_changed)
         self.uninstall_btn.clicked.connect(self._uninstall_selected)
         self.repair_btn.clicked.connect(self._repair_selected)
         self.instance_box.currentTextChanged.connect(self._reload_installed)
@@ -180,6 +187,10 @@ class VersionPage(QWidget):
             self.instance_box.setCurrentText(cur)
         self.instance_box.blockSignals(False)
         self._reload_installed()
+
+    def _on_filter_changed(self, *_a):
+        """文本 / 透视筛选变化：防抖后再重建网格。"""
+        self._filter_timer.start()
 
     def _refill(self):
         while self.grid.count():

@@ -241,7 +241,12 @@ def list_installed_javas():
         exe = utils.find_executable(child)
         if not exe:
             continue
-        major = get_java_major(exe)
+        # meta 里记了 major 就直接用：get_java_major 要拉起一次
+        # `java -version` 子进程（最多 6 秒超时），实例列表这类
+        # UI 路径经不起每个运行时都跑一遍。
+        major = meta.get("major")
+        if not isinstance(major, int):
+            major = get_java_major(exe)
         result.append({
             "name": meta.get("name", child.name),
             "exe": str(exe),
@@ -250,6 +255,40 @@ def list_installed_javas():
             "meta": meta,
         })
     return result
+
+
+def cached_system_javas():
+    """只读 60 秒缓存；缓存冷时返回空列表，绝不现场扫盘。
+
+    UI 线程（实例列表 Java 标签、启动页下拉框）必须走这个：
+    `find_system_javas()` 冷启动会 glob Program Files 并给每个候选
+    跑 `java -version`，秒级起步，放在 UI 线程就是一次假死。
+    """
+    data = _SYS_JAVA_CACHE.get("data")
+    return list(data) if data else []
+
+
+def cached_all_javas():
+    """自带 Java + 已缓存的系统 Java（不触发扫描）。"""
+    result = list_installed_javas() + cached_system_javas()
+    seen = set()
+    unique = []
+    for j in result:
+        key = j["exe"]
+        if key not in seen:
+            seen.add(key)
+            unique.append(j)
+    return unique
+
+
+def warm_system_javas_async():
+    """起后台线程把系统 Java 扫描灌进缓存，供 cached_* 读取。"""
+    def _run():
+        try:
+            find_system_javas()
+        except Exception:
+            pass
+    return threading.Thread(target=_run, name="pymcl-java-warmup", daemon=True).start()
 
 
 def all_javas():

@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 
 from .client import AIClientError, chat_once, chat_stream
-from .defaults import LONG_TOOLS, MAX_HISTORY, MAX_TOOL_ROUNDS
+from .defaults import DANGEROUS_TOOLS, LONG_TOOLS, MAX_HISTORY, MAX_TOOL_ROUNDS
 from .prompt import system_prompt
 from .tools import (
     TOOL_SCHEMAS, confirm_label, is_ask_tool, is_write_tool,
@@ -26,12 +26,40 @@ def _trim_history(history: list) -> list:
     return list(history[-MAX_HISTORY:])
 
 
-def _system_messages(backend) -> list:
+def _system_messages(backend, settings: dict) -> list:
     ctx = runtime_context(backend)
-    return [
+    msgs = [
         {"role": "system", "content": system_prompt()},
         {"role": "system", "content": "当前启动器状态：\n" + ctx},
     ]
+    note = _permission_note(settings or {})
+    if note:
+        msgs.append({"role": "system", "content": note})
+    return msgs
+
+
+def _permission_note(settings: dict) -> str:
+    """把用户权限设置同步给模型，避免它在免确认模式下还嘴上说「会弹确认」。"""
+    if not bool(settings.get("ai_confirm_writes", True)):
+        return (
+            "[权限设置] 用户关闭了「变更前确认」：写操作会直接执行，不会弹确认。"
+            "你仍要先用一句话说明将要做什么。"
+        )
+    if (settings.get("ai_permission_mode") or "standard") == "full":
+        return (
+            "[权限设置] 用户开启了「完全访问」：多数写操作直接执行；"
+            "删除实例、删除模组、改配置仍会弹确认，要等用户点了才执行。"
+        )
+    return ""
+
+
+def _confirm_policy(settings: dict, tname: str) -> bool:
+    """写操作要不要弹确认：开关关了全不弹；完全访问只保破坏性操作。"""
+    if not bool((settings or {}).get("ai_confirm_writes", True)):
+        return False
+    if ((settings or {}).get("ai_permission_mode") or "standard") == "full":
+        return tname in DANGEROUS_TOOLS
+    return True
 
 
 def run_agent(backend, settings: dict, history: list, user_text: str,
@@ -49,7 +77,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
         if cancelled and cancelled():
             raise AgentCancelled()
 
-    messages = _system_messages(backend) + _trim_history(history)
+    messages = _system_messages(backend, settings) + _trim_history(history)
     messages.append({"role": "user", "content": user_text})
 
     final = ""
@@ -197,7 +225,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                         on_status("tool_done", {"name": tname, "label": label, "result": str(result)[:400]})
             elif is_write_tool(tname):
                 ok = True
-                if confirm_fn:
+                if confirm_fn and _confirm_policy(settings, tname):
                     ok = bool(confirm_fn(tname, args, label))
                 if not ok:
                     result = "用户取消了这次操作"

@@ -15,9 +15,10 @@ from PySide6.QtWidgets import (
     QSizePolicy, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
-    BodyLabel, CaptionLabel, CheckBox, FluentIcon as FIF, InfoBar, InfoBarPosition,
-    LineEdit, PlainTextEdit, PrimaryPushButton, ProgressBar, PushButton, RadioButton,
-    ScrollArea, SubtitleLabel, TransparentPushButton,
+    BodyLabel, CaptionLabel, CheckBox, ComboBox, FluentIcon as FIF, InfoBar,
+    InfoBarPosition, LineEdit, MessageBoxBase, PlainTextEdit, PrimaryPushButton,
+    ProgressBar, PushButton, RadioButton, ScrollArea, SettingCard, SubtitleLabel,
+    SwitchButton, TransparentPushButton, TransparentToolButton,
 )
 
 from mclauncher.ai.agent import AgentCancelled, run_agent
@@ -32,6 +33,10 @@ _CHIPS = (tr("下一款游戏 1.20.1 Fabric"), tr("装钠和光影"), tr("启动
 _WELCOME = (
     tr("我是启动器助手。可以帮你下游戏、装模组和整合包、看启动报错、查模组冲突、改常用配置。\n"
     "直接说你想做什么就行。写操作我会先让你确认。")
+)
+_WELCOME_NOCONFIRM = (
+    tr("我是启动器助手。可以帮你下游戏、装模组和整合包、看启动报错、查模组冲突、改常用配置。\n"
+    "直接说你想做什么就行。写操作会直接执行，不逐条询问。")
 )
 _FENCE = re.compile(r"```(?:\w+)?\n([\s\S]*?)```")
 _CODE = re.compile(r"`([^`]+)`")
@@ -408,6 +413,70 @@ class _AskBlock(QWidget):
         }
 
 
+class PermissionDialog(MessageBoxBase):
+    """AI 助手权限管理：变更前确认（开关）+ 完全访问（下拉）。
+
+    两个控件改完立即落盘，不用点额外保存；on_changed 用来让 AI 页
+    同步输入框旁的状态标签和快捷下拉。
+    """
+
+    def __init__(self, backend, on_changed=None, parent=None):
+        super().__init__(parent)
+        self.backend = backend
+        self._on_changed = on_changed
+        self.viewLayout.addWidget(SubtitleLabel(tr("权限管理"), self))
+        self.viewLayout.addWidget(CaptionLabel(tr("控制 AI 助手改东西前要不要先问你")))
+        self.viewLayout.addSpacing(8)
+
+        s = backend.get_settings()
+        confirm_on = bool(s.get("ai_confirm_writes", True))
+        mode = s.get("ai_permission_mode") or "standard"
+
+        self.confirm_card = SettingCard(FIF.INFO, tr("变更前确认"), tr("改文件前先问我"))
+        self.confirm_sw = SwitchButton(self.confirm_card)
+        self.confirm_sw.setChecked(confirm_on)
+        self.confirm_card.hBoxLayout.addWidget(self.confirm_sw, 0, Qt.AlignRight)
+        self.confirm_card.hBoxLayout.addSpacing(16)
+        self.viewLayout.addWidget(self.confirm_card)
+
+        self.mode_card = SettingCard(FIF.FINGERPRINT, tr("完全访问"), tr("减少确认次数"))
+        self.mode_box = ComboBox(self.mode_card)
+        self.mode_box.addItems([tr("标准"), tr("完全访问")])
+        self.mode_box.setCurrentIndex(1 if mode == "full" else 0)
+        self.mode_box.setFixedWidth(150)
+        self.mode_card.hBoxLayout.addWidget(self.mode_box, 0, Qt.AlignRight)
+        self.mode_card.hBoxLayout.addSpacing(16)
+        self.viewLayout.addWidget(self.mode_card)
+
+        self.viewLayout.addSpacing(4)
+        tip = CaptionLabel(tr(
+            "关掉「变更前确认」后写操作全部直接执行；「完全访问」仍会在删除实例、"
+            "删除模组、改配置前询问。"))
+        tip.setWordWrap(True)
+        self.viewLayout.addWidget(tip)
+
+        self.confirm_sw.checkedChanged.connect(self._save)
+        self.mode_box.currentIndexChanged.connect(self._save)
+
+        self.yesButton.setText(tr("关闭"))
+        self.cancelButton.hide()
+        self.widget.setMinimumWidth(480)
+
+    def _save(self, *_a):
+        mode = "full" if self.mode_box.currentIndex() == 1 else "standard"
+        try:
+            self.backend.save_settings({
+                "ai_confirm_writes": bool(self.confirm_sw.isChecked()),
+                "ai_permission_mode": mode,
+            })
+        except Exception as exc:  # noqa: BLE001
+            InfoBar.error(tr("保存失败"), str(exc), parent=self,
+                          position=InfoBarPosition.TOP, duration=4000)
+            return
+        if self._on_changed:
+            self._on_changed()
+
+
 class ChatInput(PlainTextEdit):
     submitted = Signal(str)
 
@@ -529,9 +598,22 @@ class AiPage(QWidget):
         row = QHBoxLayout(self._input_box)
         row.setContentsMargins(10, 8, 10, 8)
         self.input = ChatInput()
+        # 输入框旁的权限快捷区：下拉直接切三档，齿轮开完整说明面板
+        self.perm_combo = ComboBox()
+        self.perm_combo.setFixedHeight(34)
+        self.perm_combo.setFixedWidth(112)
+        self.perm_combo.setToolTip(tr("AI 权限等级"))
+        self.perm_combo.addItems([tr("标准"), tr("完全访问"), tr("免确认")])
+        self.perm_combo.currentIndexChanged.connect(self._on_perm_level)
+        self.perm_btn = TransparentToolButton(FIF.SETTING)
+        self.perm_btn.setFixedSize(34, 34)
+        self.perm_btn.setToolTip(tr("点击管理 AI 权限"))
+        self.perm_btn.clicked.connect(self._open_permissions)
         self.send_btn = PrimaryPushButton(getattr(FIF, "SEND", FIF.PLAY), tr("发送"))
         self.send_btn.setFixedHeight(34)
         row.addWidget(self.input, 1)
+        row.addWidget(self.perm_combo)
+        row.addWidget(self.perm_btn)
         row.addWidget(self.send_btn)
         main.addWidget(self._input_box)
 
@@ -551,9 +633,11 @@ class AiPage(QWidget):
         self.restyle()
         self._reload_list()
         self._load_active()
+        self._refresh_perm_ui()
 
     def reload(self):
         self._refresh_status()
+        self._refresh_perm_ui()
 
     def restyle(self):
         self._side.setStyleSheet(
@@ -581,6 +665,38 @@ class AiPage(QWidget):
         else:
             label = f"公益接口 · {DEFAULT_MODEL}"
         self.status.setText(label)
+
+    def _perm_level(self) -> str:
+        s = self.backend.get_settings()
+        if not bool(s.get("ai_confirm_writes", True)):
+            return "noconfirm"
+        return "full" if (s.get("ai_permission_mode") or "standard") == "full" else "standard"
+
+    def _refresh_perm_ui(self):
+        level = self._perm_level()
+        self.perm_combo.blockSignals(True)
+        self.perm_combo.setCurrentIndex({"standard": 0, "full": 1, "noconfirm": 2}[level])
+        self.perm_combo.blockSignals(False)
+
+    def _on_perm_level(self, index: int):
+        data = {
+            0: {"ai_confirm_writes": True, "ai_permission_mode": "standard"},
+            1: {"ai_confirm_writes": True, "ai_permission_mode": "full"},
+            2: {"ai_confirm_writes": False},
+        }.get(index)
+        if not data:
+            return
+        try:
+            self.backend.save_settings(data)
+        except Exception as exc:  # noqa: BLE001
+            InfoBar.error(tr("保存失败"), str(exc), parent=self.window() or self,
+                          position=InfoBarPosition.TOP, duration=4000)
+        self._refresh_perm_ui()
+
+    def _open_permissions(self):
+        dlg = PermissionDialog(self.backend, on_changed=self._refresh_perm_ui,
+                               parent=self.window())
+        dlg.exec()
 
     def _launch_prefs(self) -> dict:
         win = self.window()
@@ -634,7 +750,9 @@ class AiPage(QWidget):
         self._history = list((chat or {}).get("messages") or [])
         self._wipe_messages()
         if not self._history:
-            self._add_bubble("assistant", _WELCOME)
+            s = self.backend.get_settings()
+            welcome = _WELCOME if bool(s.get("ai_confirm_writes", True)) else _WELCOME_NOCONFIRM
+            self._add_bubble("assistant", welcome)
         else:
             for m in self._history:
                 role = m.get("role") or "assistant"

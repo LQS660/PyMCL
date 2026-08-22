@@ -7,9 +7,10 @@ import stat
 import time
 import webbrowser
 
-import requests
-
 from . import utils
+
+# requests 只在真正联网（微软登录）时才 import；AccountManager 本身只读写
+# 本地 JSON，backend 在 GUI 启动路径上就会构造它，不能被 requests 拖慢。
 
 # 微软 OAuth 端点
 MS_DEVICE_CODE_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
@@ -206,6 +207,7 @@ class AuthError(Exception):
 
 class MicrosoftAuthenticator:
     def __init__(self, client_id="00000000402b5328", timeout=15):
+        import requests
         self.client_id = client_id
         self.timeout = timeout
         self.session = requests.Session()
@@ -236,6 +238,7 @@ class MicrosoftAuthenticator:
 
     # ---- 第 2 步：轮询令牌
     def poll_token(self, device_code, interval=5, expires_in=900, on_status=None):
+        import requests
         deadline = time.time() + expires_in
         while time.time() < deadline:
             try:

@@ -1,21 +1,21 @@
 # -*- coding: utf-8 -*-
-"""启动页：渐变 Banner + 大启动按钮 + 配置 + 实时日志。"""
+"""启动页：自由布局画布（横幅/配置/日志/新闻/便签等卡片，可任意拖拽缩放）。"""
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QTextBrowser, QVBoxLayout, QWidget
+from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtWidgets import QTextBrowser, QVBoxLayout, QWidget
 from qfluentwidgets import (
-    BodyLabel, CaptionLabel, ComboBox, FluentIcon as FIF,
-    HeaderCardWidget, InfoBar, InfoBarPosition, LineEdit, PlainTextEdit,
-    PrimaryPushButton, ProgressBar, PushButton, SimpleCardWidget, Slider,
-    SpinBox, StrongBodyLabel, TransparentPushButton, setFont,
+    CaptionLabel, InfoBar, InfoBarPosition, StrongBodyLabel,
 )
 
 from mclauncher.config import CONFIG
 from mclauncher.instances import JAVA_AUTO
 from .crash_dialog import CrashDialog
-from ..widgets import BannerWidget, DeviceCodeDialog
-from ..pcl_chrome import form_label
+from ..widgets import DeviceCodeDialog
+from .. import layout_model
+from ..dashboard import DashboardCanvas
+from .home_cards import (
+    BannerBody, ConfigBody, LogBody, NewsBody, build_registry,
+)
 from mclauncher.i18n import tr
 
 
@@ -30,52 +30,18 @@ class LaunchPage(QWidget):
         self._java_opts = []
         self._syncing_java = False
         self._crash_shown = False
+        self._body_cache = {}   # 单例卡片正文缓存：移除再添加时复用控件状态
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(28, 20, 28, 20)
-        root.setSpacing(16)
-
-        self.banner = BannerWidget(self)
-        self.launch_btn = PrimaryPushButton(FIF.PLAY, tr("启动游戏"))
-        self.launch_btn.setFixedSize(170, 46)
-        setFont(self.launch_btn, 15, QFont.DemiBold)
-        self.stop_btn = PushButton(FIF.CLOSE, tr("停止"))
-        self.stop_btn.setFixedSize(170, 30)
-        self.stop_btn.setEnabled(False)
-        self.banner.right_area.addStretch(1)
-        self.banner.right_area.addWidget(self.launch_btn, 0, Qt.AlignRight)
-        self.banner.right_area.addWidget(self.stop_btn, 0, Qt.AlignRight)
-        root.addWidget(self.banner)
-
-        self.progress = ProgressBar(self)
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.status_label = CaptionLabel(tr("就绪"))
-        root.addWidget(self.progress)
-        root.addWidget(self.status_label)
-
-        middle = QHBoxLayout()
-        middle.setSpacing(16)
-
-        cfg_card = SimpleCardWidget(self)
-        cfg = QFormLayout(cfg_card)
-        cfg.setContentsMargins(20, 18, 20, 18)
-        cfg.setSpacing(12)
-        cfg.setLabelAlignment(Qt.AlignLeft)
-        cfg.addRow(StrongBodyLabel(tr("启动配置")))
-
-        self.instance_box = ComboBox()
-        self.version_box = ComboBox()
-        self.account_box = ComboBox()
-        self.java_box = ComboBox()
-        self.username_edit = LineEdit()
-        self.username_edit.setPlaceholderText(tr("离线用户名"))
-        self.username_edit.setText("Player")
-
-        self.memory_slider = Slider(Qt.Horizontal)
-        self.memory_slider.setRange(512, 32768)
-        self.memory_slider.setSingleStep(256)
-        self.memory_slider.setValue(int(CONFIG.get("memory_mb", 4096)))
+        # 四个单例正文先于画布构造：页面逻辑（reload/启动/日志）始终能
+        # 稳定引用 instance_box / log_edit 等控件，即使卡片被用户移除。
+        for BodyCls in (BannerBody, ConfigBody, LogBody, NewsBody):
+            if BodyCls.key not in self._body_cache:
+                self._body_cache[BodyCls.key] = BodyCls(self, None, None)
+        self.launch_btn.clicked.connect(self._on_launch)
+        self.stop_btn.clicked.connect(self._on_stop)
+        self.instance_box.currentTextChanged.connect(self._on_instance_changed)
+        self.java_box.currentTextChanged.connect(self._on_java_changed)
+        self.version_box.currentTextChanged.connect(self._sync_banner)
         # 记住「上次从 CONFIG 同步过来的值」，reload() 靠它区分
         # 「用户在本页手改过」和「一直是配置里的默认值」。
         self._cfg_snapshot = (
@@ -83,79 +49,22 @@ class LaunchPage(QWidget):
             int(CONFIG.get("width", 854)),
             int(CONFIG.get("height", 480)),
         )
-        self.memory_label = CaptionLabel(f"{self.memory_slider.value()} MB")
-        self.memory_slider.valueChanged.connect(self._on_memory_changed)
-        mem_row = QHBoxLayout()
-        mem_row.addWidget(self.memory_slider, 1)
-        mem_row.addWidget(self.memory_label)
 
-        res_row = QHBoxLayout()
-        self.width_spin = SpinBox()
-        self.width_spin.setRange(320, 7680)
-        self.width_spin.setValue(int(CONFIG.get("width", 854)))
-        self.height_spin = SpinBox()
-        self.height_spin.setRange(240, 4320)
-        self.height_spin.setValue(int(CONFIG.get("height", 480)))
-        res_row.addWidget(self.width_spin)
-        res_row.addWidget(BodyLabel("×"))
-        res_row.addWidget(self.height_spin)
-        res_row.addStretch(1)
-        self.width_spin.valueChanged.connect(self._persist_launch_defaults)
-        self.height_spin.valueChanged.connect(self._persist_launch_defaults)
+        self.registry = build_registry(self)
+        self.canvas = DashboardCanvas(self.registry, self)
+        self.canvas.layout_changed.connect(self._on_layout_changed)
+        self.canvas.build_from_doc(layout_model.load_active_doc())
 
-        # 必须用 Fluent BodyLabel：addRow("中文", w) 会生成系统 QLabel，深色下仍是黑字
-        cfg.addRow(form_label(tr("实例")), self.instance_box)
-        cfg.addRow(form_label(tr("版本")), self.version_box)
-        cfg.addRow(form_label(tr("账号")), self.account_box)
-        cfg.addRow(form_label(tr("用户名")), self.username_edit)
-        cfg.addRow(form_label(tr("Java（本实例）")), self.java_box)
-        cfg.addRow(form_label(tr("内存")), mem_row)
-        cfg.addRow(form_label(tr("分辨率")), res_row)
-        self.server_edit = LineEdit()
-        self.server_edit.setPlaceholderText(tr("直连服务器 host 或 host:port"))
-        cfg.addRow(form_label(tr("服务器")), self.server_edit)
-        setup_btn = TransparentPushButton(FIF.SETTING, tr("此版本设置…"))
-        setup_btn.clicked.connect(self._version_setup)
-        news_btn = TransparentPushButton(FIF.SYNC, tr("刷新新闻"))
-        news_btn.clicked.connect(self._load_news)
-        cfg.addRow("", setup_btn)
-        cfg.addRow("", news_btn)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 12, 16, 12)
+        root.setSpacing(0)
+        root.addWidget(self.canvas)
 
-        ms_btn = TransparentPushButton(FIF.PEOPLE, tr("使用微软账户登录…"))
-        ms_btn.clicked.connect(self._login)
-        cfg.addRow("", ms_btn)
-        cfg_card.setFixedWidth(360)
-        middle.addWidget(cfg_card)
+        self._layout_persist = QTimer(self)
+        self._layout_persist.setSingleShot(True)
+        self._layout_persist.setInterval(400)
+        self._layout_persist.timeout.connect(self._persist_layout_now)
 
-        log_card = HeaderCardWidget(self)
-        log_card.setTitle(tr("实时日志"))
-        self.log_edit = PlainTextEdit()
-        self.log_edit.setReadOnly(True)
-        self.log_edit.setPlaceholderText(tr("启动日志将输出到这里…"))
-        log_card.viewLayout.addWidget(self.log_edit)
-        # 启动命令复制
-        cmd_row = QHBoxLayout()
-        cmd_row.setSpacing(8)
-        self.cmd_btn = PushButton(tr("复制启动命令"))
-        self.cmd_btn.clicked.connect(self._copy_cmd)
-        cmd_row.addStretch(1)
-        cmd_row.addWidget(self.cmd_btn)
-        log_card.viewLayout.addLayout(cmd_row)
-        middle.addWidget(log_card, 1)
-
-        news_card = HeaderCardWidget(self)
-        news_card.setTitle(tr("Minecraft 新闻"))
-        self.news_card = news_card
-        self.news_host = QVBoxLayout()
-        news_card.viewLayout.addLayout(self.news_host)
-        middle.addWidget(news_card)
-        root.addLayout(middle, 1)
-
-        self.launch_btn.clicked.connect(self._on_launch)
-        self.stop_btn.clicked.connect(self._on_stop)
-        self.instance_box.currentTextChanged.connect(self._on_instance_changed)
-        self.java_box.currentTextChanged.connect(self._on_java_changed)
-        self.version_box.currentTextChanged.connect(self._sync_banner)
         backend.progress.connect(self._on_progress)
         backend.log.connect(self._on_log)
         backend.finished.connect(self._on_finished)
@@ -163,6 +72,47 @@ class LaunchPage(QWidget):
         backend.login_code.connect(self._on_login_code)
         backend.login_status.connect(self._on_login_status)
 
+        # 扫盘（实例/账号/版本）延后到事件循环空转：首帧先出壳，
+        # MainWindow._boot_reload 的合并刷新会覆盖这次 reload。
+        QTimer.singleShot(0, self._boot_load)
+
+    # ------------------------------------------------------------------
+    # 布局：持久化 / 方案应用 / 编辑入口
+    # ------------------------------------------------------------------
+    def _on_layout_changed(self):
+        self._layout_persist.start()
+
+    def persist_layout_soon(self):
+        """卡片内容（便签文字、快捷入口配置）变化时的落盘入口。"""
+        self._layout_persist.start()
+
+    def _persist_layout_now(self):
+        doc = self.canvas.current_doc()
+        name = layout_model.active_profile()
+        layout_model.save_active_doc(doc)
+        if name:
+            # 命名方案被就地编辑：同步回方案表，切换回来不丢改动。
+            layout_model.save_profile(name, doc)
+
+    def apply_doc(self, doc):
+        """外部（设置页切方案）应用一份新布局，不触发落盘回环。"""
+        self.canvas.build_from_doc(doc)
+
+    def enter_edit_mode(self):
+        self.canvas.set_edit_mode(True)
+
+    def nav_to(self, key: str):
+        win = self.window()
+        if win is not None and hasattr(win, "switchTo"):
+            win.switchTo(key)
+
+    def restyle(self):
+        self.canvas.restyle()
+
+    def _boot_load(self):
+        if getattr(self, "_boot_loaded", False):
+            return
+        self._boot_loaded = True
         self.reload()
         self._load_news()
 
@@ -181,18 +131,20 @@ class LaunchPage(QWidget):
                             position=InfoBarPosition.TOP, duration=2000)
 
     def _load_news(self):
+        if getattr(self, "news_body", None) is None:
+            return
         while self.news_host.count():
             item = self.news_host.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         mode = CONFIG.get("homepage_mode") or "news"
         if mode == "blank":
-            self.news_card.setTitle(tr("主页"))
+            self.news_body.set_title(tr("主页"))
             self.news_host.addWidget(CaptionLabel(tr("主页已设为空白")))
             return
         if mode == "custom":
             from pathlib import Path
-            self.news_card.setTitle(tr("自定义主页"))
+            self.news_body.set_title(tr("自定义主页"))
             path = CONFIG.get("custom_homepage") or ""
             browser = QTextBrowser()
             browser.setOpenExternalLinks(True)
@@ -212,7 +164,7 @@ class LaunchPage(QWidget):
                 browser.setPlainText(tr("未设置自定义主页。到设置 → 启动页主页 填写本地 HTML 路径。"))
             self.news_host.addWidget(browser)
             return
-        self.news_card.setTitle(tr("Minecraft 新闻"))
+        self.news_body.set_title(tr("Minecraft 新闻"))
         cached = self.backend.cached_news()
         self._fill_news(cached)
 
@@ -252,6 +204,7 @@ class LaunchPage(QWidget):
     def reload(self):
         if self._task_id and not self.launch_btn.isEnabled():
             return
+        self.canvas.refresh_cards()
         cur_inst = self.instance_box.currentText()
         self.instance_box.blockSignals(True)
         self.instance_box.clear()
@@ -286,7 +239,27 @@ class LaunchPage(QWidget):
         self._persist_launch_defaults()
 
     def _persist_launch_defaults(self, *_args):
-        """启动页改的内存 / 分辨率写回 CONFIG，下次打开仍生效。"""
+        """启动页改的内存 / 分辨率写回 CONFIG（防抖入口）。
+
+        滑条每拖一格、SpinBox 每点一次箭头都会触发 valueChanged，
+        直接落盘等于每次都原子写 + fsync config.json，拖动时磁盘
+        和 UI 一起卡。这里 400ms 合并；点「启动游戏」时立即冲刷。
+        """
+        if not hasattr(self, "_defaults_persist"):
+            self._defaults_persist = QTimer(self)
+            self._defaults_persist.setSingleShot(True)
+            self._defaults_persist.setInterval(400)
+            self._defaults_persist.timeout.connect(self._persist_launch_defaults_now)
+        self._defaults_persist.start()
+
+    def _flush_launch_defaults(self):
+        """立刻落盘待写的默认值（启动游戏 / 关窗前调用）。"""
+        timer = getattr(self, "_defaults_persist", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+            self._persist_launch_defaults_now()
+
+    def _persist_launch_defaults_now(self):
         mem = int(self.memory_slider.value())
         w = int(self.width_spin.value())
         h = int(self.height_spin.value())
@@ -396,6 +369,7 @@ class LaunchPage(QWidget):
     def _on_launch(self):
         from qfluentwidgets import MessageBox
 
+        self._flush_launch_defaults()
         instance = self.instance_box.currentText() or "default"
         version = self.version_box.currentText()
         memory_mb = self.memory_slider.value()

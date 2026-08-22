@@ -667,6 +667,9 @@ class BackendAPI:
             "ai_base_url": CONFIG.get("ai_base_url") or "",
             "ai_api_key": CONFIG.get("ai_api_key") or "",
             "ai_model": CONFIG.get("ai_model") or DEFAULT_MODEL,
+            # AI 权限：run_agent 的确认分流读这两个键，桥接端也要带出去
+            "ai_confirm_writes": bool(CONFIG.get("ai_confirm_writes", True)),
+            "ai_permission_mode": CONFIG.get("ai_permission_mode") or "standard",
             "root": str(utils.ROOT),
             "feedback_url": CONFIG.get("feedback_url") or DEFAULT_FEEDBACK_URL or "",
             "feedback_heartbeat": bool(CONFIG.get("feedback_heartbeat", True)),

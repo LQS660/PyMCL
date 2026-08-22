@@ -20,9 +20,13 @@ from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
-import requests
-
 from . import utils
+
+
+def _rq():
+    """requests 延迟到真正发 HTTP 时再 import（GUI 启动路径不背这几十毫秒）。"""
+    import requests
+    return requests
 
 VERSION = "0.4.2"
 NODE_LIST_URL = "https://terracotta.glavo.site/nodes"
@@ -511,7 +515,7 @@ def _http_ok(port: int, timeout=1.5) -> bool:
     if not port:
         return False
     try:
-        resp = requests.get(f"http://127.0.0.1:{int(port)}/state", timeout=timeout)
+        resp = _rq().get(f"http://127.0.0.1:{int(port)}/state", timeout=timeout)
         return resp.status_code < 500
     except Exception:
         return False
@@ -602,7 +606,7 @@ def public_nodes() -> list[str]:
     for url in _extra_nodes():
         add(url)
     try:
-        resp = requests.get(NODE_LIST_URL, timeout=10)
+        resp = _rq().get(NODE_LIST_URL, timeout=10)
         resp.raise_for_status()
         rows = resp.json()
         if isinstance(rows, list):
@@ -635,7 +639,7 @@ def _http(path: str, params=None, timeout=4):
     url = f"http://127.0.0.1:{_port}{path}"
     if q:
         url += "?" + urlencode(q, doseq=True)
-    resp = requests.get(url, timeout=timeout)
+    resp = _rq().get(url, timeout=timeout)
     if resp.status_code == 400:
         raise TerracottaError(
             "联机内核拒绝了这次请求。房间号须为 U/XXXX-XXXX-XXXX-XXXX，且内核要处于就绪状态。"
@@ -662,7 +666,7 @@ def _read_port(path: Path):
 
 def _kernel_version(port: int) -> str:
     try:
-        data = requests.get(f"http://127.0.0.1:{int(port)}/meta", timeout=2).json()
+        data = _rq().get(f"http://127.0.0.1:{int(port)}/meta", timeout=2).json()
         return str(data.get("version") or "")
     except Exception:
         return ""
@@ -670,7 +674,7 @@ def _kernel_version(port: int) -> str:
 
 def _peaceful_stop(port: int):
     try:
-        requests.get(f"http://127.0.0.1:{int(port)}/panic?peaceful=true", timeout=2)
+        _rq().get(f"http://127.0.0.1:{int(port)}/panic?peaceful=true", timeout=2)
     except Exception:
         pass
 
@@ -680,9 +684,9 @@ def _recover_waiting():
     if not _port:
         return
     try:
-        data = requests.get(f"http://127.0.0.1:{_port}/state", timeout=2).json()
+        data = _rq().get(f"http://127.0.0.1:{_port}/state", timeout=2).json()
         if str(data.get("state") or "") == "exception":
-            requests.get(f"http://127.0.0.1:{_port}/state/ide", timeout=2)
+            _rq().get(f"http://127.0.0.1:{_port}/state/ide", timeout=2)
     except Exception:
         pass
 
@@ -780,7 +784,7 @@ def stop():
     port = _port or _load_port()
     if port:
         try:
-            requests.get(f"http://127.0.0.1:{int(port)}/panic?peaceful=true", timeout=2)
+            _rq().get(f"http://127.0.0.1:{int(port)}/panic?peaceful=true", timeout=2)
         except Exception:
             pass
     proc, _proc, _port = _proc, None, 0

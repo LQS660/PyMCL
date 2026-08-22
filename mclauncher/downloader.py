@@ -11,14 +11,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urljoin
 
-import requests
-from urllib3.util.retry import Retry
-
 from . import APP_NAME, APP_VERSION
 from . import utils
-from .download_status import DownloadTracker, StatusHTTPAdapter
+from .download_status import DownloadTracker
 from .mirrors import expand_download_urls
 from .source import is_github_url
+
+# requests + urllib3 推迟到 DownloadManager.__init__ 再 import：
+# java/installer/launcher/mods/modpack 都在模块顶层引用 downloader，
+# 这里 eager 拉 requests 会把整条链变重，GUI 冷启动白付几百毫秒。
 
 
 class DownloadError(Exception):
@@ -170,6 +171,8 @@ class DownloadManager:
         self._paced = 0
         self._pace_t0 = time.monotonic()
 
+        import requests
+        from urllib3.util.retry import Retry
         self.session = requests.Session()
         from .net import apply_direct_to_session
         apply_direct_to_session(self.session)
@@ -186,7 +189,8 @@ class DownloadManager:
             raise_on_status=False,
         )
         pool = max(16, self.threads)
-        adapter = StatusHTTPAdapter(
+        from .download_status import make_status_adapter
+        adapter = make_status_adapter(
             self.tracker, max_retries=retry, pool_connections=pool, pool_maxsize=pool,
         )
         self.session.mount("https://", adapter)

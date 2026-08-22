@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """设置页：WinUI 风格设置卡片组。"""
 
+import os
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
@@ -134,6 +136,9 @@ class SettingsPage(QWidget):
         self.bg_card, self.bg_edit = _line_card(
             FIF.PHOTO, tr("背景图"), tr("本地图片路径，留空为纯色"))
         self.bg_edit.setText(settings.get("ui_background") or "")
+        self.bg_pick = PushButton(tr("选择文件"))
+        self.bg_pick.clicked.connect(self._browse_background)
+        self.bg_card.hBoxLayout.addWidget(self.bg_pick, 0, Qt.AlignRight)
         vis_map = {
             "keep": tr("保持显示"),
             "minimize": tr("最小化"),
@@ -189,6 +194,71 @@ class SettingsPage(QWidget):
         theme_card.hBoxLayout.addSpacing(8)
         ui_group.addSettingCard(theme_card)
         root.addWidget(ui_group)
+
+        # ---- 个性化布局：自由画布 + 方案 + 侧栏 ----
+        from . import layout_settings as lset
+        self._lset = lset
+        layout_group = SettingCardGroup(tr("个性化布局"), host)
+
+        edit_card = SettingCard(
+            FIF.EDIT if hasattr(FIF, "EDIT") else FIF.SETTING,
+            tr("启动页布局"), tr("卡片随意拖动 / 缩放 / 增删，自由摆放"))
+        self.layout_edit_btn = PushButton(tr("进入编辑"))
+        self.layout_edit_btn.clicked.connect(self._edit_home_layout)
+        edit_card.hBoxLayout.addWidget(self.layout_edit_btn, 0, Qt.AlignRight)
+        edit_card.hBoxLayout.addSpacing(16)
+        layout_group.addSettingCard(edit_card)
+
+        labels, names = lset.profile_labels()
+        self._profile_names = names
+        self.profile_card, self.profile_box = _combo_card(
+            FIF.TILES if hasattr(FIF, "TILES") else FIF.LIBRARY,
+            tr("布局方案"), tr("切换整套布局；编辑后自动记住"),
+            labels, names[0])
+        cur_profile = lset.layout_model.active_profile()
+        if cur_profile in names:
+            self.profile_box.setCurrentIndex(names.index(cur_profile))
+        self.profile_box.currentIndexChanged.connect(self._on_profile_changed)
+        self.profile_save_btn = PushButton(tr("另存为…"))
+        self.profile_save_btn.clicked.connect(self._save_profile_as)
+        self.profile_del_btn = PushButton(tr("删除"))
+        self.profile_del_btn.clicked.connect(self._delete_profile)
+        self.profile_reset_btn = PushButton(tr("重置默认"))
+        self.profile_reset_btn.clicked.connect(self._reset_home_layout)
+        for b in (self.profile_save_btn, self.profile_del_btn, self.profile_reset_btn):
+            self.profile_card.hBoxLayout.addWidget(b, 0, Qt.AlignRight)
+        layout_group.addSettingCard(self.profile_card)
+
+        io_card = SettingCard(
+            FIF.SYNC, tr("布局导入/导出"),
+            tr("把布局存成 JSON 文件，换机或分享给朋友"))
+        self.layout_export_btn = PushButton(tr("导出…"))
+        self.layout_export_btn.clicked.connect(self._export_home_layout)
+        self.layout_import_btn = PushButton(tr("导入…"))
+        self.layout_import_btn.clicked.connect(self._import_home_layout)
+        io_card.hBoxLayout.addWidget(self.layout_export_btn, 0, Qt.AlignRight)
+        io_card.hBoxLayout.addWidget(self.layout_import_btn, 0, Qt.AlignRight)
+        io_card.hBoxLayout.addSpacing(16)
+        layout_group.addSettingCard(io_card)
+
+        side_card = SettingCard(
+            FIF.MENU if hasattr(FIF, "MENU") else FIF.SETTING,
+            tr("侧栏自定义"), tr("导航项排序 / 显示隐藏 / 侧栏宽度"))
+        self.sidebar_btn = PushButton(tr("自定义侧栏…"))
+        self.sidebar_btn.clicked.connect(self._open_sidebar_editor)
+        side_card.hBoxLayout.addWidget(self.sidebar_btn, 0, Qt.AlignRight)
+        side_card.hBoxLayout.addSpacing(16)
+        layout_group.addSettingCard(side_card)
+
+        section_card = SettingCard(
+            FIF.TILES if hasattr(FIF, "TILES") else FIF.LIBRARY,
+            tr("分区内容"), tr("子页在「下载」和「更多」之间移动、排序"))
+        self.section_btn = PushButton(tr("自定义分区…"))
+        self.section_btn.clicked.connect(self._open_section_editor)
+        section_card.hBoxLayout.addWidget(self.section_btn, 0, Qt.AlignRight)
+        section_card.hBoxLayout.addSpacing(16)
+        layout_group.addSettingCard(section_card)
+        root.addWidget(layout_group)
 
         perf_group = SettingCardGroup(tr("下载与性能"), host)
         self.threads_card, self.threads_spin = _spin_card(
@@ -384,6 +454,8 @@ class SettingsPage(QWidget):
         # 文案写「立即生效」，开关本身必须落盘并刷主题；不能只等点「保存设置」
         self.dark_sw.checkedChanged.connect(self._on_dark_toggled)
         self.color_edit.editingFinished.connect(self._on_theme_color_committed)
+        # 背景图同理：手输路径回车/失焦就应用，不必先点「保存设置」
+        self.bg_edit.editingFinished.connect(self._on_bg_committed)
 
     def refresh_from_config(self):
         """把磁盘上的最新设置推回控件。
@@ -422,6 +494,131 @@ class SettingsPage(QWidget):
             color = "#" + color
         self.backend.save_settings({"theme_color": color})
         self._apply_theme_now()
+
+    def _browse_background(self):
+        cur = self.bg_edit.text().strip()
+        start = cur if cur and os.path.isfile(cur) else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, tr("选择背景图"), start,
+            tr("图片 (*.png *.jpg *.jpeg *.bmp *.webp *.gif)") + ";;" + tr("所有文件 (*)"))
+        if not path:
+            return
+        self.bg_edit.setText(path)
+        # 选完立即落盘并刷主题，马上能看到效果；之后点「保存设置」写的也是同一个值
+        self.backend.save_settings({"ui_background": path})
+        self._apply_theme_now()
+        InfoBar.success(tr("已应用"), tr("背景已更新"), parent=self,
+                        position=InfoBarPosition.TOP, duration=2000)
+
+    def _on_bg_committed(self):
+        path = self.bg_edit.text().strip()
+        if path == (self.backend.get_setting("ui_background") or ""):
+            return
+        self.backend.save_settings({"ui_background": path})
+        self._apply_theme_now()
+
+    # ------------------------------------------------------------------
+    # 个性化布局
+    # ------------------------------------------------------------------
+    def _win(self):
+        win = self.window()
+        return win if hasattr(win, "launch_page") else None
+
+    def _edit_home_layout(self):
+        win = self._win()
+        if win is None:
+            return
+        win.switchTo("launch")
+        win.launch_page.enter_edit_mode()
+
+    def _refresh_profiles(self):
+        labels, names = self._lset.profile_labels()
+        self._profile_names = names
+        self.profile_box.blockSignals(True)
+        self.profile_box.clear()
+        self.profile_box.addItems(labels)
+        cur = self._lset.layout_model.active_profile()
+        if cur in names:
+            self.profile_box.setCurrentIndex(names.index(cur))
+        self.profile_box.blockSignals(False)
+
+    def _on_profile_changed(self):
+        idx = self.profile_box.currentIndex()
+        names = getattr(self, "_profile_names", None) or []
+        if idx < 0 or idx >= len(names):
+            return
+        win = self._win()
+        if win is None:
+            return
+        self._lset.switch_profile(names[idx], win)
+
+    def _save_profile_as(self):
+        from ..widgets import InputDialog
+        dlg = InputDialog(tr("另存为布局方案"), tr("方案名称"), parent=self)
+        if not dlg.exec():
+            return
+        name = dlg.value()
+        if not name.strip():
+            return
+        win = self._win()
+        if win is None:
+            return
+        if self._lset.save_current_as_profile(name.strip(), win):
+            self._refresh_profiles()
+            InfoBar.success(tr("已保存"), tr("布局方案「{0}」已保存").format(name.strip()),
+                            parent=self, position=InfoBarPosition.TOP, duration=2500)
+
+    def _delete_profile(self):
+        names = getattr(self, "_profile_names", None) or []
+        idx = self.profile_box.currentIndex()
+        if idx < 0 or idx >= len(names):
+            return
+        name = names[idx]
+        if not name:
+            InfoBar.info(tr("默认布局"), tr("默认布局不能删除，可用「重置默认」恢复"),
+                         parent=self, position=InfoBarPosition.TOP, duration=2500)
+            return
+        win = self._win()
+        if win is None:
+            return
+        if self._lset.delete_profile(name, win):
+            self._refresh_profiles()
+            InfoBar.success(tr("已删除"), tr("布局方案「{0}」已删除").format(name),
+                            parent=self, position=InfoBarPosition.TOP, duration=2500)
+
+    def _reset_home_layout(self):
+        win = self._win()
+        if win is None:
+            return
+        self._lset.switch_profile("", win)
+        self._refresh_profiles()
+        InfoBar.success(tr("已重置"), tr("启动页布局已恢复默认"),
+                        parent=self, position=InfoBarPosition.TOP, duration=2500)
+
+    def _export_home_layout(self):
+        win = self._win()
+        if win is not None:
+            self._lset.export_current_layout(win, self)
+
+    def _import_home_layout(self):
+        win = self._win()
+        if win is not None:
+            if self._lset.import_layout_file(win, self):
+                self._refresh_profiles()
+
+    def _open_sidebar_editor(self):
+        win = self._win()
+        if win is None:
+            return
+        from .layout_settings import SidebarEditorDialog
+        SidebarEditorDialog(win, self).exec()
+
+    def _open_section_editor(self):
+        win = self._win()
+        if win is None:
+            return
+        from .layout_settings import SectionEditorDialog
+        SectionEditorDialog(win, self).exec()
 
     def _save(self):
         # 游戏目录不走 collect()：切目录得经 set_game_dir 做校验和迁移，

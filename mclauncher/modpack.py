@@ -56,13 +56,20 @@ def cf_manifest_loaders(mf):
 
 # ================================================================ CurseForge 搜索（BMCLAPI 镜像）
 
-def search_cf_modpacks(dm: DownloadManager, query, limit=25, api_key=None):
+def search_cf_modpacks(dm: DownloadManager, query, limit=25, api_key=None,
+                       game_version=None, categories=None):
     """搜索 CurseForge 整合包（走 BMCLAPI 国内镜像，无需 API key）。"""
     from .mods import search_curseforge, CF_CLASS_MODPACK
+    from .catalog_files import cf_category_tokens
+    tokens = []
+    for c in categories or []:
+        tokens.extend(cf_category_tokens(c) or [str(c).lower()])
     hits = search_curseforge(dm, query=query, limit=limit, api_key=api_key,
-                             class_id=CF_CLASS_MODPACK)
+                             class_id=CF_CLASS_MODPACK,
+                             game_version=game_version, categories=tokens or None)
     for h in hits:
         h["description"] = h.pop("summary", "")
+        h.pop("cf_categories", None)
     return hits
 
 
@@ -294,13 +301,16 @@ def _cf_name_from_html(dm: DownloadManager, slug: str, class_path="modpacks"):
 
 # ================================================================ 中文搜索（别名目录 + 多源）
 
-def search_modpacks_chinese(dm: DownloadManager, query, limit=25, api_key=None):
+def search_modpacks_chinese(dm: DownloadManager, query, limit=25, api_key=None,
+                            game_version=None, categories=None):
     """中文搜索整合包：优先命中内置中文别名目录，否则回退到多源搜索。"""
     from . import catalog
+    from .catalog_files import type_key
 
     q = query.strip()
     if not q:
         return []
+    cat_keys = [type_key(c) for c in (categories or []) if type_key(c)]
     hits = []
 
     # 1) 精确别名
@@ -308,43 +318,45 @@ def search_modpacks_chinese(dm: DownloadManager, query, limit=25, api_key=None):
     if slug:
         try:
             data = dm.fetch_json(f"{MODRINTH_API}/project/{slug}", timeout=60)
-            gvs = data.get("game_versions") or []
-            desc = (data.get("description") or "")[:120]
-            if gvs:
-                desc = f"MC {', '.join(gvs[:3])} · {desc}"
-            hits.append({
-                "source": "modrinth",
-                "slug": data.get("slug", slug),
-                "title": data.get("title") or title or slug,
-                "author": (data.get("author") or "?"),
-                "downloads": data.get("downloads", 0),
-                "description": desc,
-                "matched_alias": True,
-            })
+            if _match_filters_mr(data, game_version, cat_keys):
+                gvs = data.get("game_versions") or []
+                desc = (data.get("description") or "")[:120]
+                if gvs:
+                    desc = f"MC {', '.join(gvs[:3])} · {desc}"
+                hits.append({
+                    "source": "modrinth",
+                    "slug": data.get("slug", slug),
+                    "title": data.get("title") or title or slug,
+                    "author": (data.get("author") or "?"),
+                    "downloads": data.get("downloads", 0),
+                    "description": desc,
+                    "matched_alias": True,
+                })
         except Exception as e:
             utils.log.warning("整合包别名命中后 Modrinth 查询失败: %s", e)
     if cf_id:
         try:
             from .mods import cf_detail, _cf_norm
             mod = cf_detail(dm, cf_id, api_key=api_key)
-            gvs = []
-            for idx in (mod.get("latestFilesIndexes") or []):
-                gv = (idx or {}).get("gameVersion")
-                if gv and gv not in gvs:
-                    gvs.append(gv)
-            desc = (mod.get("summary") or "")[:120]
-            if gvs:
-                desc = f"MC {', '.join(gvs[:3])} · {desc}"
-            hits.append({
-                "source": "curseforge",
-                "id": mod.get("id"),
-                "slug": mod.get("slug"),
-                "title": mod.get("name") or title or str(cf_id),
-                "author": ", ".join(a.get("name", "") for a in (mod.get("authors") or [])) or "?",
-                "downloads": mod.get("downloadCount") or 0,
-                "description": desc,
-                "matched_alias": True,
-            })
+            if _match_filters_cf(mod, game_version, cat_keys):
+                gvs = []
+                for idx in (mod.get("latestFilesIndexes") or []):
+                    gv = (idx or {}).get("gameVersion")
+                    if gv and gv not in gvs:
+                        gvs.append(gv)
+                desc = (mod.get("summary") or "")[:120]
+                if gvs:
+                    desc = f"MC {', '.join(gvs[:3])} · {desc}"
+                hits.append({
+                    "source": "curseforge",
+                    "id": mod.get("id"),
+                    "slug": mod.get("slug"),
+                    "title": mod.get("name") or title or str(cf_id),
+                    "author": ", ".join(a.get("name", "") for a in (mod.get("authors") or [])) or "?",
+                    "downloads": mod.get("downloadCount") or 0,
+                    "description": desc,
+                    "matched_alias": True,
+                })
         except Exception as e:
             utils.log.warning("整合包别名命中后 CurseForge 查询失败: %s", e)
     if hits:
@@ -352,28 +364,70 @@ def search_modpacks_chinese(dm: DownloadManager, query, limit=25, api_key=None):
 
     # 2) 回退到多源搜索
     try:
-        hits.extend(modrinth_search(dm, q, limit=limit))
+        hits.extend(modrinth_search(dm, q, limit=limit,
+                                    game_version=game_version, categories=cat_keys))
     except Exception as e:
         utils.log.warning("中文搜索回退 Modrinth 整合包失败: %s", e)
     try:
-        hits.extend(search_cf_modpacks(dm, q, limit=limit, api_key=api_key))
+        hits.extend(search_cf_modpacks(dm, q, limit=limit, api_key=api_key,
+                                       game_version=game_version, categories=cat_keys))
     except Exception as e:
         utils.log.warning("中文搜索回退 CurseForge 整合包失败: %s", e)
     return hits[:limit]
 
 
+def _match_filters_mr(project: dict, game_version=None, cat_keys=None) -> bool:
+    """别名命中的 Modrinth 项目按版本/分类过滤（项目自带字段，可直接比对）。"""
+    from .catalog_files import TYPE_FACETS
+    if game_version:
+        gvs = [str(v) for v in (project.get("game_versions") or [])]
+        if gvs and game_version not in gvs:
+            return False
+    if cat_keys:
+        cats = {str(c).lower() for c in (project.get("categories") or [])}
+        want = {c for k in cat_keys for c in TYPE_FACETS.get(k, [])}
+        if want and not (want & cats):
+            return False
+    return True
+
+
+def _match_filters_cf(mod: dict, game_version=None, cat_keys=None) -> bool:
+    """别名命中的 CurseForge 项目按版本/分类过滤。"""
+    if game_version:
+        gvs = [str((i or {}).get("gameVersion") or "") for i in (mod.get("latestFilesIndexes") or [])]
+        gvs = [g for g in gvs if g]
+        if gvs and game_version not in gvs:
+            return False
+    if cat_keys:
+        from .catalog_files import CF_TYPE_TOKENS
+        names = " ".join(str((c or {}).get("name") or "").lower()
+                         for c in (mod.get("categories") or []) if isinstance(c, dict))
+        tokens = [t for k in cat_keys for t in CF_TYPE_TOKENS.get(k, [])]
+        if tokens and not any(t in names for t in tokens):
+            return False
+    return True
+
+
 # ================================================================ Modrinth
 
-def modrinth_search(dm: DownloadManager, query, limit=25):
+def modrinth_search(dm: DownloadManager, query, limit=25,
+                    game_version=None, categories=None):
     """搜索 Modrinth 整合包（官方优先，MCIM 镜像兜底）。"""
-    from .mods import mirror_modrinth_url
+    from .mods import mirror_modrinth_url, _mr_facets
+    from .catalog_files import category_facets
 
+    facets = _mr_facets("modpack", game_version, categories)
     params = {
         "query": query,
-        "facets": json.dumps([["project_type:modpack"]]),
+        "facets": facets,
         "limit": limit,
         "index": "relevance",
     }
+    if categories:
+        cats = category_facets(categories[0] if len(categories) == 1 else "")
+        # 多类型时 _mr_facets 生成 OR 组，单类型走 facets 里的精确分类
+        if len(categories) == 1 and not cats:
+            params["facets"] = _mr_facets("modpack", game_version, None)
     last_err = None
     from . import source
     for api_base in source.modrinth_api_bases():
@@ -394,6 +448,7 @@ def modrinth_search(dm: DownloadManager, query, limit=25):
             "description": (hit.get("description") or "")[:120],
             "author": hit.get("author", "?"),
             "downloads": hit.get("downloads", 0),
+            "game_versions": hit.get("versions") or [],
         })
     return result
 

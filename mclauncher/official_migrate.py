@@ -2,7 +2,7 @@
 """从官方 Minecraft 启动器迁移版本 / 账号。
 
 官方启动器数据目录：
-- Windows: %APPDATA%\.minecraft
+- Windows: %APPDATA%\\.minecraft
 - macOS: ~/Library/Application Support/minecraft
 - Linux: ~/.minecraft
 """
@@ -14,7 +14,6 @@ from pathlib import Path
 
 from . import utils
 from .instances import Instance, _STANDARD_DIRS
-from .accounts import AccountManager
 
 
 def official_dir() -> Path:
@@ -133,8 +132,12 @@ def import_accounts(src: Path) -> int:
 
 
 def migrate(official_root: str, instance_name: str = "default",
-            import_versions: bool = True, import_assets: bool = True) -> dict:
-    """执行完整迁移。返回统计信息。"""
+            want_versions: bool = True, want_assets: bool = True) -> dict:
+    """执行完整迁移。返回统计信息。
+
+    参数不能叫 import_versions：那会遮蔽上面的模块级同名函数，
+    函数体里再调用它就成了 `True(...)` —— TypeError。
+    """
     src = Path(official_root)
     if not src.is_dir():
         raise FileNotFoundError(f"官方启动器目录不存在: {src}")
@@ -143,10 +146,10 @@ def migrate(official_root: str, instance_name: str = "default",
         inst.create()
     result = {"versions": [], "accounts": 0}
 
-    if import_versions:
+    if want_versions:
         result["versions"] = import_versions(src, instance_name)
 
-    if import_assets:
+    if want_assets:
         # 复制全局 assets
         assets_src = src / "assets"
         if assets_src.is_dir() and assets_src != inst.assets_dir():
