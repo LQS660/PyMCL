@@ -1,0 +1,21 @@
+<UserControl
+    x:Class="PyMCL.Pages.MultiplayerPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Padding="28,20" Spacing="12">
+            <TextBlock Text="陶瓦联机" FontSize="20" FontWeight="SemiBold"/>
+            <TextBlock Text="陶瓦是 EasyTier P2P，和 HMCL 互通。官方 PCL 联机大厅协议未开放，PCL 房间号无法加入。"
+                       TextWrapping="Wrap" Opacity="0.75"/>
+            <TextBlock x:Name="LanHint" TextWrapping="Wrap" IsTextSelectionEnabled="True"/>
+            <TextBlock x:Name="StateLabel" Text="正在检查联机内核…"/>
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button Content="开房间" Click="Host_Click" Style="{StaticResource AccentButtonStyle}"/>
+                <Button Content="加入" Click="Join_Click"/>
+                <Button Content="允许防火墙" Click="Fw_Click"/>
+            </StackPanel>
+            <TextBlock x:Name="RoomLabel" FontSize="18" FontWeight="SemiBold" IsTextSelectionEnabled="True"/>
+            <TextBox x:Name="JoinBox" PlaceholderText="好友邀请码"/>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

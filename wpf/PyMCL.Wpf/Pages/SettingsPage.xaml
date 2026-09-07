@@ -1,0 +1,14 @@
+<UserControl x:Class="PyMCL.Pages.SettingsPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Border Style="{StaticResource Card}" MaxWidth="640" HorizontalAlignment="Left">
+    <StackPanel>
+      <TextBlock Text="运行时信息" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8"/>
+      <TextBlock x:Name="Info" TextWrapping="Wrap" LineHeight="22" Foreground="{StaticResource Brush.InkMuted}"/>
+      <Border Margin="0,16,0,0" Padding="12" CornerRadius="10" Background="{StaticResource Brush.AccentSoft}">
+        <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource Brush.AccentDeep}"
+                   Text="UI 方案：WPF + 系统 .NET（与 PCL 同路线）。不打包 WASDK，不套 Edge。"/>
+      </Border>
+    </StackPanel>
+  </Border>
+</UserControl>

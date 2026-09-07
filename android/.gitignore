@@ -1,0 +1,12 @@
+# Android / Gradle
+.gradle/
+.kotlin/
+build/
+app/build/
+local.properties
+_ai_decode.txt
+*.iml
+.idea/
+captures/
+*.apk
+regression-out/

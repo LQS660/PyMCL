@@ -1,0 +1,75 @@
+# Local config and secrets
+config.json
+.env
+.env.*
+!.env.example
+*.log
+ai_chats.json
+
+# Runtime / generated
+node_modules/
+instances/
+.minecraft/
+cache/
+build/
+dist/
+/java/
+.cursor/
+feedback_hub/data/
+device_id
+feedback_history.json
+
+# Android local/build
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/local.properties
+android/_ai_decode.txt
+android/regression-out/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Promo toolchain (reinstall locally)
+promo/tools/venv/
+promo/tools/node_modules/
+promo/tools/ffmpeg/
+promo/tools/ffmpeg-extract/
+promo/tools/ffmpeg-release-essentials.zip
+promo/tools/package-lock.json
+promo/raw/*
+!promo/raw/.gitkeep
+promo/out/*
+!promo/out/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+.pytest_cache/
+_*.txt
+_*.json
+!requirements.txt
+会话-*.md
+*.mp4
+
+# WinUI / .NET build
+winui3/**/bin/
+winui3/**/obj/
+*.user
+*.suo
+
+# 本地产物与敏感数据（勿推送）
+accounts.json
+/.workbuddy/
+/archive/
+/0*.zip
+/0*.exe
+pymcl-feedback-client-src.zip
+wpf/**/bin/
+wpf/**/obj/
+/_shots/

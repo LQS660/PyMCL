@@ -1,0 +1,233 @@
+# -*- coding: utf-8 -*-
+"""实例页：实例卡片网格 + 新建实例入口卡。"""
+
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
+from qfluentwidgets import (
+    CaptionLabel, FluentIcon as FIF, MessageBox, ScrollArea, SimpleCardWidget,
+    StrongBodyLabel, SubtitleLabel, TransparentToolButton,
+)
+
+from mclauncher.config import CONFIG
+from ..widgets import ComboDialog, IconTile, InputDialog, Pill
+
+
+class InstanceCard(SimpleCardWidget):
+    def __init__(self, info: dict, page, parent=None):
+        super().__init__(parent)
+        self.info = info
+        self.page = page
+        self.setFixedSize(240, 138)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(6)
+
+        top = QHBoxLayout()
+        top.addWidget(IconTile(info["name"], size=40))
+        name_box = QVBoxLayout()
+        name_box.setSpacing(2)
+        name_box.addWidget(StrongBodyLabel(info["name"]))
+        name_box.addWidget(CaptionLabel(f'{info["versions"]} 个版本'))
+        top.addLayout(name_box, 1)
+        top.addWidget(Pill("默认" if info["name"] == CONFIG.get("default_instance") else "实例", "#4C8BF5"))
+        layout.addLayout(top)
+        layout.addWidget(CaptionLabel(str(info.get("mc") or "")))
+        layout.addWidget(CaptionLabel(f"Java · {info.get('java_label') or '自动选择'}"))
+        layout.addStretch(1)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(4)
+        open_btn = TransparentToolButton(FIF.FOLDER)
+        open_btn.setToolTip("打开实例文件夹")
+        java_btn = TransparentToolButton(FIF.CODE)
+        java_btn.setToolTip("选择此实例使用的 Java")
+        rename_btn = TransparentToolButton(FIF.EDIT)
+        rename_btn.setToolTip("重命名")
+        delete_btn = TransparentToolButton(FIF.DELETE)
+        delete_btn.setToolTip("删除实例")
+        export_btn = TransparentToolButton(FIF.SHARE if hasattr(FIF, "SHARE") else FIF.DOWNLOAD)
+        export_btn.setToolTip("导出为 .mrpack")
+        saves_btn = TransparentToolButton(FIF.PHOTO)
+        saves_btn.setToolTip("存档 / 截图")
+        open_btn.clicked.connect(lambda: page.open_folder(info["name"]))
+        java_btn.clicked.connect(lambda: page.pick_java(info["name"]))
+        rename_btn.clicked.connect(lambda: page.rename(info["name"]))
+        delete_btn.clicked.connect(lambda: page.delete(info["name"]))
+        export_btn.clicked.connect(lambda: page.export_pack(info["name"]))
+        saves_btn.clicked.connect(lambda: page.open_saves(info["name"]))
+        actions.addStretch(1)
+        actions.addWidget(open_btn)
+        actions.addWidget(saves_btn)
+        actions.addWidget(java_btn)
+        actions.addWidget(rename_btn)
+        actions.addWidget(export_btn)
+        actions.addWidget(delete_btn)
+        layout.addLayout(actions)
+
+
+class NewInstanceCard(SimpleCardWidget):
+    def __init__(self, page, parent=None):
+        super().__init__(parent)
+        self.page = page
+        self.setFixedSize(240, 138)
+        self.setCursor(Qt.PointingHandCursor)
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+        label = StrongBodyLabel("＋ 新建实例")
+        label.setAlignment(Qt.AlignCenter)
+        sub = CaptionLabel("隔离的版本、模组与存档")
+        sub.setAlignment(Qt.AlignCenter)
+        layout.addWidget(label)
+        layout.addWidget(sub)
+
+    def mouseReleaseEvent(self, event):
+        self.page.create()
+
+
+class InstancePage(QWidget):
+    def __init__(self, backend, parent=None):
+        super().__init__(parent)
+        self.setObjectName("instancePage")
+        self.backend = backend
+        self._reloading = False
+        self._cols = 0
+        self._picking_java = False
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(120)
+        self._resize_timer.timeout.connect(self.reload)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(28, 20, 28, 20)
+        root.setSpacing(14)
+
+        head = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title_box.addWidget(SubtitleLabel("实例"))
+        title_box.addWidget(CaptionLabel("每个实例相互隔离，放心折腾"))
+        head.addLayout(title_box, 1)
+        root.addLayout(head)
+
+        scroll = ScrollArea(self)
+        scroll.setWidgetResizable(True)
+        host = QWidget()
+        self.grid = QGridLayout(host)
+        self.grid.setContentsMargins(0, 0, 8, 0)
+        self.grid.setSpacing(12)
+        scroll.setWidget(host)
+        root.addWidget(scroll, 1)
+
+        self.reload()
+
+    def reload(self):
+        if self._reloading:
+            return
+        self._reloading = True
+        try:
+            while self.grid.count():
+                item = self.grid.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            insts = self.backend.get_instances()
+            cols = max(1, self.width() // 260)
+            self._cols = cols
+            for i, inst in enumerate(insts):
+                self.grid.addWidget(InstanceCard(inst, self), i // cols, i % cols)
+            n = len(insts)
+            self.grid.addWidget(NewInstanceCard(self), n // cols, n % cols)
+        finally:
+            self._reloading = False
+
+    def create(self):
+        dlg = InputDialog("新建实例", "实例名称", placeholder="例如：模组生存", parent=self)
+        if dlg.exec() and dlg.value():
+            try:
+                self.backend.create_instance(dlg.value())
+            except Exception as e:
+                MessageBox("创建失败", str(e), self).exec()
+            self.reload()
+
+    def delete(self, name: str):
+        box = MessageBox("删除实例", f"确定删除实例「{name}」？其中的存档与配置将一并移除。", self)
+        if box.exec():
+            try:
+                self.backend.delete_instance(name)
+            except Exception as e:
+                MessageBox("删除失败", str(e), self).exec()
+            self.reload()
+
+    def rename(self, name: str):
+        dlg = InputDialog("重命名实例", "新名称", text=name, parent=self)
+        if dlg.exec() and dlg.value():
+            try:
+                self.backend.rename_instance(name, dlg.value())
+            except Exception as e:
+                MessageBox("重命名失败", str(e), self).exec()
+            self.reload()
+
+    def export_pack(self, name: str):
+        self.backend.export_modpack(name)
+
+    def pick_java(self, name: str):
+        if self._picking_java:
+            return
+        self._picking_java = True
+
+        def open_dlg(opts):
+            self._picking_java = False
+            opts = list(opts or [])
+            labels = [o["label"] for o in opts]
+            current = self.backend.java_combo_label_for(name, opts)
+            dlg = ComboDialog(
+                "选择 Java",
+                f"实例「{name}」启动时使用的 Java。自动选择会按游戏版本匹配（1.19+ 用 17，远古版用 8）。",
+                labels, current, self,
+            )
+            if dlg.exec():
+                chosen = dlg.value()
+                value = "自动选择"
+                for o in opts:
+                    if o["label"] == chosen:
+                        value = o["value"]
+                        break
+                try:
+                    self.backend.set_instance_java(name, value)
+                except Exception as e:
+                    MessageBox("保存失败", str(e), self).exec()
+                self.reload()
+                win = self.window()
+                lp = getattr(win, "launch_page", None)
+                if lp is not None:
+                    lp._reload_java_box()
+
+        def failed(msg):
+            self._picking_java = False
+            MessageBox("扫描 Java 失败", str(msg or "未知错误"), self).exec()
+
+        call_async = getattr(self.backend, "call_async", None)
+        if callable(call_async):
+            call_async(lambda: self.backend.java_combo_options(name, True), open_dlg, failed)
+            return
+        try:
+            open_dlg(self.backend.java_combo_options(name, True))
+        except Exception as e:
+            failed(e)
+
+    def open_folder(self, name: str):
+        try:
+            self.backend.open_instance_folder(name)
+        except Exception as e:
+            MessageBox("无法打开", str(e), self).exec()
+
+    def open_saves(self, name: str):
+        from .saves_dialog import SavesDialog
+        SavesDialog(self.backend, name, "", self).exec()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self.isVisible():
+            return
+        cols = max(1, self.width() // 260)
+        if cols == self._cols:
+            return
+        self._resize_timer.start()

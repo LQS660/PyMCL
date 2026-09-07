@@ -1,0 +1,34 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>false</UseWindowsForms>
+    <RootNamespace>PyMCL</RootNamespace>
+    <AssemblyName>PyMCL.Wpf</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyTitle>PyMCL 启动器</AssemblyTitle>
+    <Product>PyMCL 启动器 (WPF)</Product>
+    <Version>3.2.0</Version>
+  </PropertyGroup>
+
+  <!-- 体积优先：无第三方包、无符号、无卫星资源、无 R2R；单文件发布再叠 Brotli 压缩。 -->
+  <PropertyGroup>
+    <SelfContained>false</SelfContained>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <EventSourceSupport>false</EventSourceSupport>
+    <MetadataUpdaterSupport>false</MetadataUpdaterSupport>
+    <XamlDebuggingInformation>false</XamlDebuggingInformation>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Optimize>true</Optimize>
+    <TieredPGO>true</TieredPGO>
+    <NuGetAudit>false</NuGetAudit>
+  </PropertyGroup>
+</Project>

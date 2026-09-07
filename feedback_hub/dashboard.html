@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PyMCL 反馈中心</title>
+  <style>
+    :root {
+      --bg: #0f1412;
+      --bg2: #151c18;
+      --card: #1b2420;
+      --line: #2a3831;
+      --text: #e7eee9;
+      --muted: #8aa396;
+      --green: #2e9b6b;
+      --green2: #3ec98a;
+      --red: #e05d5d;
+      --amber: #d8a23a;
+      --chip: #24332c;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.45 "Segoe UI", "Microsoft YaHei", sans-serif; }
+    .top {
+      height: 56px; display: flex; align-items: center; gap: 16px;
+      padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--bg2);
+    }
+    .brand { font-weight: 700; letter-spacing: .04em; }
+    .brand span { color: var(--green2); }
+    .live { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); }
+    .dot.on { background: var(--green2); box-shadow: 0 0 8px var(--green); }
+    .stats { margin-left: auto; display: flex; gap: 18px; color: var(--muted); font-size: 12px; }
+    .stats b { color: var(--text); font-size: 16px; margin-right: 4px; }
+    .wrap { display: grid; grid-template-columns: 380px 1fr; height: calc(100% - 56px); }
+    .pane { overflow: auto; padding: 16px; }
+    .pane + .pane { border-left: 1px solid var(--line); }
+    h2 { margin: 0 0 12px; font-size: 13px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .08em; }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+    input, select {
+      background: var(--card); border: 1px solid var(--line); color: var(--text);
+      border-radius: 8px; padding: 8px 10px; outline: none; width: 100%;
+    }
+    .card {
+      background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+      padding: 12px 14px; margin-bottom: 10px; cursor: pointer;
+    }
+    .card:hover { border-color: var(--green); }
+    .card .row { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+    .host { font-weight: 650; }
+    .ago { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .sum { color: var(--muted); font-size: 12px; margin-top: 6px; word-break: break-all; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .chip { background: var(--chip); color: var(--text); border-radius: 999px; padding: 2px 8px; font-size: 11px; }
+    .chip.on { background: rgba(46,155,107,.2); color: var(--green2); }
+    .chip.off { opacity: .55; }
+    .tag { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #2a3a2f; color: var(--green2); }
+    .tag.crash, .tag.bug { background: #3a2424; color: #ff9b9b; }
+    .tag.download { background: #24313a; color: #8ec8ff; }
+    .tag.suggest { background: #3a3324; color: #f0c36a; }
+    .title { font-weight: 650; margin-top: 6px; }
+    .preview { color: var(--muted); font-size: 12px; margin-top: 4px; white-space: pre-wrap; }
+    .empty { color: var(--muted); padding: 24px 8px; }
+    .flash { animation: flash .8s ease; }
+    @keyframes flash { from { box-shadow: 0 0 0 1px var(--green2); } to { box-shadow: none; } }
+    .mask {
+      position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none;
+      align-items: stretch; justify-content: flex-end;
+    }
+    .mask.show { display: flex; }
+    .drawer {
+      width: min(720px, 100%); background: var(--bg2); border-left: 1px solid var(--line);
+      overflow: auto; padding: 22px;
+    }
+    .drawer h3 { margin: 0 0 8px; }
+    .kv { display: grid; grid-template-columns: 92px 1fr; gap: 6px 12px; font-size: 13px; margin: 12px 0 18px; }
+    .kv span { color: var(--muted); }
+    pre {
+      background: #101714; border: 1px solid var(--line); border-radius: 10px;
+      padding: 12px; white-space: pre-wrap; word-break: break-word; font-size: 12px;
+    }
+    .login { max-width: 360px; margin: 80px auto; background: var(--card); padding: 24px; border-radius: 14px; border: 1px solid var(--line); }
+    button {
+      background: var(--green); color: #fff; border: 0; border-radius: 8px;
+      padding: 8px 14px; cursor: pointer; font-weight: 650;
+    }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <div class="brand">PyMCL <span>反馈中心</span></div>
+    <div class="live"><i class="dot" id="dot"></i><span id="liveText">未连接</span></div>
+    <div class="stats">
+      <div><b id="nOnline">0</b>在线</div>
+      <div><b id="nFb">0</b>反馈</div>
+    </div>
+  </div>
+  <div class="wrap" id="app">
+    <div class="pane">
+      <h2>在线机器 / 电脑配置</h2>
+      <div id="machines"></div>
+    </div>
+    <div class="pane">
+      <h2>用户反馈</h2>
+      <div class="toolbar">
+        <select id="cat">
+          <option value="">全部类型</option>
+          <option value="bug">功能异常</option>
+          <option value="crash">崩溃闪退</option>
+          <option value="download">下载问题</option>
+          <option value="multiplayer">联机</option>
+          <option value="ai">AI 助手</option>
+          <option value="ui">界面体验</option>
+          <option value="suggest">建议</option>
+          <option value="other">其他</option>
+        </select>
+        <input id="q" placeholder="搜索标题 / 主机 / 配置" />
+      </div>
+      <div id="feedback"></div>
+    </div>
+  </div>
+  <div class="mask" id="mask">
+    <div class="drawer" id="drawer"></div>
+  </div>
+  <script>
+    const CAT = {bug:"功能异常",crash:"崩溃闪退",download:"下载问题",multiplayer:"联机",ai:"AI 助手",ui:"界面体验",suggest:"建议",other:"其他"};
+    const token = new URLSearchParams(location.search).get("token") || sessionStorage.getItem("pymcl_admin_token") || "";
+    if (token) sessionStorage.setItem("pymcl_admin_token", token);
+    const qs = token ? ("?token=" + encodeURIComponent(token)) : "";
+    let machines = [];
+    let feedback = [];
+
+    function ago(sec) {
+      if (sec == null) return "";
+      if (sec < 5) return "刚刚";
+      if (sec < 60) return sec + "s 前";
+      if (sec < 3600) return Math.floor(sec/60) + "m 前";
+      return Math.floor(sec/3600) + "h 前";
+    }
+    function specChips(info) {
+      info = info || {};
+      const cpu = (info.cpu || {}).name || "";
+      const mem = info.memory || {};
+      const gpu = ((info.gpus || [])[0] || {}).name || "";
+      const ram = mem.total_mb ? Math.round(mem.total_mb/1024) + "GB" : "";
+      const os = (info.os || {}).display || "";
+      return [os, cpu, ram, gpu].filter(Boolean);
+    }
+    function renderMachines() {
+      const box = document.getElementById("machines");
+      const rows = machines.slice().sort((a,b) => (b.online - a.online) || ((b.last_seen||0)-(a.last_seen||0)));
+      document.getElementById("nOnline").textContent = rows.filter(m => m.online).length;
+      if (!rows.length) { box.innerHTML = '<div class="empty">还没有机器心跳。打开启动器后会出现在这里。</div>'; return; }
+      box.innerHTML = rows.map(m => {
+        const chips = specChips(m.sysinfo).map(t => `<span class="chip">${esc(t)}</span>`).join("");
+        return `<div class="card" data-kind="machine" data-id="${esc(m.device_id)}">
+          <div class="row"><div class="host">${esc(m.hostname || m.device_id.slice(0,8))}</div>
+          <div class="ago">${m.online ? ago(m.ago_sec) : "离线"}</div></div>
+          <div class="chips"><span class="chip ${m.online ? "on":"off"}">${m.online ? "在线":"离线"}</span>
+          <span class="chip">v${esc(m.app_version || "?")}</span>${chips}</div>
+          <div class="sum">${esc(m.summary || "")}</div>
+        </div>`;
+      }).join("");
+    }
+    function renderFeedback() {
+      const cat = document.getElementById("cat").value;
+      const q = document.getElementById("q").value.trim().toLowerCase();
+      const rows = feedback.filter(x => {
+        if (cat && x.category !== cat) return false;
+        if (!q) return true;
+        return (x.title + x.body_preview + x.summary + x.hostname + x.device_id).toLowerCase().includes(q);
+      });
+      document.getElementById("nFb").textContent = feedback.length;
+      const box = document.getElementById("feedback");
+      if (!rows.length) { box.innerHTML = '<div class="empty">还没有反馈。</div>'; return; }
+      box.innerHTML = rows.map(x => `<div class="card" data-kind="feedback" data-id="${esc(x.id)}">
+        <div class="row"><span class="tag ${esc(x.category)}">${esc(CAT[x.category] || x.category)}</span>
+        <span class="ago">${esc(x.iso || "")}</span></div>
+        <div class="title">${esc(x.title || "")}</div>
+        <div class="preview">${esc(x.body_preview || "")}</div>
+        <div class="sum">${esc((x.hostname ? x.hostname + " · " : "") + (x.summary || ""))}</div>
+      </div>`).join("");
+    }
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+    }
+    async function openFeedback(id) {
+      const r = await fetch("/api/v1/feedback/" + id + qs);
+      const j = await r.json();
+      if (!j.ok) return alert(j.error || "读取失败");
+      const x = j.item;
+      drawDrawer(x.title, x);
+    }
+    function openMachine(id) {
+      const m = machines.find(x => x.device_id === id);
+      if (!m) return;
+      drawDrawer(m.hostname || id, m);
+    }
+    function drawDrawer(title, obj) {
+      const info = obj.sysinfo || {};
+      const cpu = info.cpu || {};
+      const mem = info.memory || {};
+      const disp = info.display || {};
+      const gpus = (info.gpus || []).map(g => `${g.name}${g.vram_mb ? " " + g.vram_mb + "MB" : ""}${g.driver ? " / " + g.driver : ""}`).join("\n") || "无";
+      const disks = (info.disks || []).map(d => `${d.path}  可用 ${d.free_gb}/${d.total_gb} GB`).join("\n") || "无";
+      const javas = (info.java || []).map(j => `Java ${j.major}  ${j.path}`).join("\n") || "无";
+      const inst = (info.instances || []).map(i => `${i.name}  ${(i.versions||[]).join(", ")||"无版本"}  mods=${i.mod_count||0}`).join("\n") || "无";
+      document.getElementById("drawer").innerHTML = `
+        <h3>${esc(title || "")}</h3>
+        <div class="kv">
+          <span>设备</span><div>${esc(obj.hostname || "")} / ${esc(obj.device_id || "")}</div>
+          <span>IP</span><div>${esc(obj.client_ip || "")}</div>
+          <span>版本</span><div>${esc(obj.app_version || (info.launcher||{}).version || "")}</div>
+          <span>系统</span><div>${esc((info.os||{}).display || "")}</div>
+          <span>CPU</span><div>${esc(cpu.name || "")}  ${cpu.cores_physical||"?"}C/${cpu.cores_logical||"?"}T</div>
+          <span>内存</span><div>${esc(mem.total_mb||0)} MB，占用 ${esc(mem.load_percent||0)}%</div>
+          <span>分辨率</span><div>${disp.width||"?"}×${disp.height||"?"}</div>
+          ${obj.category ? `<span>类型</span><div>${esc(CAT[obj.category]||obj.category)}</div>` : ""}
+          ${obj.contact ? `<span>联系</span><div>${esc(obj.contact)}</div>` : ""}
+        </div>
+        ${obj.body ? `<h2>反馈内容</h2><pre>${esc(obj.body)}</pre>` : ""}
+        <h2>显卡</h2><pre>${esc(gpus)}</pre>
+        <h2>磁盘</h2><pre>${esc(disks)}</pre>
+        <h2>Java</h2><pre>${esc(javas)}</pre>
+        <h2>实例</h2><pre>${esc(inst)}</pre>
+        ${obj.crash ? `<h2>崩溃摘要</h2><pre>${esc(JSON.stringify(obj.crash, null, 2))}</pre>` : ""}
+      `;
+      document.getElementById("mask").classList.add("show");
+    }
+    document.getElementById("mask").onclick = (e) => {
+      if (e.target.id === "mask") e.currentTarget.classList.remove("show");
+    };
+    document.getElementById("app").onclick = (e) => {
+      const card = e.target.closest(".card");
+      if (!card) return;
+      if (card.dataset.kind === "feedback") openFeedback(card.dataset.id);
+      else openMachine(card.dataset.id);
+    };
+    document.getElementById("cat").onchange = renderFeedback;
+    document.getElementById("q").oninput = renderFeedback;
+
+    function applySnapshot(data) {
+      machines = data.machines || [];
+      feedback = data.feedback || [];
+      renderMachines();
+      renderFeedback();
+    }
+    function upsertMachine(m) {
+      const i = machines.findIndex(x => x.device_id === m.device_id);
+      if (i >= 0) machines[i] = Object.assign({}, machines[i], m);
+      else machines.unshift(m);
+      renderMachines();
+    }
+    function applyEvent(obj) {
+      const ev = obj.event;
+      const data = obj.data || {};
+      if (ev === "snapshot") applySnapshot(data);
+      if (ev === "heartbeat") upsertMachine(data);
+      if (ev === "feedback") {
+        feedback = [data, ...feedback.filter(x => x.id !== data.id)];
+        renderFeedback();
+        const first = document.querySelector('#feedback .card');
+        if (first) first.classList.add("flash");
+      }
+    }
+    function connect() {
+      const es = new EventSource("/api/v1/stream" + qs);
+      es.onopen = () => {
+        document.getElementById("dot").classList.add("on");
+        document.getElementById("liveText").textContent = "实时连接中";
+      };
+      const handle = (ev) => {
+        try { applyEvent(JSON.parse(ev.data)); } catch (e) {}
+      };
+      es.addEventListener("snapshot", handle);
+      es.addEventListener("heartbeat", handle);
+      es.addEventListener("feedback", handle);
+      es.onerror = () => {
+        document.getElementById("dot").classList.remove("on");
+        document.getElementById("liveText").textContent = "重连中…";
+      };
+    }
+    fetch("/api/v1/snapshot" + qs).then(r => {
+      if (r.status === 401) {
+        document.body.innerHTML = '<div class="login"><h3>需要管理令牌</h3><p style="color:var(--muted)">把 ADMIN_TOKEN 填到地址栏 ?token= 或下面</p><input id="tok" placeholder="ADMIN_TOKEN"/><p><button id="go">进入</button></p></div>';
+        document.getElementById("go").onclick = () => {
+          location.search = "?token=" + encodeURIComponent(document.getElementById("tok").value.trim());
+        };
+        return null;
+      }
+      return r.json();
+    }).then(j => {
+      if (j && j.ok) applySnapshot(j);
+      connect();
+    }).catch(connect);
+    setInterval(() => {
+      const now = Date.now() / 1000;
+      machines.forEach(m => {
+        const last = m.last_seen || 0;
+        m.ago_sec = last ? Math.max(0, Math.floor(now - last)) : null;
+        m.online = m.status !== "offline" && last && (now - last) <= 90;
+      });
+      renderMachines();
+    }, 5000);
+  </script>
+</body>
+</html>
