@@ -73,3 +73,10 @@ pymcl-feedback-client-src.zip
 wpf/**/bin/
 wpf/**/obj/
 /_shots/
+/_shot*.png
+
+# PYMCL_HOME 落在仓库根时生成的实例数据（assets/libraries/saves，数百 MB）
+/default/
+
+# WPF 前端的本地 UI 状态（侧栏宽度、主题、布局）
+wpf-ui.json
