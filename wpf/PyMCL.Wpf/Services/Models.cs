@@ -20,6 +20,16 @@ public sealed class VersionRow
     public string Version { get; set; } = "";
     public string Type { get; set; } = "";
     public string Date { get; set; } = "";
+
+    [JsonIgnore]
+    public string TypeLabel => Type switch
+    {
+        "release" => "正式版",
+        "snapshot" => "快照",
+        "old_alpha" => "远古 Alpha",
+        "old_beta" => "远古 Beta",
+        _ => Type,
+    };
 }
 
 public sealed class CatalogItem

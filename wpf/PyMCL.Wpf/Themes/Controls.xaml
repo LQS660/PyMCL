@@ -553,6 +553,16 @@
                               VerticalAlignment="Center" HorizontalAlignment="Left"
                               TextElement.Foreground="{TemplateBinding Foreground}"
                               TextElement.FontFamily="{StaticResource F.Ui}" TextElement.FontSize="13"/>
+            <TextBox x:Name="PART_EditableTextBox" Visibility="Collapsed" Margin="{TemplateBinding Padding}"
+                     Background="Transparent" BorderThickness="0" Padding="0" VerticalContentAlignment="Center"
+                     FontFamily="{StaticResource F.Ui}" FontSize="13" Foreground="{DynamicResource B.Ink}"
+                     CaretBrush="{DynamicResource B.Accent}" FocusVisualStyle="{x:Null}">
+              <TextBox.Template>
+                <ControlTemplate TargetType="TextBox">
+                  <ScrollViewer x:Name="PART_ContentHost" Focusable="False" VerticalAlignment="Center"/>
+                </ControlTemplate>
+              </TextBox.Template>
+            </TextBox>
             <TextBlock x:Name="Ph" Text="{TemplateBinding Tag}" Foreground="{DynamicResource B.InkFaint}" Margin="{TemplateBinding Padding}"
                        VerticalAlignment="Center" IsHitTestVisible="False" Visibility="Collapsed"/>
             <Popup x:Name="PART_Popup" AllowsTransparency="True" Placement="Bottom" VerticalOffset="4"
@@ -569,6 +579,10 @@
           </Grid>
           <ControlTemplate.Triggers>
             <Trigger Property="HasItems" Value="False"><Setter TargetName="Ph" Property="Visibility" Value="Visible"/></Trigger>
+            <Trigger Property="IsEditable" Value="True">
+              <Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible"/>
+              <Setter TargetName="Cp" Property="Visibility" Value="Collapsed"/>
+            </Trigger>
             <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5"/></Trigger>
           </ControlTemplate.Triggers>
         </ControlTemplate>
@@ -847,6 +861,36 @@
     <Setter Property="VirtualizingPanel.VirtualizationMode" Value="Recycling"/>
     <Setter Property="VirtualizingPanel.ScrollUnit" Value="Pixel"/>
   </Style>
+
+  <!-- 版本列表行（数千条，走 DataTemplate + 虚拟化） -->
+  <DataTemplate x:Key="Tpl.Version">
+    <Grid Margin="12,8,12,8">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+      <TextBlock Grid.Column="0" Text="{Binding Version}" FontSize="13" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+      <Border Grid.Column="1" Background="{DynamicResource B.LineSoft}" CornerRadius="5" Padding="6,1,6,2" VerticalAlignment="Center">
+        <TextBlock Text="{Binding TypeLabel}" FontSize="11" Foreground="{DynamicResource B.InkMuted}"/>
+      </Border>
+      <TextBlock Grid.Column="2" Text="{Binding Date}" FontSize="11" Margin="10,0,0,0"
+                 Foreground="{DynamicResource B.InkFaint}" VerticalAlignment="Center" MinWidth="72" TextAlignment="Right"/>
+    </Grid>
+  </DataTemplate>
+
+  <!-- 已安装版本行 -->
+  <DataTemplate x:Key="Tpl.Installed">
+    <Grid Margin="12,8,12,8">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+      <TextBlock Grid.Column="0" Text="&#xE7B8;" FontFamily="Segoe MDL2 Assets" FontSize="13"
+                 Foreground="{DynamicResource B.Accent}" VerticalAlignment="Center" Margin="0,0,10,0"/>
+      <TextBlock Grid.Column="1" Text="{Binding}" FontSize="13" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+    </Grid>
+  </DataTemplate>
 
   <!-- ============================ 工具提示 ============================ -->
   <Style TargetType="ToolTip">

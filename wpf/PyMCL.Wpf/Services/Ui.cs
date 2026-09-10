@@ -272,7 +272,7 @@ public static class Ui
     }
 
     /// <summary>行/列用 "Auto,*,32" 这种字符串描述。</summary>
-    public static Grid Grid(string? rows = null, string? cols = null)
+    public static Grid G(string? rows = null, string? cols = null)
     {
         var g = new Grid();
         foreach (var r in Parse(rows)) g.RowDefinitions.Add(new RowDefinition { Height = r });
@@ -382,9 +382,10 @@ public static class Ui
         return p;
     }
 
-    public static ComboBox Combo(IEnumerable<string>? items = null, string? selected = null, double width = double.NaN, string placeholder = "")
+    public static ComboBox Combo(IEnumerable<string>? items = null, string? selected = null, double width = double.NaN,
+        string placeholder = "", bool editable = false)
     {
-        var c = new ComboBox { Style = S("Combo"), Tag = placeholder };
+        var c = new ComboBox { Style = S("Combo"), Tag = placeholder, IsEditable = editable };
         if (items != null)
             foreach (var i in items) c.Items.Add(i);
         if (selected != null && c.Items.Contains(selected)) c.SelectedItem = selected;
@@ -469,37 +470,33 @@ public static class Ui
     }
 
     /// <summary>设置页的一行：左标题 + 右控件 +（可选）下说明。</summary>
-    public static UIElement Field(string label, UIElement control, string? hint = null, double labelWidth = 170)
+    public static Grid Field(string label, UIElement control, string? hint = null, double labelWidth = 170)
     {
-        var g = Grid(null, $"{labelWidth},*");
-        var left = V(2, Txt(label, 13), hint is null ? null : Small(hint));
+        var g = G(null, $"{labelWidth},*");
+        var left = V(2, Txt(label, 13), hint is null ? null : Small(hint).Wrap());
         left.VerticalAlignment = VerticalAlignment.Center;
         left.Margin = new Thickness(0, 0, 14, 0);
-        Grid.SetColumn(left, 0);
         control.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
-        Grid.SetColumn((UIElement)control, 1);
-        g.Children.Add(left);
-        g.Children.Add(control);
+        g.Add(left, 0, 0);
+        g.Add(control, 0, 1);
         g.Margin = new Thickness(0, 5, 0, 5);
         return g;
     }
 
-    public static UIElement Section(string title, string? sub = null, UIElement? right = null)
+    public static Grid Section(string title, string? sub = null, UIElement? right = null)
     {
-        var g = Grid(null, "*,Auto");
+        var g = G(null, "*,Auto");
         var left = V(2, H2(title), sub is null ? null : Muted(sub));
-        Grid.SetColumn(left, 0);
-        g.Children.Add(left);
+        g.Add(left, 0, 0);
         if (right != null)
         {
             right.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
-            Grid.SetColumn(right, 1);
-            g.Children.Add(right);
+            g.Add(right, 0, 1);
         }
         return g;
     }
 
-    public static UIElement Empty(string glyph, string title, string? hint = null)
+    public static SPanel Empty(string glyph, string title, string? hint = null)
     {
         var v = V(8,
             Glyph(glyph, 34, "B.InkFaint"),
@@ -535,7 +532,7 @@ public static class Ui
                     new(Color.FromArgb(0, 255, 255, 255), 1),
                 }, 0),
         };
-        var tt = new TranslateTransform(-90);
+        var tt = new TranslateTransform(-90, 0);
         sweep.RenderTransform = tt;
         b.Child = sweep;
         if (Motion.Enabled)

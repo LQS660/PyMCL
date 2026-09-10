@@ -51,6 +51,7 @@ public sealed class BridgeClient : IDisposable
     public event EventHandler<BridgeEvent>? EventReceived;
     public event EventHandler<bool>? StreamStateChanged;
     public bool StreamConnected { get; private set; }
+    public string LastStreamError { get; private set; } = "";
 
     public BridgeClient(Uri baseUri, string token)
     {
@@ -126,10 +127,23 @@ public sealed class BridgeClient : IDisposable
             {
                 await ReadSseOnceAsync().ConfigureAwait(false);
                 attempt = 0;
+                LastStreamError = "事件流被服务端关闭";
             }
             catch (OperationCanceledException) { break; }
-            catch { }
-            finally { SetStreamState(false); }
+            catch (Exception ex) { LastStreamError = ex.GetType().Name + ": " + ex.Message; }
+            finally
+            {
+                SetStreamState(false);
+                if (Environment.GetEnvironmentVariable("PYMCL_WPF_DEBUG") == "1")
+                {
+                    try
+                    {
+                        File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "pymcl-wpf-sse.log"),
+                            $"[{DateTime.Now:HH:mm:ss}] attempt={attempt} {LastStreamError}\n");
+                    }
+                    catch { }
+                }
+            }
             if (_cts.IsCancellationRequested) break;
             attempt = Math.Min(attempt + 1, 5);
             try { await Task.Delay(TimeSpan.FromSeconds(Math.Min(1 << (attempt - 1), 15)), _cts.Token).ConfigureAwait(false); }
