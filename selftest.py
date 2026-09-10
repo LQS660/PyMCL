@@ -61,12 +61,21 @@ def main():
     except Exception as e:
         print(f"[..] Modrinth API 不可用（不影响原版游玩）: {e}")
 
-    # 6. GUI 可用性
+    # 6. GUI 可用性（图形界面是 PySide6 + qfluentwidgets，不是 tkinter）
+    missing = []
     try:
-        import tkinter
-        print("[OK] tkinter 图形界面可用")
+        import PySide6
+        print(f"[OK] PySide6 {PySide6.__version__}")
     except ImportError:
-        print("[..] 本机 Python 缺少 tkinter，只能使用命令行模式")
+        missing.append("PySide6")
+    try:
+        import qfluentwidgets
+        print(f"[OK] qfluentwidgets {getattr(qfluentwidgets, '__version__', '?')}")
+    except ImportError:
+        missing.append("PySide6-Fluent-Widgets")
+    if missing:
+        print(f"[..] 缺少图形界面依赖 {', '.join(missing)}，只能使用命令行模式；"
+              "装上请运行: pip install -r requirements.txt")
 
     print("\n自检完成！运行 python main.py 或双击 start.bat 打开启动器。")
     return 0

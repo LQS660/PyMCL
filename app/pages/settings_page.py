@@ -764,7 +764,22 @@ class SettingsPage(QWidget):
 
     def _export(self):
         from mclauncher.config import CONFIG
-        name = CONFIG.get("default_instance") or "default"
+        default = CONFIG.get("default_instance") or "default"
+        try:
+            names = [i.get("name") for i in (self.backend.get_instances() or []) if i.get("name")]
+        except Exception:
+            names = []
+        name = default
+        # 以前写死导出 default_instance，非默认实例永远导不出来。
+        if len(names) > 1:
+            from ..widgets import ComboDialog
+            dlg = ComboDialog(tr("导出实例"), tr("选择要导出为整合包的实例"),
+                              names, default if default in names else names[0], self)
+            if not dlg.exec():
+                return
+            name = dlg.value() or default
+        elif names:
+            name = names[0]
         self.backend.export_modpack(name)
         InfoBar.success(tr("开始导出"), f"实例 {name} → exports/", parent=self,
                         position=InfoBarPosition.TOP, duration=3000)

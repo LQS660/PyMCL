@@ -137,8 +137,10 @@ class CrashDialog(QDialog):
         try:
             dest.write_text(tail, encoding="utf-8")
             open_path(dest)
-        except OSError:
-            pass
+        except OSError as exc:
+            # 以前这里 pass 掉了：磁盘满 / 只读目录时按钮点了毫无反应
+            InfoBar.error(tr("无法查看输出"), str(exc), parent=self,
+                          position=InfoBarPosition.TOP, duration=4500)
 
     def _export(self):
         if not self.report:
@@ -146,8 +148,12 @@ class CrashDialog(QDialog):
         try:
             path = export_report(self.report)
             open_path(path)
-        except OSError:
-            pass
+        except OSError as exc:
+            InfoBar.error(tr("导出失败"), str(exc), parent=self,
+                          position=InfoBarPosition.TOP, duration=4500)
+        else:
+            InfoBar.success(tr("已导出"), str(path), parent=self,
+                            position=InfoBarPosition.TOP, duration=3500)
 
     def _send(self):
         backend = self.backend or getattr(self.parent(), "backend", None)

@@ -166,6 +166,7 @@ MOD_SPEC = {
     "install": "install_mod",
     "list_installed": "get_installed_mods",
     "delete": "delete_mod",
+    "versioned": True,
     "task_prefix": tr("安装模组"),
     "types": [tr("全部"), tr("优化"), tr("科技"), tr("魔法"), tr("冒险")],
 }
@@ -254,6 +255,7 @@ DATAPACK_SPEC = {
     "install": "install_datapack",
     "list_installed": "get_installed_datapacks",
     "delete": "delete_datapack",
+    "versioned": True,
     "task_prefix": tr("安装数据包"),
     "types": [tr("全部"), tr("生存"), tr("冒险"), tr("装饰")],
 }
@@ -276,6 +278,7 @@ WORLD_SPEC = {
     "install": "install_world",
     "list_installed": "list_saves",
     "delete": "delete_save",
+    "versioned": True,
     "task_prefix": tr("安装世界"),
     "types": [tr("全部"), tr("生存"), tr("冒险"), tr("创造")],
 }
@@ -522,7 +525,7 @@ class PclCatalogPage(QWidget):
         self._mode = mode
         self.mode_search.setChecked(mode == "search")
         self.mode_installed.setChecked(mode == "installed")
-        show_ver = mode == "installed" and self.spec.get("list_installed") == "get_installed_mods"
+        show_ver = mode == "installed" and bool(self.spec.get("versioned"))
         self.installed_ver_box.setVisible(show_ver)
         if mode == "installed":
             self.reload_installed()
@@ -530,7 +533,7 @@ class PclCatalogPage(QWidget):
             self._search()
 
     def _installed_version(self) -> str:
-        if self.spec.get("list_installed") != "get_installed_mods":
+        if not self.spec.get("versioned"):
             return ""
         text = self.installed_ver_box.currentText()
         if not text or text == tr("实例目录"):
@@ -538,7 +541,7 @@ class PclCatalogPage(QWidget):
         return text
 
     def _fill_installed_versions(self):
-        if self.spec.get("list_installed") != "get_installed_mods":
+        if not self.spec.get("versioned"):
             return
         inst = self._current_instance()
         getter = getattr(self.backend, "get_installed_versions", None)
@@ -572,7 +575,12 @@ class PclCatalogPage(QWidget):
             except TypeError:
                 rows = getter(inst) or []
         elif callable(list_fn):
-            names = list_fn(inst) or []
+            # 开了存档隔离时世界在 versions/<id>/saves，不带 version 会列错目录
+            try:
+                names = list_fn(inst, version) if self.spec.get("versioned") else list_fn(inst)
+            except TypeError:
+                names = list_fn(inst)
+            names = names or []
             if names and isinstance(names[0], dict):
                 rows = names
             else:
@@ -637,13 +645,24 @@ class PclCatalogPage(QWidget):
         # 以前只有整合包会二次确认，mod / 光影 / 资源包 / 数据包 / **世界存档** 全是点一下就没。
         # 世界存档那条尤其要命：删掉的是玩家自己的游戏进度，重下不回来。
         from qfluentwidgets import MessageBox
+        purge_instance = False
         if fn == "delete_modpack":
-            box = MessageBox(
-                tr("删除整合包实例"),
-                f"将删除整个实例「{inst}」及其文件，不可恢复。",
-                self,
-            )
-            box.yesButton.setText(tr("删除实例"))
+            # 默认不再连整个实例一起删：先让用户选，默认是无损的那一项。
+            from ..widgets import ComboDialog
+            keep = tr("只移除整合包标记（保留实例与全部文件）")
+            wipe = tr("删除整个实例及其文件（不可恢复）")
+            picker = ComboDialog(tr("删除整合包"), f"实例「{inst}」", [keep, wipe], keep, self)
+            if not picker.exec():
+                return
+            purge_instance = picker.value() == wipe
+            box = None
+            if purge_instance:
+                box = MessageBox(
+                    tr("删除整合包实例"),
+                    f"将删除整个实例「{inst}」及其文件，不可恢复。",
+                    self,
+                )
+                box.yesButton.setText(tr("删除实例"))
         elif fn == "delete_save":
             box = MessageBox(
                 tr("删除世界存档"),
@@ -664,6 +683,10 @@ class PclCatalogPage(QWidget):
         try:
             if fn == "delete_mod":
                 self.backend.delete_mod(inst, filename, self._installed_version())
+            elif fn == "delete_save":
+                self.backend.delete_save(inst, filename, self._installed_version())
+            elif fn == "delete_modpack":
+                self.backend.delete_modpack(inst, filename, purge_instance)
             elif fn:
                 getattr(self.backend, fn)(inst, filename)
         except Exception as e:
@@ -705,8 +728,9 @@ class PclCatalogPage(QWidget):
             self._do_install(extra, tile)
 
     def _maybe_datapack_save(self, extra):
+        version = self._installed_version()
         try:
-            saves = self.backend.list_saves(self._current_instance()) or []
+            saves = self.backend.list_saves(self._current_instance(), version) or []
         except Exception:
             return extra
         names = [s.get("name") for s in saves if s.get("name")]
@@ -718,6 +742,7 @@ class PclCatalogPage(QWidget):
         if dlg.exec() and dlg.value() and dlg.value() != tr("不装进存档"):
             extra = dict(extra)
             extra["save"] = dlg.value()
+            extra["version"] = version
         return extra
 
     def _toggle_fav(self, item):

@@ -157,6 +157,7 @@ class BackendAPI(QObject):
     task_count_changed = Signal(int)
     game_started = Signal()
     game_exited = Signal(object)
+    update_staged = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -613,13 +614,21 @@ class BackendAPI(QObject):
     def open_media(self, path: str) -> bool:
         return bool(open_path(path))
 
-    def delete_modpack(self, instance: str, filename: str = ""):
+    def delete_modpack(self, instance: str, filename: str = "", purge_instance: bool = False):
+        """默认只清掉整合包标记，不再顺手把整个实例删掉。
+
+        整合包「已安装」列表里的那颗删除按钮以前直接 `inst.delete()`，
+        用户以为在删一个整合包，实际连存档、模组、配置一起没了。
+        """
         inst = self._instance(instance)
         meta = inst.meta() or {}
         pack = meta.get("modpack")
         if not isinstance(pack, dict) or not pack.get("name"):
             raise InstanceError(tr("该实例没有已安装整合包"))
-        inst.delete()
+        if purge_instance:
+            inst.delete()
+        else:
+            inst.set_meta("modpack", None)
         self._emit_ui_changed()
 
     def list_global_mods(self) -> list[dict]:
@@ -660,6 +669,16 @@ class BackendAPI(QObject):
 
     def set_game_dir(self, path: str):
         p = Path(path).expanduser()
+        # 先确认真能写：以前无论目录是否可用都照单全收，
+        # 首次运行向导那边又把异常吞了，用户完全看不出没设上。
+        target = p if p.is_absolute() else (utils.ROOT / path)
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            probe = target / ".pymcl-write-test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+        except OSError as exc:
+            raise InstanceError(f"游戏目录不可写: {target}\n{exc}") from exc
         CONFIG.set("instances_dir", str(p) if p.is_absolute() else path)
         CONFIG.save()
         self._emit_ui_changed()
@@ -865,6 +884,17 @@ class BackendAPI(QObject):
             iso = vs.load(inst, vid).get("isolation")
             if iso in (vs.ISOLATION_MODS, vs.ISOLATION_ALL):
                 rows.append({"label": f"{vid} · {tr('独立 mods')}", "value": vid})
+        return rows
+
+    def get_saves_targets(self, instance: str) -> list[dict]:
+        """世界安装目标：实例共享 saves + 开了存档隔离的版本各自目录。"""
+        from mclauncher import version_settings as vs
+        inst = self._instance(instance)
+        rows = [{"label": tr("实例共享 saves 目录"), "value": ""}]
+        for vid in inst.installed_ids():
+            iso = vs.load(inst, vid).get("isolation")
+            if iso in (vs.ISOLATION_SAVES, vs.ISOLATION_ALL):
+                rows.append({"label": f"{vid} · {tr('独立存档')}", "value": vid})
         return rows
 
     def get_installed_shaders(self, instance: str) -> list[str]:
@@ -1406,6 +1436,27 @@ class BackendAPI(QObject):
             return "curseforge"
         return "modrinth"
 
+    @staticmethod
+    def _gather_hits(fetchers) -> list[dict]:
+        """依次取各来源结果。部分源失败保留其余结果；全部失败才抛出。
+
+        以前这里一律 `except: hits = []`，CF key 失效或断网跟「真的没搜到」
+        在界面上长得一模一样，用户只会看到「没有找到相关模组」。
+        """
+        rows: list[dict] = []
+        errors: list[Exception] = []
+        for tag, fetch in fetchers:
+            try:
+                for hit in fetch() or []:
+                    if isinstance(hit, dict):
+                        hit.setdefault("source", tag)
+                        rows.append(hit)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+        if errors and len(errors) == len(fetchers):
+            raise errors[0]
+        return rows
+
     def _modpack_row(self, hit: dict, default_source: str = "") -> dict:
         src = (hit.get("source") or default_source or "").lower()
         return {
@@ -1473,17 +1524,17 @@ class BackendAPI(QObject):
             self._pack_cache = rows
             return rows
         if not hits:
-            try:
-                if src == "curseforge":
-                    hits = modpack_mod.search_cf_modpacks(
-                        dm, q, limit=25, api_key=key, game_version=gv or None,
-                        categories=cats or None)
-                else:
-                    hits = modpack_mod.modrinth_search(
-                        dm, q, limit=25, game_version=gv or None,
-                        categories=cats or None)
-            except Exception:
-                hits = []
+            # 「全部」以前只回退到 Modrinth，CF 独占的整合包搜不出来。
+            fetchers = []
+            if src in ("all", "modrinth"):
+                fetchers.append(("modrinth", lambda: modpack_mod.modrinth_search(
+                    dm, q, limit=25, game_version=gv or None,
+                    categories=cats or None)))
+            if src in ("all", "curseforge"):
+                fetchers.append(("curseforge", lambda: modpack_mod.search_cf_modpacks(
+                    dm, q, limit=25, api_key=key, game_version=gv or None,
+                    categories=cats or None)))
+            hits = self._gather_hits(fetchers)
         else:
             # 中文回退已混搜两端；当前页来源的结果排前面
             hits = sorted(
@@ -1520,17 +1571,21 @@ class BackendAPI(QObject):
         gv = extra.get("game_version") or extra.get("version") or ""
         if isinstance(gv, str) and gv.startswith(tr("全部")):
             gv = ""
-        from mclauncher.catalog_files import category_facets
-        cats = category_facets(extra.get("category") or extra.get("type") or "")
-        try:
-            if src == "curseforge":
-                hits = mods_mod.search_curseforge(
-                    dm, q, limit=30, api_key=CONFIG.get("curseforge_api_key"),
-                    class_id=mods_mod.CF_CLASS_MOD, game_version=gv or None)
-            else:
-                hits = mods_mod.search_mods(dm, q, limit=30, game_version=gv or None, categories=cats)
-        except Exception:
-            hits = []
+        from mclauncher.catalog_files import category_facets, cf_category_tokens
+        label = extra.get("category") or extra.get("type") or ""
+        cats = category_facets(label)
+        cf_cats = cf_category_tokens(label)
+        # 「全部」以前落进 else 分支只搜了 Modrinth，CF 独占的模组一律搜不到。
+        fetchers = []
+        if src in ("all", "modrinth"):
+            fetchers.append(("modrinth", lambda: mods_mod.search_mods(
+                dm, q, limit=30, game_version=gv or None, categories=cats)))
+        if src in ("all", "curseforge"):
+            fetchers.append(("curseforge", lambda: mods_mod.search_curseforge(
+                dm, q, limit=30, api_key=CONFIG.get("curseforge_api_key"),
+                class_id=mods_mod.CF_CLASS_MOD, game_version=gv or None,
+                categories=cf_cats or None)))
+        hits = self._gather_hits(fetchers)
         rows = []
         for h in hits:
             rows.append({
@@ -1579,29 +1634,27 @@ class BackendAPI(QObject):
         gv = extra.get("game_version") or extra.get("version") or ""
         if isinstance(gv, str) and gv.startswith(tr("全部")):
             gv = ""
-        from mclauncher.catalog_files import category_facets
-        cats = category_facets(extra.get("category") or extra.get("type") or "")
+        from mclauncher.catalog_files import category_facets, cf_category_tokens
+        label = extra.get("category") or extra.get("type") or ""
+        cats = category_facets(label)
+        cf_cats = cf_category_tokens(label)
+        fetchers = []
         if want_mr:
-            try:
-                hits = mods_mod.search_modrinth_projects(
-                    dm, q, spec["mr"], limit=30, game_version=gv or None, categories=cats)
-                rows.extend(self._content_row(h, "modrinth") for h in hits)
-            except Exception:
-                pass
+            fetchers.append(("modrinth", lambda: mods_mod.search_modrinth_projects(
+                dm, q, spec["mr"], limit=30, game_version=gv or None, categories=cats)))
         if want_cf:
-            try:
-                hits = mods_mod.search_curseforge(
-                    dm, q or None, limit=30,
-                    api_key=CONFIG.get("curseforge_api_key"),
-                    class_id=spec["cf"],
-                    game_version=gv or None,
-                )
-                for h in hits:
-                    row = self._content_row(h, "curseforge")
-                    row["description"] = h.get("summary") or row["description"]
-                    rows.append(row)
-            except Exception:
-                pass
+            fetchers.append(("curseforge", lambda: mods_mod.search_curseforge(
+                dm, q or None, limit=30,
+                api_key=CONFIG.get("curseforge_api_key"),
+                class_id=spec["cf"],
+                game_version=gv or None,
+                categories=cf_cats or None,
+            )))
+        for hit in self._gather_hits(fetchers):
+            row = self._content_row(hit, hit.get("source") or "")
+            if hit.get("source") == "curseforge":
+                row["description"] = hit.get("summary") or row["description"]
+            rows.append(row)
         return rows
 
     def search_shaders(self, query: str, source: str, extra: dict | None = None) -> list[dict]:
@@ -2092,6 +2145,11 @@ class BackendAPI(QObject):
         log(info.get("message") or tr("发现更新"))
         path = updater_mod.download(info, self._dm(progress, log))
         msg = updater_mod.apply_exe(path)
+        if msg == "UPDATE_STAGED":
+            log(tr("替换脚本已启动，关闭启动器后会自动换成新版本并重新打开"))
+            # 真正的退出必须回主线程做，这里只发信号。
+            self.update_staged.emit(str(path))
+            return tr("更新就绪，正在重启启动器…")
         log(msg)
         return msg
 
@@ -2111,8 +2169,11 @@ class BackendAPI(QObject):
         extra.setdefault("name", name)
         inst = self._instance(instance or extra.get("instance"))
         dm = self._dm(progress, log)
-        log(f"安装世界到 {inst.name}/saves")
-        result = worlds_mod.install_world(dm, extra, inst, on_progress=dm.on_progress)
+        target_version = str(extra.get("version") or "")
+        dest = worlds_mod.saves_root(inst, target_version)
+        log(f"安装世界到 {dest}")
+        result = worlds_mod.install_world(dm, extra, inst, on_progress=dm.on_progress,
+                                          version_id=target_version)
         files = (result or {}).get("files") or []
         log(f"完成: {', '.join(files) or name}")
         return f"已安装世界 {', '.join(files) or name}"
@@ -2348,10 +2409,21 @@ class BackendAPI(QObject):
             log(tr("未发现版本"))
             return tr("无版本可导入")
         log(f"发现 {len(versions)} 个版本")
-        progress(2, 3, f"导入 {len(versions)} 个版本")
+        progress(2, 3, f"导入 {len(versions)} 个版本（含依赖库）")
         result = om.migrate(str(src), instance)
-        log(f"已导入 {len(result.get('versions', []))} 个版本")
-        return f"已导入 {len(result.get('versions', []))} 个版本"
+        imported = result.get("versions") or []
+        accounts = result.get("accounts") or []
+        log(f"已导入 {len(imported)} 个版本（含各版本用到的 libraries）")
+        if accounts:
+            log("已导入账号: " + "、".join(accounts))
+            log("官方只存了访问令牌、没有刷新令牌，过期后需要在「账号」页重新登录")
+        else:
+            log("未发现可导入的正版账号")
+        self._emit_ui_changed()
+        summary = f"已导入 {len(imported)} 个版本"
+        if accounts:
+            summary += f"、{len(accounts)} 个账号"
+        return summary
 
     # ==================================================================
     # 新增 API：多开

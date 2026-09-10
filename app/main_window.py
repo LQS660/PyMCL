@@ -247,6 +247,7 @@ class MainWindow(FluentWindowBase):
         self.download_dock = DownloadDock(self.backend, self)
         self.backend.finished.connect(self._notify_task)
         self.backend.theme_changed.connect(self.apply_theme)
+        self.backend.update_staged.connect(self._on_update_staged)
         self._ui_refresh = QTimer(self)
         self._ui_refresh.setSingleShot(True)
         self._ui_refresh.setInterval(280)
@@ -886,6 +887,12 @@ class MainWindow(FluentWindowBase):
                              position=InfoBarPosition.TOP_RIGHT, duration=5000)
 
         self.backend.call_async(self.backend.check_update, ok, lambda *_: None)
+
+    def _on_update_staged(self, _path):
+        """替换脚本已在等我们退出：给用户看一眼提示，然后真的退出。"""
+        InfoBar.success(tr("更新就绪"), tr("启动器即将关闭并换成新版本"), parent=self,
+                        position=InfoBarPosition.TOP_RIGHT, duration=2500)
+        QTimer.singleShot(1500, QApplication.instance().quit)
 
     def _on_game_started(self):
         mode = self.backend.get_setting("launcher_visibility") or "keep"

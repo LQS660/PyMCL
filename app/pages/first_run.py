@@ -71,8 +71,16 @@ class FirstRunDialog(MessageBoxBase):
         })
         self.backend.save_settings(data)
         path = self.game_dir.text().strip()
-        if path:
-            try:
-                self.backend.set_game_dir(path)
-            except Exception:
-                pass
+        if not path:
+            return
+        try:
+            self.backend.set_game_dir(path)
+        except Exception as exc:  # noqa: BLE001
+            # 以前这里 pass：目录不可写时向导照样关掉，用户以为设好了，
+            # 其实实例还落在旧目录。
+            from qfluentwidgets import MessageBox
+            MessageBox(
+                tr("游戏目录没能设置"),
+                f"{path}\n\n{exc}\n\n" + tr("已保留原来的目录，可到「设置」里重新选择。"),
+                self.parent() or self,
+            ).exec()

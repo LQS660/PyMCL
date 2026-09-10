@@ -56,10 +56,10 @@ class FilePickDialog(MessageBoxBase):
         host.setLayout(filt)
         self.viewLayout.addWidget(host)
 
-        # Mod 装进哪个实例 / 哪个版本（版本隔离时是各自的 mods 目录）
+        # 装进哪个实例 / 哪个版本（版本隔离时是各自的 mods / saves 目录）
         self.target_box = None
         self.target_inst_box = None
-        if kind == "mod":
+        if kind in ("mod", "world"):
             target = QHBoxLayout()
             target.addWidget(BodyLabel(tr("安装到")))
             self.target_inst_box = ComboBox()
@@ -124,14 +124,24 @@ class FilePickDialog(MessageBoxBase):
         self.gv.currentTextChanged.connect(self._on_filter)
         self.loader.currentTextChanged.connect(self._on_filter)
 
+    def _targets_for(self, inst: str) -> list[dict]:
+        if self.kind == "world":
+            getter = getattr(self.backend, "get_saves_targets", None)
+            if callable(getter):
+                return getter(inst) or []
+            return [{"label": tr("实例共享 saves 目录"), "value": ""}]
+        return self.backend.get_mods_targets(inst) or []
+
     def _reload_targets(self):
         if self.target_box is None or self.target_inst_box is None:
             return
         inst = self.target_inst_box.currentText() or ""
+        default_label = (tr("实例共享 saves 目录") if self.kind == "world"
+                         else tr("实例共享 mods 目录"))
         try:
-            rows = self.backend.get_mods_targets(inst) or []
+            rows = self._targets_for(inst)
         except Exception:
-            rows = [{"label": tr("实例共享 mods 目录"), "value": ""}]
+            rows = [{"label": default_label, "value": ""}]
         self.target_box.blockSignals(True)
         self.target_box.clear()
         for r in rows:
