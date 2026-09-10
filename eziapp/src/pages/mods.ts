@@ -1,13 +1,13 @@
 import { bridge } from '../bridge';
 import { store } from '../store';
-import { confirmDialog, inputDialog, showError, showLoading, toast, flyToTasks } from '../ui';
+import { confirmDialog, inputDialog, showError, showSkeleton, toast, flyToTasks } from '../ui';
 import { errorMessage, escapeHtml, formatBytes } from './common';
 
 interface ModEntry { filename?: string; enabled?: boolean; bytes?: number }
 interface Target { label?: string; value?: string }
 
 export function renderModsPage(container: HTMLElement) {
-  showLoading(container);
+  showSkeleton(container, 'rows', 5);
   void load(container);
 }
 
@@ -27,12 +27,18 @@ async function reloadList(container: HTMLElement) {
     || store.currentInstance || store.instances[0]?.name || 'default';
   const version = (container.querySelector('#mods-target') as HTMLSelectElement | null)?.value || '';
   const query = ((container.querySelector('#mods-filter') as HTMLInputElement | null)?.value || '').toLowerCase();
+  const listHost = container.querySelector('#mods-list') as HTMLElement | null;
+  if (listHost && !listHost.querySelector('.catalog-row')) showSkeleton(listHost, 'rows', 4);
   try {
     const rows = await bridge.call<ModEntry[]>('get_installed_mod_entries', { instance, version });
     paintList(container, (rows || []).filter((r) => !query || String(r.filename || '').toLowerCase().includes(query)));
     const on = (rows || []).filter((r) => r.enabled).length;
+    const total = rows?.length || 0;
+    const size = (rows || []).reduce((sum, r) => sum + (Number(r.bytes) || 0), 0);
     const pill = container.querySelector('#mods-count');
-    if (pill) pill.textContent = `${on}/${rows?.length || 0}`;
+    if (pill) pill.textContent = `${on}/${total}`;
+    const sub = container.querySelector('#mods-subtitle');
+    if (sub) sub.textContent = `启用 ${on} · 禁用 ${total - on} · ${formatBytes(size)}${version ? ` · ${version}` : ''}`;
   } catch (e) {
     showError(container.querySelector('#mods-list') as HTMLElement || container, errorMessage(e, '读取模组失败'), () => void reloadList(container));
   }
@@ -47,7 +53,7 @@ function render(container: HTMLElement, instance: string, version: string, targe
         <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
           <div>
             <div class="card-header" style="margin:0">模组管理</div>
-            <div style="font-size:12px;color:var(--text-secondary);margin-top:4px">查看、启禁、导入已安装模组。版本隔离后可切换独立目录。</div>
+            <div style="font-size:12px;color:var(--text-secondary);margin-top:4px" id="mods-subtitle">查看、启禁、导入已安装模组。版本隔离后可切换独立目录。</div>
           </div>
           <span class="tag tag-primary" id="mods-count">0/0</span>
         </div>
@@ -88,10 +94,22 @@ function render(container: HTMLElement, instance: string, version: string, targe
     } catch (e) { toast(errorMessage(e, '导入失败'), 'error'); }
   });
   container.querySelector('#mods-update')?.addEventListener('click', async () => {
+    const btn = container.querySelector<HTMLButtonElement>('#mods-update')!;
+    btn.disabled = true;
     try {
-      await bridge.call('start_mod_updates', { instance: instSel.value });
+      const taskId = await bridge.call<string>('start_mod_updates', { instance: instSel.value });
       toast('已开始检查更新', 'info');
-    } catch (e) { toast(errorMessage(e, '检查更新失败'), 'error'); }
+      const unsub = bridge.subscribe('finished', (data: any) => {
+        if (String(data.task_id || '') !== taskId) return;
+        unsub();
+        btn.disabled = false;
+        toast(String(data.message || (data.success ? '模组更新完成' : '检查更新失败')), data.success ? 'success' : 'error', 6000);
+        if (data.success) void reloadList(container);
+      });
+    } catch (e) {
+      btn.disabled = false;
+      toast(errorMessage(e, '检查更新失败'), 'error');
+    }
   });
 }
 

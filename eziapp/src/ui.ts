@@ -1,6 +1,7 @@
 // UI 通用组件与工具函数
 import { bridge } from './bridge';
 import { store } from './store';
+import { motionOk } from './motion';
 import { escapeHtml } from './pages/common';
 
 // 页面清理注册表
@@ -60,14 +61,6 @@ export function applyAppearance(settings: Record<string, unknown> | null | undef
   if (width >= 140 && width <= 320) root.style.setProperty('--sidebar-width', `${width}px`);
 }
 
-function reducedMotion(): boolean {
-  try {
-    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  } catch {
-    return false;
-  }
-}
-
 function pickFlyColor(text: string): string {
   let h = 0;
   for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) >>> 0;
@@ -86,8 +79,8 @@ function bezier(p0: { x: number; y: number }, pc: { x: number; y: number }, p1: 
 /** 飞入侧栏「下载任务」：与 Qt/WinUI 对齐。返回 Promise，落地后 resolve。 */
 export function flyToTasks(source: Element | null | undefined, text = '', color?: string): Promise<void> {
   return new Promise((resolve) => {
-    const settings = (store.settings || {}) as any;
-    if (settings.ui_fly_animation === false || reducedMotion()) {
+    const settings = store.mergedSettings() as any;
+    if (settings.ui_fly_animation === false || !motionOk()) {
       resolve();
       return;
     }
@@ -114,21 +107,19 @@ export function flyToTasks(source: Element | null | undefined, text = '', color?
     ball.style.background = color || pickFlyColor(String(text || ''));
     document.body.appendChild(ball);
 
+    // 尺寸固定 44px，逐帧只写 transform 和 opacity——这两个属性合成器能自己处理，
+    // 不回主线程排版。以前每帧改 width/height/left/top/font-size，五个属性全都
+    // 触发重排，一次飞行就是几十次整页 layout。
+    const BALL = 44;
     const t0 = performance.now();
     const tick = (now: number) => {
       const raw = Math.min(1, (now - t0) / duration);
       // InOutCubic
       const t = raw < 0.5 ? 4 * raw * raw * raw : 1 - Math.pow(-2 * raw + 2, 3) / 2;
       const p = bezier(start, control, end, t);
-      const size = 44 + (14 - 44) * t;
-      const opacity = t < 0.75 ? 1 : Math.max(0, (1 - t) / 0.25);
-      ball.style.width = `${size}px`;
-      ball.style.height = `${size}px`;
-      ball.style.left = `${p.x - size / 2}px`;
-      ball.style.top = `${p.y - size / 2}px`;
-      ball.style.opacity = String(opacity);
-      ball.style.borderRadius = `${10 + (size / 2 - 10) * t}px`;
-      ball.style.fontSize = `${Math.max(8, size * 0.42)}px`;
+      const scale = (BALL + (14 - BALL) * t) / BALL;
+      ball.style.transform = `translate3d(${p.x - BALL / 2}px, ${p.y - BALL / 2}px, 0) scale(${scale})`;
+      ball.style.opacity = String(t < 0.75 ? 1 : Math.max(0, (1 - t) / 0.25));
       if (raw < 1) {
         requestAnimationFrame(tick);
         return;
@@ -153,17 +144,72 @@ export function flyToTasks(source: Element | null | undefined, text = '', color?
 }
 
 // Toast 通知
+const TOAST_ICONS = { info: 'ℹ', success: '✓', error: '✕', warning: '⚠' } as const;
 export function toast(message: string, type: 'info' | 'success' | 'error' | 'warning' = 'info', duration = 4000) {
   const container = document.getElementById('toast-container');
   if (!container) return;
   const el = document.createElement('div');
   el.className = `toast ${type}`;
-  el.textContent = message;
+  const icon = document.createElement('span');
+  icon.className = 'toast-icon';
+  icon.textContent = TOAST_ICONS[type];
+  const text = document.createElement('span');
+  text.textContent = message;
+  el.append(icon, text);
   container.appendChild(el);
-  setTimeout(() => {
+  // 堆叠上限：最多的场合是连续安装，旧的不如新的重要
+  while (container.children.length > 5) container.firstElementChild?.remove();
+
+  let timer = 0;
+  const dismiss = () => {
     el.classList.add('leaving');
-    setTimeout(() => el.remove(), 300);
-  }, duration);
+    el.addEventListener('animationend', () => el.remove(), { once: true });
+  };
+  const arm = () => { timer = window.setTimeout(dismiss, duration); };
+  // 鼠标停上去就别让它跑了——报错信息经常还没读完就自己滑走了
+  el.addEventListener('pointerenter', () => { clearTimeout(timer); el.classList.add('held'); }, { passive: true });
+  el.addEventListener('pointerleave', () => { el.classList.remove('held'); arm(); }, { passive: true });
+  arm();
+}
+
+/** 模态退场动画后再移除。 */
+export function dismissOverlay(overlay: HTMLElement) {
+  if (!overlay.isConnected) return;
+  overlay.classList.add('leaving');
+  setTimeout(() => overlay.remove(), 170);
+}
+
+export interface MenuItem {
+  label: string;
+  danger?: boolean;
+  onClick: () => void;
+}
+
+/** 轻量弹出菜单：锚定到某个元素下方，点外面或选完即关。 */
+export function showContextMenu(anchor: HTMLElement, items: MenuItem[]) {
+  document.querySelectorAll('.ctx-menu').forEach((m) => m.remove());
+  const menu = document.createElement('div');
+  menu.className = 'ctx-menu';
+  for (const item of items) {
+    const btn = document.createElement('button');
+    btn.className = `ctx-menu-item${item.danger ? ' danger' : ''}`;
+    btn.textContent = item.label;
+    btn.addEventListener('click', () => { menu.remove(); item.onClick(); });
+    menu.appendChild(btn);
+  }
+  document.body.appendChild(menu);
+  const rect = anchor.getBoundingClientRect();
+  menu.style.position = 'fixed';
+  menu.style.left = `${Math.min(rect.left, window.innerWidth - menu.offsetWidth - 8)}px`;
+  const below = rect.bottom + 4;
+  menu.style.top = `${below + menu.offsetHeight > window.innerHeight - 8 ? Math.max(8, rect.top - menu.offsetHeight - 4) : below}px`;
+  const off = (e: MouseEvent) => {
+    if (!menu.contains(e.target as Node)) {
+      menu.remove();
+      document.removeEventListener('pointerdown', off);
+    }
+  };
+  setTimeout(() => document.addEventListener('pointerdown', off), 0);
 }
 
 // 确认弹窗
@@ -184,9 +230,9 @@ export function confirmDialog(title: string, message: string): Promise<boolean> 
     overlay.querySelector('#confirm-title')!.textContent = title;
     overlay.querySelector('#confirm-msg')!.textContent = message;
     document.body.appendChild(overlay);
-    overlay.querySelector('#confirm-ok')!.addEventListener('click', () => { overlay.remove(); resolve(true); });
-    overlay.querySelector('#confirm-cancel')!.addEventListener('click', () => { overlay.remove(); resolve(false); });
-    overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); resolve(false); } });
+    overlay.querySelector('#confirm-ok')!.addEventListener('click', () => { dismissOverlay(overlay); resolve(true); });
+    overlay.querySelector('#confirm-cancel')!.addEventListener('click', () => { dismissOverlay(overlay); resolve(false); });
+    overlay.addEventListener('click', e => { if (e.target === overlay) { dismissOverlay(overlay); resolve(false); } });
   });
 }
 
@@ -255,7 +301,7 @@ export function formDialog(title: string, fields: FormField[]): Promise<Record<s
       }
       return out;
     };
-    const close = (v: Record<string, string> | null) => { overlay.remove(); resolve(v); };
+    const close = (v: Record<string, string> | null) => { dismissOverlay(overlay); resolve(v); };
     overlay.querySelector('#form-ok')!.addEventListener('click', () => close(collect()));
     overlay.querySelector('#form-cancel')!.addEventListener('click', () => close(null));
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(null); });
@@ -290,129 +336,39 @@ export function inputDialog(title: string, placeholder = '', value = ''): Promis
     document.body.appendChild(overlay);
     input.focus();
     input.select();
-    overlay.querySelector('#dialog-ok')!.addEventListener('click', () => { overlay.remove(); resolve(input.value); });
-    overlay.querySelector('#dialog-cancel')!.addEventListener('click', () => { overlay.remove(); resolve(null); });
+    overlay.querySelector('#dialog-ok')!.addEventListener('click', () => { dismissOverlay(overlay); resolve(input.value); });
+    overlay.querySelector('#dialog-cancel')!.addEventListener('click', () => { dismissOverlay(overlay); resolve(null); });
     input.addEventListener('keydown', e => {
-      if (e.key === 'Enter') { overlay.remove(); resolve(input.value); }
-      if (e.key === 'Escape') { overlay.remove(); resolve(null); }
+      if (e.key === 'Enter') { dismissOverlay(overlay); resolve(input.value); }
+      if (e.key === 'Escape') { dismissOverlay(overlay); resolve(null); }
     });
-    overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); resolve(null); } });
+    overlay.addEventListener('click', e => { if (e.target === overlay) { dismissOverlay(overlay); resolve(null); } });
   });
 }
 
-export type PreflightItem = { level?: string; code?: string; title?: string; detail?: string };
-export type CrashAction = { id?: string; label?: string; mods?: string[]; major?: number; version?: string; instance?: string; memory_mb?: number };
-
-/** 启动预检：有 error 阻止；仅 warn 可继续。 */
-export function preflightDialog(
-  items: PreflightItem[],
-): Promise<'block' | 'continue' | 'cancel'> {
-  const errors = items.filter(i => i.level === 'error');
-  const warns = items.filter(i => i.level === 'warn');
-  if (!errors.length && !warns.length) return Promise.resolve('continue');
-
-  return new Promise(resolve => {
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    const blocked = errors.length > 0;
-    const rows = (blocked ? errors : warns)
-      .map(i => `<div style="margin-bottom:10px"><strong>${escapeHtml(i.title || i.code || '')}</strong><div style="font-size:12px;color:var(--text-secondary);white-space:pre-wrap;margin-top:4px">${escapeHtml(i.detail || '')}</div></div>`)
-      .join('');
-    overlay.innerHTML = `
-      <div class="modal" style="max-width:560px">
-        <div class="modal-title" id="pf-title"></div>
-        <div id="pf-body" style="max-height:360px;overflow:auto;margin-bottom:12px"></div>
-        <div class="modal-actions" id="pf-actions"></div>
-      </div>
-    `;
-    (overlay.querySelector('#pf-title') as HTMLElement).textContent = blocked ? '启动预检未通过' : '启动预检有警告';
-    (overlay.querySelector('#pf-body') as HTMLElement).innerHTML = rows;
-    const actions = overlay.querySelector('#pf-actions') as HTMLElement;
-    if (blocked) {
-      actions.innerHTML = `<button class="btn btn-primary" id="pf-ok">知道了</button>`;
-      actions.querySelector('#pf-ok')!.addEventListener('click', () => { overlay.remove(); resolve('block'); });
-    } else {
-      actions.innerHTML = `
-        <button class="btn" id="pf-cancel">取消</button>
-        <button class="btn btn-primary" id="pf-go">继续启动</button>
-      `;
-      actions.querySelector('#pf-cancel')!.addEventListener('click', () => { overlay.remove(); resolve('cancel'); });
-      actions.querySelector('#pf-go')!.addEventListener('click', () => { overlay.remove(); resolve('continue'); });
-    }
-    overlay.addEventListener('click', e => {
-      if (e.target === overlay) { overlay.remove(); resolve(blocked ? 'block' : 'cancel'); }
-    });
-    document.body.appendChild(overlay);
-  });
-}
-
-/** 崩溃报告 + 一键修复动作。返回 true 表示用户点了「重新启动」。 */
-export function crashDialog(report: {
-  title?: string; headline?: string; detail?: string; help?: string;
-  actions?: CrashAction[]; task_id?: string;
-  instance?: string; version?: string;
-}): Promise<boolean> {
-  return new Promise(resolve => {
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    const actions = Array.isArray(report.actions) ? report.actions : [];
-    const canRelaunch = !!(report.instance && report.version);
-    const actBtns = actions.map((a, i) =>
-      `<button class="btn" data-act="${i}">${escapeHtml(a.label || a.id || '修复')}</button>`
-    ).join('');
-    overlay.innerHTML = `
-      <div class="modal" style="max-width:640px">
-        <div class="modal-title" id="cr-title"></div>
-        <div id="cr-head" style="font-size:13px;margin-bottom:8px;font-weight:600"></div>
-        <pre id="cr-detail" style="max-height:280px;overflow:auto;font-size:12px;white-space:pre-wrap;background:var(--bg-secondary,#f5f5f5);padding:10px;border-radius:8px;margin:0 0 10px"></pre>
-        <div id="cr-help" style="font-size:12px;color:var(--text-secondary);margin-bottom:10px"></div>
-        <div id="cr-acts" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">${actBtns}</div>
-        <div class="modal-actions">
-          ${canRelaunch ? '<button class="btn" id="cr-relaunch">重新启动</button>' : ''}
-          <button class="btn btn-primary" id="cr-ok">确定</button>
-        </div>
-      </div>
-    `;
-    (overlay.querySelector('#cr-title') as HTMLElement).textContent = report.title || 'Minecraft 出现错误';
-    const head = overlay.querySelector('#cr-head') as HTMLElement;
-    if (report.headline && report.headline !== report.title) head.textContent = report.headline;
-    else head.style.display = 'none';
-    (overlay.querySelector('#cr-detail') as HTMLElement).textContent = report.detail || '';
-    (overlay.querySelector('#cr-help') as HTMLElement).textContent = report.help || '';
-    overlay.querySelectorAll('[data-act]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const idx = Number((btn as HTMLElement).dataset.act);
-        const action = actions[idx];
-        if (!action) return;
-        (btn as HTMLButtonElement).disabled = true;
-        try {
-          const result = await bridge.call<{ ok?: boolean; message?: string }>('apply_crash_action', {
-            action, report,
-          });
-          if (result?.ok) {
-            toast(result.message || '已处理', 'success');
-            if (action.id === 'disable_mods') (btn as HTMLButtonElement).textContent = '已禁用';
-          } else {
-            toast(result?.message || '操作失败', 'error');
-            (btn as HTMLButtonElement).disabled = false;
-          }
-        } catch (e: any) {
-          toast(e?.message || '操作失败', 'error');
-          (btn as HTMLButtonElement).disabled = false;
-        }
-      });
-    });
-    const close = (relaunch: boolean) => { overlay.remove(); resolve(relaunch); };
-    overlay.querySelector('#cr-ok')!.addEventListener('click', () => close(false));
-    overlay.querySelector('#cr-relaunch')?.addEventListener('click', () => close(true));
-    overlay.addEventListener('click', e => { if (e.target === overlay) close(false); });
-    document.body.appendChild(overlay);
-  });
-}
-
-// 加载指示器
+// 加载指示器：骨架屏比转圈更能撑住布局，也不会让页面看起来卡住
 export function showLoading(container: HTMLElement) {
-  container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;padding:48px;gap:12px"><div class="loading-spinner"></div><span>加载中...</span></div>';
+  container.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:12px;max-width:1100px">
+      <div class="skeleton" style="height:96px"></div>
+      <div class="skeleton" style="height:64px;animation-delay:90ms"></div>
+      <div class="skeleton" style="height:64px;animation-delay:180ms"></div>
+      <div class="skeleton" style="height:64px;animation-delay:270ms"></div>
+    </div>`;
+}
+
+/** 骨架屏占位：rows=列表行，cards=卡片网格。比转圈更能撑住版面。 */
+export function showSkeleton(container: HTMLElement, kind: 'rows' | 'cards' = 'rows', count = 4) {
+  if (kind === 'cards') {
+    container.innerHTML = `<div class="grid-list">${'<div class="skeleton" style="height:132px"></div>'.repeat(count)}</div>`;
+    return;
+  }
+  container.innerHTML = `<div style="display:flex;flex-direction:column;gap:10px">${(
+    '<div class="skel-row"><div class="skeleton skel-thumb"></div>' +
+    '<div style="flex:1;display:flex;flex-direction:column;gap:8px;justify-content:center">' +
+    '<div class="skeleton skel-line" style="width:38%"></div>' +
+    '<div class="skeleton skel-line" style="width:64%"></div></div></div>'
+  ).repeat(count)}</div>`;
 }
 
 // 空状态

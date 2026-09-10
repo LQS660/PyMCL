@@ -1,11 +1,11 @@
 // 实例管理页
 import { bridge } from '../bridge';
 import { store } from '../store';
-import { toast, showLoading, showError, confirmDialog, inputDialog } from '../ui';
-import { escapeHtml } from './common';
+import { toast, showSkeleton, showError, confirmDialog, inputDialog, showContextMenu } from '../ui';
+import { errorMessage, escapeHtml } from './common';
 
 export async function renderInstancesPage(container: HTMLElement) {
-  showLoading(container);
+  showSkeleton(container, 'cards', 4);
   try {
     const instances = await bridge.call<any[]>('get_instances');
     store.setInstances(instances);
@@ -146,26 +146,28 @@ function render(container: HTMLElement) {
   });
 }
 
-async function showInstanceVersions(container: HTMLElement, instanceName: string) {
+async function showInstanceVersions(container: HTMLElement, instanceName: string, includeHidden = false) {
   try {
-    const versions = await bridge.call<string[]>('get_installed_versions', { instance: instanceName });
+    const versions = await bridge.call<string[]>('get_installed_versions', { instance: instanceName, include_hidden: includeHidden });
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
     modal.innerHTML = `
-      <div class="modal" style="min-width:500px">
+      <div class="modal" style="width:min(640px, calc(100vw - 32px));max-width:640px">
         <div class="modal-title">📋 实例版本 - ${escapeHtml(instanceName)}</div>
-        <div style="margin-bottom:12px">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
           <button class="btn btn-sm btn-primary" id="btn-add-version">➕ 安装版本</button>
+          <label class="check-row" style="margin-left:auto"><input type="checkbox" id="vs-show-hidden" ${includeHidden ? 'checked' : ''}> 显示隐藏</label>
         </div>
         <div id="version-list">
           ${versions.length === 0
             ? '<div style="color:var(--text-secondary);padding:16px;text-align:center">暂无已安装版本</div>'
             : versions.map(v => `
-              <div style="display:flex;align-items:center;justify-content:space-between;padding:8px;border-bottom:1px solid var(--border-light)">
-                <span><strong>${escapeHtml(v)}</strong></span>
-                <div style="display:flex;gap:4px">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-light)">
+                <span style="min-width:0;overflow:hidden;text-overflow:ellipsis"><strong>${escapeHtml(v)}</strong></span>
+                <div style="display:flex;gap:4px;flex:0 0 auto">
                   <button class="btn btn-sm" data-action="setup-version" data-version="${escapeHtml(v)}">设置</button>
-                  <button class="btn btn-sm btn-danger" data-action="uninstall-version" data-version="${escapeHtml(v)}">卸载</button>
+                  <button class="btn btn-sm" data-action="saves-version" data-version="${escapeHtml(v)}">存档</button>
+                  <button class="btn btn-sm" data-action="more-version" data-version="${escapeHtml(v)}">更多 ▾</button>
                 </div>
               </div>
             `).join('')}
@@ -175,8 +177,13 @@ async function showInstanceVersions(container: HTMLElement, instanceName: string
     `;
     document.body.appendChild(modal);
 
+    const reload = () => { modal.remove(); void showInstanceVersions(container, instanceName, includeHidden); };
     modal.querySelector('#close-versions')?.addEventListener('click', () => modal.remove());
     modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+    modal.querySelector<HTMLInputElement>('#vs-show-hidden')?.addEventListener('change', (e) => {
+      modal.remove();
+      void showInstanceVersions(container, instanceName, (e.target as HTMLInputElement).checked);
+    });
 
     modal.querySelectorAll('[data-action="setup-version"]').forEach(btn => {
       btn.addEventListener('click', async () => {
@@ -186,19 +193,53 @@ async function showInstanceVersions(container: HTMLElement, instanceName: string
       });
     });
 
-    modal.querySelectorAll('[data-action="uninstall-version"]').forEach(btn => {
+    modal.querySelectorAll('[data-action="saves-version"]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const version = (btn as HTMLElement).dataset.version!;
-        const confirmed = await confirmDialog('卸载版本', `确定要卸载版本 ${version} 吗？`);
-        if (!confirmed) return;
-        try {
-          await bridge.call('uninstall_version', { spec: version });
-          toast('版本已卸载', 'success');
-          modal.remove();
-          showInstanceVersions(container, instanceName);
-        } catch (e: any) {
-          toast(e.message || '卸载失败', 'error');
-        }
+        const { showSavesDialog } = await import('./dialogs');
+        await showSavesDialog(instanceName, version);
+      });
+    });
+
+    modal.querySelectorAll<HTMLButtonElement>('[data-action="more-version"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const version = btn.dataset.version!;
+        const run = (fn: () => Promise<unknown>, ok: string, reloadAfter = false) => void (async () => {
+          try {
+            const out = await fn();
+            toast(typeof out === 'string' && out ? out : ok, 'success');
+            if (reloadAfter) reload();
+          } catch (e) { toast(errorMessage(e, '操作失败'), 'error'); }
+        })();
+        showContextMenu(btn, [
+          { label: '修复（补全缺失文件）', onClick: () => run(async () => { await bridge.call('repair_version', { instance: instanceName, version }); return '已开始修复，进度见下载任务页'; }, '') },
+          { label: '重命名', onClick: () => void (async () => {
+              const newId = await inputDialog('重命名版本', '新版本 ID', version);
+              if (!newId || newId === version) return;
+              run(() => bridge.call('rename_version', { instance: instanceName, version, new_id: newId }), '已重命名', true);
+            })() },
+          { label: '复制', onClick: () => void (async () => {
+              const newId = await inputDialog('复制版本', '新版本 ID', `${version}-copy`);
+              if (!newId) return;
+              run(() => bridge.call('copy_version', { instance: instanceName, version, new_id: newId }), '已复制', true);
+            })() },
+          { label: '隐藏 / 取消隐藏', onClick: () => void (async () => {
+              try {
+                const data = await bridge.call<any>('get_version_settings', { instance: instanceName, version });
+                run(() => bridge.call('hide_version', { instance: instanceName, version, hidden: !data?.hidden }), '已切换隐藏状态', true);
+              } catch (e) { toast(errorMessage(e, '操作失败'), 'error'); }
+            })() },
+          { label: '打开游戏文件夹', onClick: () => run(() => bridge.call('open_version_folder', { instance: instanceName, version, which: 'game' }), '已打开') },
+          { label: '打开 mods 目录', onClick: () => run(() => bridge.call('open_version_folder', { instance: instanceName, version, which: 'mods' }), '已打开') },
+          { label: '打开 saves 目录', onClick: () => run(() => bridge.call('open_version_folder', { instance: instanceName, version, which: 'saves' }), '已打开') },
+          { label: '打开截图目录', onClick: () => run(() => bridge.call('open_version_folder', { instance: instanceName, version, which: 'screenshots' }), '已打开') },
+          { label: '创建桌面快捷方式', onClick: () => run(() => bridge.call('create_desktop_shortcut', { instance: instanceName, version }), '已创建桌面快捷方式') },
+          { label: '导出启动脚本', onClick: () => run(async () => { await bridge.call('export_launch_script', { instance: instanceName, version }); return '已加入导出任务，完成后到下载任务页查看'; }, '') },
+          { label: '卸载版本', danger: true, onClick: () => void (async () => {
+              if (!await confirmDialog('卸载版本', `确定要卸载版本 ${version} 吗？`)) return;
+              run(() => bridge.call('uninstall_version', { spec: `${instanceName} / ${version}` }), '版本已卸载', true);
+            })() },
+        ]);
       });
     });
 

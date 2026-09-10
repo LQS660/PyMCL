@@ -1,7 +1,161 @@
 import { bridge } from '../bridge';
 import { store } from '../store';
-import { confirmDialog, formDialog, inputDialog, toast } from '../ui';
+import { confirmDialog, dismissOverlay, formDialog, inputDialog, toast } from '../ui';
 import { errorMessage, escapeHtml, formatBytes } from './common';
+
+export type PreflightItem = { level?: string; code?: string; title?: string; detail?: string };
+export type CrashAction = { id?: string; label?: string; mods?: string[]; major?: number; version?: string; instance?: string; memory_mb?: number };
+
+/** 启动预检：有 error 阻止；仅 warn 可继续。 */
+export function preflightDialog(
+  items: PreflightItem[],
+): Promise<'block' | 'continue' | 'cancel'> {
+  const errors = items.filter(i => i.level === 'error');
+  const warns = items.filter(i => i.level === 'warn');
+  if (!errors.length && !warns.length) return Promise.resolve('continue');
+
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    const blocked = errors.length > 0;
+    const rows = (blocked ? errors : warns)
+      .map(i => `<div style="margin-bottom:10px"><strong>${escapeHtml(i.title || i.code || '')}</strong><div style="font-size:12px;color:var(--text-secondary);white-space:pre-wrap;margin-top:4px">${escapeHtml(i.detail || '')}</div></div>`)
+      .join('');
+    overlay.innerHTML = `
+      <div class="modal" style="max-width:560px">
+        <div class="modal-title" id="pf-title"></div>
+        <div id="pf-body" style="max-height:360px;overflow:auto;margin-bottom:12px"></div>
+        <div class="modal-actions" id="pf-actions"></div>
+      </div>
+    `;
+    (overlay.querySelector('#pf-title') as HTMLElement).textContent = blocked ? '启动预检未通过' : '启动预检有警告';
+    (overlay.querySelector('#pf-body') as HTMLElement).innerHTML = rows;
+    const actions = overlay.querySelector('#pf-actions') as HTMLElement;
+    if (blocked) {
+      actions.innerHTML = `<button class="btn btn-primary" id="pf-ok">知道了</button>`;
+      actions.querySelector('#pf-ok')!.addEventListener('click', () => { dismissOverlay(overlay); resolve('block'); });
+    } else {
+      actions.innerHTML = `
+        <button class="btn" id="pf-cancel">取消</button>
+        <button class="btn btn-primary" id="pf-go">继续启动</button>
+      `;
+      actions.querySelector('#pf-cancel')!.addEventListener('click', () => { dismissOverlay(overlay); resolve('cancel'); });
+      actions.querySelector('#pf-go')!.addEventListener('click', () => { dismissOverlay(overlay); resolve('continue'); });
+    }
+    overlay.addEventListener('click', e => {
+      if (e.target === overlay) { dismissOverlay(overlay); resolve(blocked ? 'block' : 'cancel'); }
+    });
+    document.body.appendChild(overlay);
+  });
+}
+
+/** 崩溃报告 + 一键修复动作 + 查看输出/导出/上报。返回 true 表示用户点了「重新启动」。 */
+export function crashDialog(report: {
+  title?: string; headline?: string; detail?: string; help?: string;
+  actions?: CrashAction[]; task_id?: string;
+  instance?: string; version?: string;
+  direct_file?: string; output_tail?: string;
+}): Promise<boolean> {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    const actions = Array.isArray(report.actions) ? report.actions : [];
+    const canRelaunch = !!(report.instance && report.version);
+    const hasFile = !!(report.direct_file || report.output_tail || report.task_id);
+    const actBtns = actions.map((a, i) =>
+      `<button class="btn" data-act="${i}">${escapeHtml(a.label || a.id || '修复')}</button>`
+    ).join('');
+    overlay.innerHTML = `
+      <div class="modal" style="max-width:640px">
+        <div class="modal-title" id="cr-title"></div>
+        <div id="cr-head" style="font-size:13px;margin-bottom:8px;font-weight:600"></div>
+        <pre id="cr-detail" class="log-box" style="max-height:280px;margin:0 0 10px"></pre>
+        <div id="cr-help" style="font-size:12px;color:var(--text-secondary);margin-bottom:10px"></div>
+        ${actBtns ? `<div style="font-size:13px;font-weight:650;margin-bottom:6px">建议操作</div><div id="cr-acts" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">${actBtns}</div>` : ''}
+        <div class="modal-actions" style="flex-wrap:wrap">
+          ${canRelaunch ? '<button class="btn" id="cr-relaunch">重新启动</button>' : ''}
+          ${hasFile ? '<button class="btn" id="cr-view">查看输出</button>' : ''}
+          <button class="btn" id="cr-export">导出错误报告</button>
+          <button class="btn" id="cr-send">发送给开发者</button>
+          <button class="btn btn-primary" id="cr-ok">确定</button>
+        </div>
+      </div>
+    `;
+    (overlay.querySelector('#cr-title') as HTMLElement).textContent = report.title || 'Minecraft 出现错误';
+    const head = overlay.querySelector('#cr-head') as HTMLElement;
+    if (report.headline && report.headline !== report.title) head.textContent = report.headline;
+    else head.style.display = 'none';
+    (overlay.querySelector('#cr-detail') as HTMLElement).textContent = report.detail || report.output_tail || '';
+    (overlay.querySelector('#cr-help') as HTMLElement).textContent = report.help || '';
+    overlay.querySelectorAll('[data-act]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const idx = Number((btn as HTMLElement).dataset.act);
+        const action = actions[idx];
+        if (!action) return;
+        (btn as HTMLButtonElement).disabled = true;
+        try {
+          const result = await bridge.call<{ ok?: boolean; message?: string }>('apply_crash_action', {
+            action, report,
+          });
+          if (result?.ok) {
+            toast(result.message || '已处理', 'success');
+            if (action.id === 'disable_mods') (btn as HTMLButtonElement).textContent = '已禁用';
+          } else {
+            toast(result?.message || '操作失败', 'error');
+            (btn as HTMLButtonElement).disabled = false;
+          }
+        } catch (e: any) {
+          toast(e?.message || '操作失败', 'error');
+          (btn as HTMLButtonElement).disabled = false;
+        }
+      });
+    });
+    const close = (relaunch: boolean) => { dismissOverlay(overlay); resolve(relaunch); };
+    overlay.querySelector('#cr-ok')!.addEventListener('click', () => close(false));
+    overlay.querySelector('#cr-relaunch')?.addEventListener('click', () => close(true));
+    overlay.querySelector('#cr-view')?.addEventListener('click', async () => {
+      try {
+        await bridge.call('open_crash_file', { path: report.direct_file || '', task_id: report.task_id || '' });
+      } catch (e: any) { toast(e?.message || '没有可打开的日志文件', 'error'); }
+    });
+    overlay.querySelector('#cr-export')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget as HTMLButtonElement;
+      btn.disabled = true;
+      try {
+        const path = await bridge.call<string>('export_crash_report', { task_id: report.task_id || '' });
+        toast(path ? `已导出：${path}` : '已导出错误报告', 'success', 6000);
+        if (path) await bridge.call('open_crash_file', { path }).catch(() => undefined);
+      } catch (err: any) {
+        toast(err?.message || '导出失败', 'error');
+        btn.disabled = false;
+      }
+    });
+    overlay.querySelector('#cr-send')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget as HTMLButtonElement;
+      if (!store.mergedSettings().feedback_consent) {
+        const ok = await confirmDialog('上传诊断数据', '发送崩溃报告会附带本机配置信息。是否允许上传？');
+        if (!ok) { toast('未同意上传，已取消发送', 'warning'); return; }
+        try { await bridge.call('save_settings', { feedback_consent: true }); } catch { /* 忽略 */ }
+        store.setSettings({ ...(store.settings || {}), feedback_consent: true } as any);
+      }
+      btn.disabled = true;
+      btn.textContent = '发送中…';
+      try {
+        // 直接上报对话框里的报告内容：启动失败这类合成报告后端 _crashes 里没有，
+        // submit_crash_report(task_id) 会找不到，submit_crash_feedback 带全文更稳。
+        const result = await bridge.call<{ message?: string }>('submit_crash_feedback', { report });
+        btn.textContent = '已发送';
+        toast(result?.message || '已发给开发者', 'success');
+      } catch (err: any) {
+        toast(err?.message || '发送失败', 'error');
+        btn.disabled = false;
+        btn.textContent = '发送给开发者';
+      }
+    });
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(false); });
+    document.body.appendChild(overlay);
+  });
+}
 
 export async function showVersionSetup(instance: string, version: string) {
   let data: any = {};
@@ -121,19 +275,35 @@ export async function showSavesDialog(instance: string, version = '') {
       listEl.textContent = errorMessage(e, '读取失败');
     }
   };
+  const syncButtons = () => {
+    // 对齐 Qt 版 _set_actions：不同页签启用不同操作
+    const isSave = kind === 'saves';
+    const isBackup = kind === 'backups';
+    const set = (id: string, on: boolean) => {
+      const b = overlay.querySelector<HTMLButtonElement>(id);
+      if (b) b.disabled = !on;
+    };
+    set('#sv-del', isSave || isBackup);
+    set('#sv-backup', isSave);
+    set('#sv-export', isSave);
+    set('#sv-dp', isSave);
+    set('#sv-restore', isBackup);
+  };
   overlay.querySelectorAll<HTMLButtonElement>('[data-kind]').forEach((btn) => {
     btn.addEventListener('click', () => {
       kind = btn.dataset.kind || 'saves';
       overlay.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === btn));
+      syncButtons();
       void reload();
     });
   });
+  syncButtons();
   overlay.querySelector('#sv-open')?.addEventListener('click', async () => {
     const row = selected();
     if (!row) return;
     try {
       if (kind === 'saves') await bridge.call('open_save', { instance, name: row.name, version });
-      else if (row.path) await bridge.call('open_crash_file', { path: row.path });
+      else if (row.path) await bridge.call('open_media', { path: row.path });
     } catch (e) { toast(errorMessage(e, '打开失败'), 'error'); }
   });
   overlay.querySelector('#sv-del')?.addEventListener('click', async () => {
@@ -176,14 +346,19 @@ export async function showSavesDialog(instance: string, version = '') {
   overlay.querySelector('#sv-dp')?.addEventListener('click', async () => {
     const row = selected();
     if (!row || kind !== 'saves') return toast('请先选择存档', 'warning');
-    const filename = await inputDialog('装进存档', '数据包文件名', '');
-    if (!filename) return;
     try {
-      await bridge.call('install_datapack_into_save', { instance, filename, save_name: row.name, version });
+      const packs = await bridge.call<string[]>('get_installed_datapacks', { instance });
+      if (!packs?.length) return toast('实例 datapacks 目录还没有数据包，先到下载页安装', 'warning');
+      const picked = await formDialog('选择数据包', [{
+        id: 'filename', label: `装进存档「${row.name}」`, type: 'select', value: packs[0],
+        options: packs.map((p) => ({ value: p, label: p })),
+      }]);
+      if (!picked?.filename) return;
+      await bridge.call('install_datapack_into_save', { instance, filename: picked.filename, save_name: row.name, version });
       toast('已装入数据包', 'success');
     } catch (e) { toast(errorMessage(e, '安装失败'), 'error'); }
   });
-  const close = () => overlay.remove();
+  const close = () => dismissOverlay(overlay);
   overlay.querySelector('#sv-close')?.addEventListener('click', close);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
   void reload();
@@ -232,9 +407,67 @@ export async function showGlobalMods() {
     }
   };
   overlay.querySelector('#gm-open')?.addEventListener('click', () => void bridge.call('open_global_mods').catch((e) => toast(errorMessage(e, '打开失败'), 'error')));
-  overlay.querySelector('#gm-close')?.addEventListener('click', () => overlay.remove());
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  overlay.querySelector('#gm-close')?.addEventListener('click', () => dismissOverlay(overlay));
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) dismissOverlay(overlay); });
   void reload();
+}
+
+/** 微软设备码登录对话框：login_code/login_status 事件驱动，可取消。 */
+export function showMicrosoftLogin(onDone?: (ok: boolean) => void) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:440px">
+      <div class="modal-title">微软账号登录</div>
+      <div id="ms-status" style="font-size:13px;color:var(--text-secondary)">正在请求微软设备代码…</div>
+      <div id="ms-code" style="font-family:var(--font-mono);font-size:24px;font-weight:700;letter-spacing:3px;margin:12px 0;text-align:center"></div>
+      <div class="modal-actions" style="justify-content:space-between">
+        <button class="btn" id="ms-cancel">取消</button>
+        <button class="btn btn-primary" id="ms-open" style="display:none">打开验证页</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  let taskId = '';
+  let uri = '';
+  let settled = false;
+  const statusEl = overlay.querySelector<HTMLElement>('#ms-status')!;
+  const codeEl = overlay.querySelector<HTMLElement>('#ms-code')!;
+  const openBtn = overlay.querySelector<HTMLButtonElement>('#ms-open')!;
+  const finish = (ok: boolean, message = '') => {
+    if (settled) return;
+    settled = true;
+    unsubCode(); unsubStatus(); unsubFinished();
+    dismissOverlay(overlay);
+    if (message) toast(message, ok ? 'success' : 'error');
+    onDone?.(ok);
+  };
+  const unsubCode = bridge.subscribe('login_code', (data: any) => {
+    if (!taskId) return;
+    codeEl.textContent = String(data.code || '');
+    uri = String(data.uri || '');
+    if (uri) openBtn.style.display = '';
+    statusEl.textContent = '请在浏览器中输入设备代码完成登录。';
+  });
+  const unsubStatus = bridge.subscribe('login_status', (data: any) => {
+    if (!taskId) return;
+    statusEl.textContent = String(data.text || '') || statusEl.textContent;
+  });
+  const unsubFinished = bridge.subscribe('finished', (data: any) => {
+    if (!taskId || String(data.task_id || '') !== taskId) return;
+    finish(!!data.success, String(data.message || (data.success ? '登录完成' : '登录失败')));
+  });
+  overlay.querySelector('#ms-cancel')?.addEventListener('click', () => {
+    if (taskId) void bridge.call('cancel_task', { task_id: taskId }).catch(() => undefined);
+    finish(false);
+  });
+  overlay.addEventListener('click', (e) => {
+    if (e.target !== overlay) return;
+    if (taskId) void bridge.call('cancel_task', { task_id: taskId }).catch(() => undefined);
+    finish(false);
+  });
+  openBtn.addEventListener('click', () => { if (uri) window.open(uri, '_blank', 'noopener'); });
+  void bridge.call<string>('start_microsoft_login').then((id) => { taskId = id; })
+    .catch((e) => finish(false, errorMessage(e, '无法开始微软登录')));
 }
 
 export async function pickCatalogFile(item: Record<string, unknown>, kind: string, gameVersion: string): Promise<Record<string, unknown> | null> {
@@ -265,7 +498,7 @@ export async function pickCatalogFile(item: Record<string, unknown>, kind: strin
       </div>`;
     document.body.appendChild(overlay);
     return await new Promise((resolve) => {
-      const finish = (v: Record<string, unknown> | null) => { overlay.remove(); resolve(v); };
+      const finish = (v: Record<string, unknown> | null) => { dismissOverlay(overlay); resolve(v); };
       overlay.querySelector('#cf-cancel')?.addEventListener('click', () => finish(null));
       overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(null); });
       overlay.querySelector('#cf-ok')?.addEventListener('click', () => {

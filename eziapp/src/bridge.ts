@@ -1,4 +1,6 @@
 // BridgeClient — authenticated JSON-RPC + SSE client for the local PyMCL bridge.
+import { store } from './store';
+
 export interface BridgeEvent {
   event: string;
   data: Record<string, unknown>;
@@ -204,7 +206,6 @@ export const bridge = new BridgeClient();
 
 export async function initBridge(): Promise<boolean> {
   const config = await loadBridgeConfig();
-  const { store } = await import('./store');
   if (!config) {
     bridge.clearConnection();
     store.bridgeUrl = '';

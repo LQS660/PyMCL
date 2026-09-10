@@ -1,6 +1,6 @@
 // 游玩时长统计页
 import { bridge } from '../bridge';
-import { confirmDialog, showError, showLoading, toast } from '../ui';
+import { confirmDialog, showError, showSkeleton, toast } from '../ui';
 import { errorMessage, escapeHtml } from './common';
 
 interface PlaytimeData {
@@ -12,7 +12,7 @@ interface PlaytimeData {
 type PlaytimeMap = Record<string, PlaytimeData>;
 
 export function renderPlaytimePage(container: HTMLElement) {
-  showLoading(container);
+  showSkeleton(container, 'cards', 3);
   void loadAndRender(container);
 }
 

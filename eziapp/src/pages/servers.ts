@@ -1,7 +1,7 @@
 // 服务器列表管理页
 import { bridge } from '../bridge';
 import { store } from '../store';
-import { confirmDialog, inputDialog, showError, showLoading, toast } from '../ui';
+import { confirmDialog, formDialog, inputDialog, showError, showSkeleton, toast } from '../ui';
 import { errorMessage, escapeHtml } from './common';
 
 interface ServerRow {
@@ -12,7 +12,7 @@ interface ServerRow {
 }
 
 export function renderServersPage(container: HTMLElement) {
-  showLoading(container);
+  showSkeleton(container, 'rows', 4);
   void loadAndRender(container);
 }
 
@@ -111,24 +111,36 @@ function currentInstance(container: HTMLElement): string {
   return container.querySelector<HTMLSelectElement>('#servers-instance')?.value || store.currentInstance || '';
 }
 
+function serverFields(s: ServerRow = {}) {
+  return [
+    { id: 'name', label: '服务器名称（可选）', value: s.name || '' },
+    { id: 'ip', label: '服务器地址', value: s.ip || '', placeholder: 'play.example.com' },
+    { id: 'port', label: '端口', value: String(s.port ?? 25565) },
+    { id: 'description', label: '描述（可选）', value: s.description || '' },
+  ];
+}
+
+function parsePort(text: string): number {
+  return /^\d{1,5}$/.test(text.trim()) ? Number(text.trim()) : 25565;
+}
+
 async function onAdd(container: HTMLElement) {
   const instance = currentInstance(container);
   if (!instance) {
     toast('请先创建并选择实例', 'warning');
     return;
   }
-  const name = await inputDialog('添加服务器', '服务器名称（可选）', '');
-  if (name === null) return;
-  const ip = await inputDialog('添加服务器', '服务器地址', '');
-  if (ip === null || !ip.trim()) {
+  const values = await formDialog('添加服务器', serverFields());
+  if (!values) return;
+  if (!values.ip.trim()) {
     toast('地址不能为空', 'warning');
     return;
   }
-  const portText = await inputDialog('添加服务器', '端口（默认 25565）', '25565');
-  if (portText === null) return;
-  const port = /^\d{1,5}$/.test(portText.trim()) ? Number(portText.trim()) : 25565;
   try {
-    await bridge.call('add_server', { instance, name: name.trim(), ip: ip.trim(), port });
+    await bridge.call('add_server', {
+      instance, name: values.name.trim(), ip: values.ip.trim(),
+      port: parsePort(values.port), description: (values.description || '').trim(),
+    });
     toast('服务器已添加', 'success');
     void loadAndRender(container);
   } catch (error) {
@@ -147,15 +159,17 @@ async function onEdit(container: HTMLElement, index: number) {
   }
   const s = servers[index];
   if (!s) return;
-  const name = await inputDialog('编辑服务器', '服务器名称', s.name || '');
-  if (name === null) return;
-  const ip = await inputDialog('编辑服务器', '服务器地址', s.ip || '');
-  if (ip === null || !ip.trim()) {
+  const values = await formDialog('编辑服务器', serverFields(s));
+  if (!values) return;
+  if (!values.ip.trim()) {
     toast('地址不能为空', 'warning');
     return;
   }
   try {
-    await bridge.call('update_server', { instance, index, name: name.trim(), ip: ip.trim(), port: s.port ?? 25565 });
+    await bridge.call('update_server', {
+      instance, index, name: values.name.trim(), ip: values.ip.trim(),
+      port: parsePort(values.port), description: (values.description || '').trim(),
+    });
     toast('服务器已更新', 'success');
     void loadAndRender(container);
   } catch (error) {

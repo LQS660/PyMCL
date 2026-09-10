@@ -1,7 +1,7 @@
 // 反馈与帮助页。
 import { bridge } from '../bridge';
 import { store } from '../store';
-import { showError, showLoading, toast } from '../ui';
+import { confirmDialog, dismissOverlay, showError, showSkeleton, toast } from '../ui';
 import { errorMessage, escapeHtml } from './common';
 
 interface FeedbackRecord {
@@ -24,7 +24,7 @@ const categories = [
 ] as const;
 
 export function renderFeedbackPage(container: HTMLElement) {
-  showLoading(container);
+  showSkeleton(container, 'rows', 4);
   void loadAndRender(container);
 }
 
@@ -109,6 +109,21 @@ function render(container: HTMLElement, history: FeedbackRecord[], articles: Hel
   `;
 
   container.querySelector<HTMLButtonElement>('#feedback-refresh')?.addEventListener('click', () => void loadAndRender(container));
+  // 列表里没带正文的条目，展开时再取全文（对齐 Qt 版 _show_help）
+  container.querySelectorAll<HTMLDetailsElement>('details.faq').forEach((el) => {
+    el.addEventListener('toggle', async () => {
+      if (!el.open) return;
+      const pre = el.querySelector('pre');
+      if (!pre || pre.dataset.loaded) return;
+      pre.dataset.loaded = '1';
+      const current = articles.find((a) => (a.id || '') === (el.dataset.article || ''));
+      if (current?.body) { pre.textContent = current.body; return; }
+      try {
+        const full = await bridge.call<HelpArticle>('help_article', { article_id: el.dataset.article || '' });
+        if (full?.body) pre.textContent = full.body;
+      } catch { pre.textContent = '加载失败'; }
+    });
+  });
   container.querySelector<HTMLButtonElement>('#feedback-submit')?.addEventListener('click', async () => {
     const category = container.querySelector<HTMLSelectElement>('#feedback-category')!.value;
     const title = container.querySelector<HTMLInputElement>('#feedback-title')!.value.trim();
@@ -118,6 +133,15 @@ function render(container: HTMLElement, history: FeedbackRecord[], articles: Hel
     if (!title || !body) {
       toast('请填写标题和详细说明', 'warning');
       return;
+    }
+    // 未同意上传诊断数据时先询问（对齐 Qt 版 prompt_feedback_consent）
+    if (!store.mergedSettings().feedback_consent) {
+      const ok = await confirmDialog('上传诊断数据', '发送反馈会附带本机配置信息（可在设置里随时关掉）。是否允许上传？');
+      if (!ok) { toast('未同意上传，已取消发送', 'warning'); return; }
+      try {
+        await bridge.call('save_settings', { feedback_consent: true });
+        store.setSettings({ ...(store.settings || {}), feedback_consent: true } as any);
+      } catch { /* 忽略 */ }
     }
     const button = container.querySelector<HTMLButtonElement>('#feedback-submit')!;
     button.disabled = true;
@@ -134,10 +158,16 @@ function render(container: HTMLElement, history: FeedbackRecord[], articles: Hel
   });
   container.querySelector<HTMLButtonElement>('#feedback-sysinfo-preview')?.addEventListener('click', async () => {
     try {
-      const info = await bridge.call<Record<string, unknown>>('collect_sysinfo', { scan_system_java: true });
-      showSystemInfo(info);
-    } catch (error) {
-      toast(errorMessage(error, '读取系统信息失败'), 'error');
+      // 对齐 Qt 版：展示可读文本而不是原始 JSON
+      const text = await bridge.call<string>('sysinfo_text', { info: null });
+      showSystemInfo(text);
+    } catch {
+      try {
+        const info = await bridge.call<Record<string, unknown>>('collect_sysinfo', { scan_system_java: true });
+        showSystemInfo(JSON.stringify(info, null, 2));
+      } catch (error) {
+        toast(errorMessage(error, '读取系统信息失败'), 'error');
+      }
     }
   });
 }
@@ -147,9 +177,9 @@ function renderFaq(articles: HelpArticle[]): string {
     return '<div style="font-size:13px;color:var(--text-secondary)">暂无帮助条目</div>';
   }
   return articles.slice(0, 12).map(a => `
-    <details style="margin-bottom:8px;padding:8px 10px;border:1px solid var(--border-color,#e5e5e5);border-radius:8px">
-      <summary style="cursor:pointer;font-weight:600">${escapeHtml(a.title || a.id || '条目')}</summary>
-      <pre style="white-space:pre-wrap;font-size:12px;margin:8px 0 0;font-family:inherit">${escapeHtml(a.body || '')}</pre>
+    <details class="faq" style="margin-bottom:8px" data-article="${escapeHtml(a.id || '')}">
+      <summary>${escapeHtml(a.title || a.id || '条目')}</summary>
+      <pre style="white-space:pre-wrap;font-size:12px;margin:8px 0 0;font-family:inherit">${escapeHtml(a.body || '展开加载…')}</pre>
     </details>
   `).join('');
 }
@@ -173,10 +203,9 @@ function bridgeUrlLabel(): string {
   }
 }
 
-function showSystemInfo(info: Record<string, unknown>) {
+function showSystemInfo(text: string) {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  const text = JSON.stringify(info, null, 2);
   overlay.innerHTML = `
     <div class="modal" style="width:min(760px, calc(100vw - 32px))">
       <div class="modal-title">系统信息预览</div>
@@ -185,7 +214,7 @@ function showSystemInfo(info: Record<string, unknown>) {
     </div>
   `;
   document.body.appendChild(overlay);
-  const close = () => overlay.remove();
+  const close = () => dismissOverlay(overlay);
   overlay.querySelector<HTMLButtonElement>('#close-sysinfo')?.addEventListener('click', close);
   overlay.addEventListener('click', (event) => { if (event.target === overlay) close(); });
 }

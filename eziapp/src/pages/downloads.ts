@@ -1,7 +1,7 @@
 import { bridge } from '../bridge';
 import { router, type PageKey } from '../router';
 import { store, type InstanceInfo, type VersionInfo } from '../store';
-import { confirmDialog, inputDialog, registerPageCleanup, toast, flyToTasks } from '../ui';
+import { confirmDialog, inputDialog, registerPageCleanup, showSkeleton, toast, flyToTasks } from '../ui';
 import { errorMessage, escapeHtml, formatDownloads } from './common';
 import { pickCatalogFile } from './dialogs';
 
@@ -52,6 +52,57 @@ function stateOf(cat: string) {
 
 let activeCategory: DownloadCategory = 'vanilla';
 let renderToken = 0;
+
+/** 数据包装进存档：等安装任务成功后调用 install_datapack_into_save。 */
+function installIntoSaveAfter(taskId: string, instance: string, extra: Record<string, unknown>, saveName: string) {
+  const unsub = bridge.subscribe('finished', (data: any) => {
+    if (String(data.task_id || '') !== taskId) return;
+    unsub();
+    if (!data.success) return;
+    void (async () => {
+      try {
+        const packs = await bridge.call<string[]>('get_installed_datapacks', { instance });
+        const want = String(extra.filename || '').toLowerCase();
+        const hit = (packs || []).find((p) => p.toLowerCase() === want)
+          || (packs || []).find((p) => want && p.toLowerCase().includes(want.replace(/\.(zip|jar)$/i, '')))
+          || (packs || [])[packs.length - 1];
+        if (!hit) return;
+        await bridge.call('install_datapack_into_save', { instance, filename: hit, save_name: saveName });
+        toast(`已把数据包装进存档「${saveName}」`, 'success');
+      } catch (e) { toast(errorMessage(e, '装进存档失败'), 'error'); }
+    })();
+  });
+}
+
+/** 安装成功后自动启动（对齐 Qt 版 queue_launch_after/_launch_installed 的版本挑选逻辑）。 */
+function queueLaunchAfter(taskId: string, instance: string, version: string, loader: string) {
+  const unsub = bridge.subscribe('finished', (data: any) => {
+    if (String(data.task_id || '') !== taskId) return;
+    unsub();
+    if (!data.success) return;
+    void (async () => {
+      try {
+        const ids = await bridge.call<string[]>('get_installed_versions', { instance });
+        const pick = ids.includes(version) ? version
+          : ids.find((i) => version && i.includes(version)) || '';
+        if (!pick) return;
+        store.currentInstance = instance;
+        store.currentVersion = pick;
+        store.notify();
+        toast(`安装完成，正在启动 ${pick}`, 'success');
+        router.navigate('launch');
+        await bridge.call('launch_game', {
+          instance, version: pick,
+          account: store.currentAccount || '离线模式',
+          username: store.currentUsername || 'Player',
+          memory_mb: store.currentMemory || 4096,
+          width: store.currentWidth || 854, height: store.currentHeight || 480,
+          java: store.currentJava || '自动选择',
+        });
+      } catch (e) { toast(errorMessage(e, '自动启动失败'), 'error'); }
+    })();
+  });
+}
 
 export async function renderDownloadPage(container: HTMLElement, requestedCategory: DownloadCategory = activeCategory) {
   activeCategory = requestedCategory;
@@ -107,7 +158,7 @@ function renderVanilla(panel: HTMLElement) {
         <div class="form-group"><label class="form-label">加载器版本</label><select class="select" id="vanilla-loader-version" disabled><option value="">自动选择</option></select></div>
         <button class="btn" id="vanilla-refresh">刷新清单</button>
       </div>
-      <div class="form-row"><label class="check-row"><input type="checkbox" id="vanilla-optifine"> OptiFine</label><label class="check-row"><input type="checkbox" id="vanilla-liteloader"> LiteLoader</label><span id="vanilla-status" style="font-size:12px;color:var(--text-secondary)"></span></div>
+      <div class="form-row"><label class="check-row"><input type="checkbox" id="vanilla-optifine"> OptiFine</label><label class="check-row"><input type="checkbox" id="vanilla-liteloader"> LiteLoader</label><label class="check-row" title="重装时已下载过的资源文件不再校验"><input type="checkbox" id="vanilla-skip-assets" ${store.mergedSettings().skip_assets ? 'checked' : ''}> 跳过资源校验</label><label class="check-row" title="安装成功后自动启动"><input type="checkbox" id="vanilla-launch-after" checked> 完成后启动</label><span id="vanilla-status" style="font-size:12px;color:var(--text-secondary)"></span></div>
     </div>
     <div class="grid-list" id="vanilla-grid"></div>
     <button class="btn" id="vanilla-more" style="display:none">加载更多</button>`;
@@ -154,14 +205,39 @@ function renderVanilla(panel: HTMLElement) {
     } catch { /* ignore */ }
   };
   const install = async (version: string, btn: HTMLElement) => {
+    const instance = panel.querySelector<HTMLSelectElement>('#vanilla-instance')!.value;
+    const skipAssets = panel.querySelector<HTMLInputElement>('#vanilla-skip-assets')!.checked;
+    const launchAfter = panel.querySelector<HTMLInputElement>('#vanilla-launch-after')!.checked;
+    // 加载器版本按所点的 MC 版本取（对齐 Qt 版 InstallWizardDialog），页面顶部的下拉只是预选
+    let loaderVersion = loaderVer.value;
+    if (loader.value !== '无') {
+      try {
+        const rows = await bridge.call<any[]>('list_loader_versions', { mc_version: version, loader: loader.value });
+        const options = (rows || []).map((r) => String(r.version || r.id || '')).filter(Boolean);
+        if (options.length) {
+          const { formDialog } = await import('../ui');
+          const picked = await formDialog(`安装 ${version} + ${loader.value}`, [{
+            id: 'lv', label: '加载器版本', type: 'select',
+            value: loaderVersion && options.includes(loaderVersion) ? loaderVersion : '',
+            options: [{ value: '', label: '自动选择（最新）' }, ...options.map((o) => ({ value: o, label: o }))],
+          }]);
+          if (picked === null) return;
+          loaderVersion = picked.lv || '';
+        }
+      } catch { /* 拉取失败就用页面上的选择 */ }
+    }
     try {
-      await bridge.call('install_game', {
-        version, loader: loader.value, loader_version: loaderVer.value,
-        instance: panel.querySelector<HTMLSelectElement>('#vanilla-instance')!.value,
+      const taskId = await bridge.call<string>('install_game', {
+        version, loader: loader.value, loader_version: loaderVersion,
+        instance,
         extra: { optifine: panel.querySelector<HTMLInputElement>('#vanilla-optifine')!.checked, liteloader: panel.querySelector<HTMLInputElement>('#vanilla-liteloader')!.checked },
       });
+      // skip_assets 是后端持久键：顺手落盘，下次安装仍生效
+      void bridge.call('save_settings', { skip_assets: skipAssets }).catch(() => undefined);
+      store.setLocalPrefs({ skip_assets: skipAssets });
       toast(`${version} 已加入下载任务`, 'success');
       await flyToTasks(btn, version, '#2FA36B');
+      if (launchAfter) queueLaunchAfter(taskId, instance, version, loader.value);
       router.navigate('tasks');
     } catch (e) { toast(errorMessage(e, '创建安装任务失败'), 'error'); }
   };
@@ -196,11 +272,13 @@ function renderCatalog(panel: HTMLElement, category: Exclude<DownloadCategory, '
         <div class="form-group"><label class="form-label">类型</label><select class="select" id="catalog-type">${config.types.map((t) => `<option ${t === state.type ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
         <div class="form-group"><label class="form-label">安装到</label><select class="select" id="catalog-install-instance">${instanceOptions()}</select></div>
         <button class="btn btn-primary" id="catalog-search">搜索</button>
+        <button class="btn" id="catalog-reset">重置</button>
       </div>
       <div class="form-row">
         <button class="tab ${state.mode === 'search' ? 'active' : ''}" data-mode="search">浏览</button>
         <button class="tab ${state.mode === 'installed' ? 'active' : ''}" data-mode="installed">已安装</button>
         <button class="tab ${state.mode === 'favs' ? 'active' : ''}" data-mode="favs">收藏</button>
+        ${category === 'mods' ? '<select class="select" id="catalog-mods-target" style="display:none;max-width:190px"></select><button class="btn btn-sm" id="catalog-update" style="display:none">检查更新</button>' : ''}
         <button class="btn btn-sm" id="catalog-link">从链接安装</button>
         <button class="btn btn-sm" id="catalog-local">导入本地</button>
         <span id="catalog-status" style="font-size:12px;color:var(--text-secondary)"></span>
@@ -217,8 +295,12 @@ function renderCatalog(panel: HTMLElement, category: Exclude<DownloadCategory, '
   const results = panel.querySelector<HTMLElement>('#catalog-results')!;
   let requestNumber = 0;
 
-  const clip = (() => { try { return ''; } catch { return ''; } })();
-  void clip;
+  // 剪贴板里的 Modrinth/CurseForge 链接：自动填入搜索框（对齐 Qt 版 showEvent）
+  if (store.pendingClipLink && !state.query) {
+    queryInput.value = store.pendingClipLink;
+    store.pendingClipLink = '';
+    state.query = queryInput.value;
+  }
 
   const doInstall = async (item: CatalogEntry, btn: HTMLElement) => {
     const instance = instSelect.value || 'default';
@@ -228,11 +310,30 @@ function renderCatalog(panel: HTMLElement, category: Exclude<DownloadCategory, '
       if (!picked) return;
       extra = picked;
     }
+    // 数据包可选「装进存档」：装完后写进所选存档的 datapacks（对齐 Qt 版 _maybe_datapack_save）
+    let saveName = '';
+    if (category === 'datapacks') {
+      try {
+        const saves = await bridge.call<any[]>('list_saves', { instance });
+        const names = (Array.isArray(saves) ? saves : []).map((s) => String(s.name || '')).filter(Boolean);
+        if (names.length) {
+          const { formDialog } = await import('../ui');
+          const picked = await formDialog('装进存档（可选）', [{
+            id: 'save', label: '选择存档', type: 'select', value: '',
+            options: [{ value: '', label: '不装进存档，只放到 datapacks 目录' }, ...names.map((n) => ({ value: n, label: n }))],
+          }]);
+          if (picked === null) return;
+          saveName = (picked.save || '').trim();
+        }
+      } catch { /* 读存档失败就只装到目录 */ }
+    }
     try {
-      if (category === 'modpacks') await bridge.call(config.install, { name: extra.name, source: extra.source, extra });
-      else await bridge.call(config.install, { name: extra.name, instance, extra });
+      let taskId = '';
+      if (category === 'modpacks') taskId = await bridge.call<string>(config.install, { name: extra.name, source: extra.source, extra });
+      else taskId = await bridge.call<string>(config.install, { name: extra.name, instance, extra });
       toast(`${item.name} 已加入下载任务`, 'success');
       await flyToTasks(btn, String(item.name || ''));
+      if (saveName && taskId) installIntoSaveAfter(taskId, instance, extra, saveName);
       router.navigate('tasks');
     } catch (e) { toast(errorMessage(e, `安装${config.noun}失败`), 'error'); }
   };
@@ -262,9 +363,12 @@ function renderCatalog(panel: HTMLElement, category: Exclude<DownloadCategory, '
 
   const paintInstalled = async () => {
     const instance = instSelect.value || 'default';
+    const targetSel = panel.querySelector<HTMLSelectElement>('#catalog-mods-target');
+    const version = targetSel?.value || '';
+    showSkeleton(results, 'rows', 4);
     try {
       const rows = config.list === 'get_installed_mods'
-        ? await bridge.call<any[]>('get_installed_mod_entries', { instance })
+        ? await bridge.call<any[]>('get_installed_mod_entries', { instance, version })
         : await bridge.call<any[]>(config.list, { instance });
       const list = Array.isArray(rows) ? rows : [];
       if (!list.length) {
@@ -278,7 +382,13 @@ function renderCatalog(panel: HTMLElement, category: Exclude<DownloadCategory, '
       results.querySelectorAll<HTMLButtonElement>('[data-del]').forEach((btn) => btn.addEventListener('click', async () => {
         const row = list[Number(btn.dataset.del)];
         const name = row.filename || row.name || String(row);
-        if (!await confirmDialog('删除', `删除 ${name}？`)) return;
+        // 对齐 Qt 版：整合包删除 = 删整个实例；存档删除不可恢复，都需明确警告
+        const warn = config.del === 'delete_modpack'
+          ? `将删除整个实例「${instSelect.value}」及其文件，不可恢复。`
+          : config.del === 'delete_save'
+            ? `将永久删除世界「${name}」，其中的建筑与游戏进度都无法恢复。建议先在「存档管理」里备份。`
+            : `将删除「${name}」。`;
+        if (!await confirmDialog(config.del === 'delete_modpack' ? '删除整合包实例' : '删除确认', warn)) return;
         try {
           await bridge.call(config.del, config.del === 'delete_modpack' ? { instance, filename: name } : { instance, filename: name, name });
           toast('已删除', 'success');
@@ -295,6 +405,7 @@ function renderCatalog(panel: HTMLElement, category: Exclude<DownloadCategory, '
     state.type = typeSelect.value;
     const request = ++requestNumber;
     status.textContent = '正在搜索…';
+    showSkeleton(results, 'rows', 5);
     try {
       const rows = await bridge.call<CatalogEntry[]>(config.search, {
         query: state.query, source: state.source,
@@ -313,8 +424,22 @@ function renderCatalog(panel: HTMLElement, category: Exclude<DownloadCategory, '
   const setMode = (mode: typeof state.mode) => {
     state.mode = mode;
     panel.querySelectorAll('[data-mode]').forEach((el) => el.classList.toggle('active', (el as HTMLElement).dataset.mode === mode));
+    // Mod 的「已安装」支持按版本隔离目录筛选 + 检查更新（对齐 Qt 版 installed_ver_box/update_btn）
+    const targetSel = panel.querySelector<HTMLSelectElement>('#catalog-mods-target');
+    const updateBtn = panel.querySelector<HTMLElement>('#catalog-update');
+    if (targetSel && updateBtn) {
+      const show = mode === 'installed';
+      targetSel.style.display = show ? '' : 'none';
+      updateBtn.style.display = show ? '' : 'none';
+      if (show && !targetSel.options.length) {
+        void bridge.call<any[]>('get_mods_targets', { instance: instSelect.value || 'default' }).then((rows) => {
+          targetSel.innerHTML = (rows || []).map((t) => `<option value="${escapeHtml(t.value || '')}">${escapeHtml(t.label || '共享')}</option>`).join('');
+        }).catch(() => undefined);
+      }
+    }
     if (mode === 'installed') void paintInstalled();
     else if (mode === 'favs') {
+      showSkeleton(results, 'rows', 3);
       void bridge.call<CatalogEntry[]>('catalog_favorites').then((rows) => {
         state.rows = rows || [];
         paintSearch(state.rows);
@@ -325,6 +450,31 @@ function renderCatalog(panel: HTMLElement, category: Exclude<DownloadCategory, '
 
   panel.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((btn) => btn.addEventListener('click', () => setMode(btn.dataset.mode as any)));
   panel.querySelector('#catalog-search')?.addEventListener('click', () => void search());
+  panel.querySelector('#catalog-reset')?.addEventListener('click', () => {
+    queryInput.value = '';
+    sourceSelect.value = category === 'worlds' ? 'CurseForge' : '全部';
+    versionInput.value = '';
+    typeSelect.value = '全部';
+    void search();
+  });
+  instSelect.addEventListener('change', () => {
+    const targetSel = panel.querySelector<HTMLSelectElement>('#catalog-mods-target');
+    if (targetSel) targetSel.innerHTML = '';
+    if (state.mode === 'installed') setMode('installed');
+  });
+  panel.querySelector('#catalog-mods-target')?.addEventListener('change', () => void paintInstalled());
+  panel.querySelector('#catalog-update')?.addEventListener('click', async () => {
+    try {
+      const taskId = await bridge.call<string>('start_mod_updates', { instance: instSelect.value || 'default' });
+      toast('已开始检查更新', 'info');
+      const unsub = bridge.subscribe('finished', (data: any) => {
+        if (String(data.task_id || '') !== taskId) return;
+        unsub();
+        toast(String(data.message || (data.success ? '模组更新完成' : '检查更新失败')), data.success ? 'success' : 'error', 6000);
+        if (data.success) void paintInstalled();
+      });
+    } catch (e) { toast(errorMessage(e, '检查更新失败'), 'error'); }
+  });
   queryInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') void search(); });
   panel.querySelector('#catalog-link')?.addEventListener('click', async () => {
     const url = await inputDialog('从链接安装', 'https://…', '');

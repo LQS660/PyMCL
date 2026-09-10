@@ -1,7 +1,7 @@
 // 维护工具：清理、更新、环境信息和新闻。
 import { bridge } from '../bridge';
 import { router } from '../router';
-import { confirmDialog, showError, showLoading, toast } from '../ui';
+import { confirmDialog, dismissOverlay, showError, showSkeleton, toast } from '../ui';
 import { errorMessage, escapeHtml, formatBytes } from './common';
 
 interface CleanerPreview {
@@ -29,7 +29,7 @@ interface UpdateInfo {
 }
 
 export function renderToolsPage(container: HTMLElement) {
-  showLoading(container);
+  showSkeleton(container, 'cards', 4);
   void loadAndRender(container);
 }
 
@@ -146,10 +146,15 @@ function render(container: HTMLElement, cleaner: CleanerPreview, news: NewsItem[
   });
   container.querySelector<HTMLButtonElement>('#tools-system-info')?.addEventListener('click', async () => {
     try {
-      const data = await bridge.call<Record<string, unknown>>('collect_sysinfo', { scan_system_java: true });
-      showJsonDialog('系统信息', data);
-    } catch (error) {
-      toast(errorMessage(error, '读取系统信息失败'), 'error');
+      const text = await bridge.call<string>('sysinfo_text', { info: null });
+      showTextDialog('系统信息', text);
+    } catch {
+      try {
+        const data = await bridge.call<Record<string, unknown>>('collect_sysinfo', { scan_system_java: true });
+        showJsonDialog('系统信息', data);
+      } catch (error) {
+        toast(errorMessage(error, '读取系统信息失败'), 'error');
+      }
     }
   });
   container.querySelector<HTMLButtonElement>('#tools-recommend')?.addEventListener('click', async () => {
@@ -195,18 +200,22 @@ function renderNews(items: NewsItem[]): string {
   `).join('')}</div>`;
 }
 
-function showJsonDialog(title: string, data: Record<string, unknown>) {
+function showTextDialog(title: string, text: string) {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
     <div class="modal" style="width:min(760px, calc(100vw - 32px))">
       <div class="modal-title">${escapeHtml(title)}</div>
-      <pre class="log-box" style="max-height:55vh">${escapeHtml(JSON.stringify(data, null, 2))}</pre>
+      <pre class="log-box" style="max-height:55vh">${escapeHtml(text)}</pre>
       <div class="modal-actions"><button class="btn btn-primary" id="tools-json-close">关闭</button></div>
     </div>
   `;
   document.body.appendChild(overlay);
-  const close = () => overlay.remove();
+  const close = () => dismissOverlay(overlay);
   overlay.querySelector<HTMLButtonElement>('#tools-json-close')?.addEventListener('click', close);
   overlay.addEventListener('click', (event) => { if (event.target === overlay) close(); });
+}
+
+function showJsonDialog(title: string, data: Record<string, unknown>) {
+  showTextDialog(title, JSON.stringify(data, null, 2));
 }

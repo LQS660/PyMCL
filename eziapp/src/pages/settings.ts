@@ -1,16 +1,21 @@
 import { bridge } from '../bridge';
 import { router } from '../router';
 import { store } from '../store';
-import { applyAppearance, confirmDialog, inputDialog, showError, showLoading, toast } from '../ui';
+import { applyAppearance, confirmDialog, dismissOverlay, formDialog, inputDialog, showError, showSkeleton, toast } from '../ui';
 import { escapeHtml, errorMessage } from './common';
 import { showGlobalMods } from './dialogs';
 
 export async function renderSettingsPage(container: HTMLElement) {
-  showLoading(container);
+  showSkeleton(container, 'rows', 6);
   try {
-    const settings = await bridge.call<any>('get_settings');
+    const [settings, multi, lang, langs] = await Promise.all([
+      bridge.call<any>('get_settings'),
+      bridge.call<boolean>('allow_multi_instance').catch(() => false),
+      bridge.call<string>('get_language').catch(() => 'zh_CN'),
+      bridge.call<Record<string, string>>('available_languages').catch(() => ({ zh_CN: '简体中文' })),
+    ]);
     store.setSettings(settings);
-    render(container, settings);
+    render(container, store.mergedSettings(), { multi: !!multi, lang, langs });
   } catch (e: any) {
     showError(container, '加载设置失败: ' + (e.message || '未知错误'), () => renderSettingsPage(container));
   }
@@ -23,7 +28,9 @@ function toggle(id: string, on: boolean) {
   return `<label class="toggle"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}><span class="toggle-slider"></span></label>`;
 }
 
-function render(container: HTMLElement, s: any) {
+interface Extra { multi: boolean; lang: string; langs: Record<string, string> }
+
+function render(container: HTMLElement, s: any, extra: Extra) {
   container.innerHTML = `
     <div style="display:flex;flex-direction:column;gap:14px;max-width:860px">
       <div class="card"><div class="settings-section-title">版本隔离与存储</div>
@@ -42,7 +49,8 @@ function render(container: HTMLElement, s: any) {
         ${row('飞入动画时长', '毫秒，建议 400–800', `<input class="input" id="ui_fly_duration_ms" type="number" value="${s.ui_fly_duration_ms || 620}" style="width:110px">`)}
         ${row('深色模式', '立即生效', toggle('ui_dark', !!s.ui_dark))}
         ${row('主题色', '例如 #2E9B6B', `<input class="input" id="theme_color" value="${escapeHtml(s.theme_color || '#2E9B6B')}" style="width:140px">`)}
-        ${row('背景图', '本地图片路径，可留空', `<input class="input" id="ui_background" value="${escapeHtml(s.ui_background || '')}" style="width:260px">`)}
+        ${row('背景图', '本地图片路径或 http(s) 地址，可留空', `<input class="input" id="ui_background" value="${escapeHtml(s.ui_background || '')}" style="width:260px">`)}
+        ${row('语言', '后端文案语言，重启后完全生效', `<select class="select" id="language">${Object.entries(extra.langs).map(([k, v]) => `<option value="${escapeHtml(k)}" ${k === extra.lang ? 'selected' : ''}>${escapeHtml(v)}</option>`).join('')}</select>`)}
         ${row('启动器可见性', '游戏启动后窗口怎么处理', `<select class="select" id="launcher_visibility">
           ${[['keep', '保持显示'], ['minimize', '最小化'], ['hide', '隐藏'], ['hide_reopen', '隐藏后重开'], ['close', '关闭启动器']].map(([k, l]) => `<option value="${k}" ${s.launcher_visibility === k ? 'selected' : ''}>${l}</option>`).join('')}</select>`)}
         ${row('启动页主页', '新闻 / 自定义 HTML / 空白', `<select class="select" id="homepage_mode">
@@ -56,6 +64,8 @@ function render(container: HTMLElement, s: any) {
           <button class="btn" id="save-theme">保存当前主题</button>
           <button class="btn" id="load-theme">加载主题</button>
           <button class="btn" id="del-theme">删除主题</button>
+          <button class="btn" id="import-theme">导入</button>
+          <button class="btn" id="export-theme">导出</button>
         </div>
       </div>
       <div class="card"><div class="settings-section-title">下载与性能</div>
@@ -73,17 +83,20 @@ function render(container: HTMLElement, s: any) {
           <option value="official" ${s.community_source === 'official' ? 'selected' : ''}>仅官方</option>
           <option value="mcim" ${s.community_source === 'mcim' ? 'selected' : ''}>仅 MCIM</option></select>`)}
         ${row('跟随系统代理', 'Clash 等代理会生效', toggle('use_system_proxy', s.use_system_proxy !== false))}
+        ${row('跳过资源校验', '重装时已下载的资源不再重复校验', toggle('skip_assets', !!s.skip_assets))}
         ${row('默认 JVM 参数', '', `<input class="input" id="default_jvm_args" value="${escapeHtml(s.default_jvm_args || '')}" style="width:260px">`)}
         ${row('默认分辨率', '', `<input class="input" id="res_w" type="number" value="${(s.default_resolution || [854, 480])[0]}" style="width:80px"><span>×</span><input class="input" id="res_h" type="number" value="${(s.default_resolution || [854, 480])[1]}" style="width:80px">`)}
       </div>
       <div class="card"><div class="settings-section-title">账号与下载源</div>
         ${row('微软 Client ID', '一般无需修改', `<input class="input" id="ms_client_id" value="${escapeHtml(s.ms_client_id || '')}" style="width:260px">`)}
         ${row('CurseForge API Key', '镜像不可用时兜底', `<input class="input" id="curseforge_api_key" type="password" value="${escapeHtml(s.curseforge_api_key || '')}" style="width:260px">`)}
+        ${row('离线皮肤', '离线账号默认皮肤', `<select class="select" id="offline_skin">
+          ${[['default', '默认'], ['steve', 'Steve'], ['alex', 'Alex']].map(([k, l]) => `<option value="${k}" ${(s.offline_skin || 'default') === k ? 'selected' : ''}>${l}</option>`).join('')}</select>`)}
       </div>
       <div class="card"><div class="settings-section-title">维护</div>
         ${row('更新清单 URL', 'JSON：version / url / notes', `<input class="input" id="update_url" value="${escapeHtml(s.update_url || '')}" style="width:260px">`)}
         ${row('启动时检查更新', '', toggle('auto_check_update', s.auto_check_update !== false))}
-        ${row('允许多开', '取消勾选则游戏运行时再次启动会提示', toggle('allow_multi_instance', !!s.allow_multi_instance))}
+        ${row('允许多开', '取消勾选则游戏运行时再次启动会提示', toggle('allow_multi_instance', extra.multi))}
         <div class="form-row">
           <button class="btn" id="migrate">官方启动器迁移</button>
           <button class="btn" id="recommend">智能推荐</button>
@@ -112,67 +125,105 @@ function render(container: HTMLElement, s: any) {
 
   const val = (id: string) => (document.getElementById(id) as HTMLInputElement | HTMLSelectElement).value;
   const chk = (id: string) => (document.getElementById(id) as HTMLInputElement).checked;
-  const collect = () => ({
+  // 桥接 save_settings 只认这批键；外观类走本地覆盖层
+  const collectBackend = () => ({
     share_libraries: chk('share_libraries'), share_assets: chk('share_assets'),
-    default_isolation: val('default_isolation'), game_dir: val('game_dir'),
-    ui_motion: chk('ui_motion'), ui_fly_animation: chk('ui_fly_animation'),
-    ui_fly_duration_ms: parseInt(val('ui_fly_duration_ms')) || 620,
-    ui_dark: chk('ui_dark'), theme_color: val('theme_color'), ui_background: val('ui_background'),
+    default_isolation: val('default_isolation'),
+    instances_dir: val('game_dir').trim(),
+    ui_dark: chk('ui_dark'),
     launcher_visibility: val('launcher_visibility'), homepage_mode: val('homepage_mode'),
     custom_homepage: val('custom_homepage'), window_mode: val('window_mode'),
-    ui_sidebar_width: parseInt(val('ui_sidebar_width')) || 232,
     download_threads: parseInt(val('download_threads')) || 8,
     default_memory_mb: parseInt(val('default_memory_mb')) || 4096,
     gc_preset: val('gc_preset'), download_limit_kbps: parseInt(val('download_limit_kbps')) || 0,
     download_source: val('download_source'), community_source: val('community_source'),
-    use_system_proxy: chk('use_system_proxy'), default_jvm_args: val('default_jvm_args'),
+    use_system_proxy: chk('use_system_proxy'), skip_assets: chk('skip_assets'),
+    default_jvm_args: val('default_jvm_args'),
     default_resolution: [parseInt(val('res_w')) || 854, parseInt(val('res_h')) || 480],
     ms_client_id: val('ms_client_id'), curseforge_api_key: val('curseforge_api_key'),
+    offline_skin: val('offline_skin'),
     update_url: val('update_url'), auto_check_update: chk('auto_check_update'),
-    allow_multi_instance: chk('allow_multi_instance'),
     ai_mode: val('ai_mode'), ai_gateway_url: val('ai_gateway_url'), ai_base_url: val('ai_base_url'),
     ai_api_key: val('ai_api_key'), ai_model: val('ai_model'),
     feedback_consent: chk('feedback_consent'), feedback_url: val('feedback_url'),
     feedback_heartbeat: chk('feedback_heartbeat'),
   });
+  const collectLocal = () => ({
+    theme_color: val('theme_color').trim() || '#2E9B6B',
+    ui_background: val('ui_background').trim(),
+    ui_motion: chk('ui_motion'),
+    ui_fly_animation: chk('ui_fly_animation'),
+    ui_fly_duration_ms: parseInt(val('ui_fly_duration_ms')) || 620,
+    ui_sidebar_width: parseInt(val('ui_sidebar_width')) || 232,
+    skip_assets: chk('skip_assets'),
+  });
 
   const applyLive = () => {
-    const next = collect();
-    store.setSettings({ ...(store.settings || {}), ...next } as any);
-    applyAppearance(next as any);
+    store.setLocalPrefs(collectLocal());
+    applyAppearance(store.mergedSettings() as any);
   };
-  document.getElementById('ui_dark')?.addEventListener('change', applyLive);
+  // 深色开关文案写「立即生效」，就必须立刻落盘（对齐 Qt 版 _on_dark_toggled）
+  document.getElementById('ui_dark')?.addEventListener('change', () => {
+    applyLive();
+    void bridge.call('save_settings', { ui_dark: chk('ui_dark') }).catch(() => undefined);
+  });
   document.getElementById('theme_color')?.addEventListener('change', applyLive);
   document.getElementById('ui_background')?.addEventListener('change', applyLive);
+  document.getElementById('ui_motion')?.addEventListener('change', applyLive);
 
   document.getElementById('btn-save-settings')?.addEventListener('click', async () => {
-    const settings = collect();
+    const payload = collectBackend();
+    const local = collectLocal();
+    const lang = val('language');
+    const multi = chk('allow_multi_instance');
     try {
-      await bridge.call('save_settings', settings);
-      store.setSettings({ ...(store.settings || {}), ...settings } as any);
-      applyAppearance(settings as any);
+      await bridge.call('save_settings', payload);
+      // 这两个键 save_settings 不处理，走专用 RPC
+      await bridge.call('set_multi_instance', { allow: multi }).catch(() => undefined);
+      if (lang !== extra.lang) {
+        await bridge.call('set_language', { lang }).catch(() => undefined);
+        toast('语言已切换，重启后界面文案完全生效', 'info', 5000);
+      }
+      store.setLocalPrefs(local);
+      store.setSettings({ ...(store.settings || {}), ...payload } as any);
+      applyAppearance(store.mergedSettings() as any);
       toast('设置已保存', 'success');
     } catch (e: any) { toast(e.message || '保存失败', 'error'); }
   });
   document.getElementById('test-ai')?.addEventListener('click', async () => {
+    const btn = document.getElementById('test-ai') as HTMLButtonElement;
+    btn.disabled = true;
+    btn.textContent = '测试中…';
     try {
-      await bridge.call('ai_list_chats');
-      toast('AI 会话服务可用，可到 AI 页发消息验证模型', 'success');
-    } catch (e) { toast(errorMessage(e, '测试失败'), 'error'); }
+      // 用表单里还没保存的值试连，不必先落盘（对齐 Qt 版 _test_ai）
+      const msg = await bridge.call<string>('test_ai_connection', {
+        settings: {
+          ai_mode: val('ai_mode'), ai_gateway_url: val('ai_gateway_url'),
+          ai_base_url: val('ai_base_url'), ai_api_key: val('ai_api_key'), ai_model: val('ai_model'),
+        },
+      });
+      toast(msg || 'AI 连接正常', 'success');
+    } catch (e) { toast(errorMessage(e, 'AI 连接失败'), 'error', 6000); }
+    finally { btn.disabled = false; btn.textContent = '测试 AI 连接'; }
   });
   document.getElementById('global-mods')?.addEventListener('click', () => void showGlobalMods());
   document.getElementById('goto-tools')?.addEventListener('click', () => router.navigate('tools'));
   document.getElementById('recommend')?.addEventListener('click', async () => {
     try {
       const data = await bridge.call<any>('get_smart_recommendation');
-      toast(JSON.stringify(data).slice(0, 180), 'info', 6000);
+      showRecommendation(data || {});
     } catch (e) { toast(errorMessage(e, '获取失败'), 'error'); }
   });
   document.getElementById('migrate')?.addEventListener('click', async () => {
-    if (!await confirmDialog('官方启动器迁移', '从官方 .minecraft 导入版本和账号？')) return;
     try {
+      const found = await bridge.call<boolean>('detect_official_launcher');
+      if (!found) { toast('未检测到官方启动器目录', 'warning'); return; }
+      const versions = await bridge.call<string[]>('scan_official_versions').catch(() => [] as string[]);
+      const hint = versions.length ? `检测到 ${versions.length} 个版本：${versions.slice(0, 4).join('、')}${versions.length > 4 ? ' 等' : ''}` : '未发现可导入的版本';
+      if (!await confirmDialog('官方启动器迁移', `${hint}。从官方 .minecraft 导入版本到当前实例？`)) return;
       await bridge.call('migrate_official_launcher', { instance: store.currentInstance || 'default' });
-      toast('已开始迁移', 'success');
+      toast('已开始迁移，进度见下载任务页', 'success');
+      router.navigate('tasks');
     } catch (e) { toast(errorMessage(e, '迁移失败'), 'error'); }
   });
   document.getElementById('save-theme')?.addEventListener('click', async () => {
@@ -184,12 +235,23 @@ function render(container: HTMLElement, s: any) {
   document.getElementById('load-theme')?.addEventListener('click', async () => {
     try {
       const themes = await bridge.call<any[]>('list_themes');
-      const name = await inputDialog('加载主题', themes.map((t) => t.name).join(' / ') || '没有主题', themes[0]?.name || '');
-      if (!name) return;
-      const loaded = await bridge.call<any>('load_theme', { name });
+      if (!themes?.length) { toast('还没有保存的主题', 'info'); return; }
+      const picked = await formDialog('加载主题', [{
+        id: 'name', label: '选择主题', type: 'select', value: themes[0]?.name || '',
+        options: themes.map((t) => ({ value: String(t.name || ''), label: String(t.name || '?') })),
+      }]);
+      if (!picked?.name) return;
+      const loaded = await bridge.call<any>('load_theme', { name: picked.name });
+      // 主题包里的外观键同样落到本地覆盖层
+      const patch: Record<string, unknown> = {};
+      for (const k of ['theme_color', 'ui_background', 'ui_dark'] as const) {
+        if (loaded && loaded[k] !== undefined) patch[k] = loaded[k];
+      }
+      if (Object.keys(patch).length) store.setLocalPrefs(patch);
       store.setSettings({ ...(store.settings || {}), ...loaded } as any);
-      applyAppearance(loaded);
-      toast('主题已加载，建议再点保存设置', 'success');
+      applyAppearance(store.mergedSettings() as any);
+      toast('主题已加载', 'success');
+      renderSettingsPage(container);
     } catch (e) { toast(errorMessage(e, '加载失败'), 'error'); }
   });
   document.getElementById('del-theme')?.addEventListener('click', async () => {
@@ -198,4 +260,40 @@ function render(container: HTMLElement, s: any) {
     try { await bridge.call('delete_theme', { name }); toast('已删除', 'success'); }
     catch (e) { toast(errorMessage(e, '删除失败'), 'error'); }
   });
+  document.getElementById('import-theme')?.addEventListener('click', async () => {
+    const path = await inputDialog('导入主题包', '主题文件完整路径（.json）', '');
+    if (!path?.trim()) return;
+    try { const name = await bridge.call<string>('import_theme', { path: path.trim() }); toast(`已导入主题「${name || path}」`, 'success'); }
+    catch (e) { toast(errorMessage(e, '导入失败'), 'error'); }
+  });
+  document.getElementById('export-theme')?.addEventListener('click', async () => {
+    const values = await formDialog('导出主题包', [
+      { id: 'name', label: '主题名称', placeholder: '我的主题' },
+      { id: 'dest', label: '导出到（完整路径，留空用默认 exports 目录）', placeholder: 'D:\\themes\\my.json' },
+    ]);
+    if (!values?.name?.trim()) return;
+    try {
+      const out = await bridge.call<string>('export_theme', { name: values.name.trim(), dest: (values.dest || '').trim() });
+      toast(out ? `已导出：${out}` : '已导出主题', 'success');
+    } catch (e) { toast(errorMessage(e, '导出失败'), 'error'); }
+  });
+}
+
+function showRecommendation(data: Record<string, unknown>) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  const rows = Object.entries(data)
+    .filter(([, v]) => v !== undefined && v !== null && String(v) !== '')
+    .map(([k, v]) => `<div class="setting-row"><div class="setting-label" style="font-family:var(--font-mono);font-size:12px">${escapeHtml(k)}</div><div style="font-size:13px;max-width:60%;text-align:right;overflow-wrap:anywhere">${escapeHtml(typeof v === 'object' ? JSON.stringify(v) : String(v))}</div></div>`)
+    .join('');
+  overlay.innerHTML = `
+    <div class="modal" style="width:min(560px, calc(100vw - 32px))">
+      <div class="modal-title">智能推荐</div>
+      <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px">根据本机硬件给出的内存与 Java 建议，可到「下载与性能」里套用。</div>
+      <div style="max-height:50vh;overflow:auto">${rows || '<div class="empty-state">暂无建议</div>'}</div>
+      <div class="modal-actions"><button class="btn btn-primary" id="rec-close">关闭</button></div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#rec-close')?.addEventListener('click', () => dismissOverlay(overlay));
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) dismissOverlay(overlay); });
 }

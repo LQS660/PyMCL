@@ -26,6 +26,27 @@ let streamActive = false;
 let streamText = '';
 let latestFailure = '';
 
+const QUICK_CHIPS = ['下一款游戏 1.20.1 Fabric', '装钠和光影', '启动闪退了帮我看'];
+const WELCOME = '我是启动器助手。可以帮你下游戏、装模组和整合包、看启动报错、查模组冲突、改常用配置。\n直接说你想做什么就行。写操作我会先让你确认。';
+
+/** 轻量 Markdown：代码块 / 行内代码 / 加粗（对齐 Qt 版 _md）。输入先转义，安全。 */
+function mdLite(raw: string): string {
+  const parts: string[] = [];
+  const fence = /```(?:\w+)?\n([\s\S]*?)```/g;
+  let idx = 0;
+  const inline = (text: string) => escapeHtml(text)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/\n/g, '<br>');
+  for (let m = fence.exec(raw); m; m = fence.exec(raw)) {
+    parts.push(inline(raw.slice(idx, m.index)));
+    parts.push(`<pre class="ai-code">${escapeHtml(m[1].replace(/\n$/, ''))}</pre>`);
+    idx = m.index + m[0].length;
+  }
+  parts.push(inline(raw.slice(idx)));
+  return parts.join('');
+}
+
 export function renderAIPage(container: HTMLElement) {
   const token = ++pageToken;
   showLoading(container);
@@ -137,7 +158,14 @@ function render(container: HTMLElement, load: () => Promise<void>) {
       </aside>
       <section class="ai-main">
         <div class="ai-messages" id="ai-messages">
-          ${messages.length ? messages.map(renderMessage).join('') : '<div class="empty-state" style="flex:1"><div class="empty-state-icon">🤖</div><div>可以问我安装版本、找模组或分析启动问题。</div></div>'}
+          ${messages.length ? messages.map(renderMessage).join('') : `
+            <div id="ai-welcome" style="flex:1;display:flex;flex-direction:column;justify-content:center;gap:14px;padding:12px">
+              <div class="empty-state" style="padding:12px"><div class="empty-state-icon">🤖</div></div>
+              ${renderMessage({ role: 'assistant', content: WELCOME })}
+              <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
+                ${QUICK_CHIPS.map((c) => `<button class="btn btn-sm" data-ai-chip="${escapeHtml(c)}">${escapeHtml(c)}</button>`).join('')}
+              </div>
+            </div>`}
           ${latestFailure ? renderStreamingMessage(latestFailure, true) : ''}
           ${streamActive ? renderStreamingMessage(streamText) : ''}
         </div>
@@ -153,6 +181,20 @@ function render(container: HTMLElement, load: () => Promise<void>) {
 
   const messagesBox = container.querySelector<HTMLElement>('#ai-messages');
   scrollToBottom(messagesBox);
+  container.querySelectorAll<HTMLButtonElement>('[data-ai-chip]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const input = container.querySelector<HTMLTextAreaElement>('#ai-input');
+      if (!input || streamActive) return;
+      input.value = btn.dataset.aiChip || '';
+      input.focus();
+      void send();
+    });
+  });
+  container.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      void navigator.clipboard.writeText(btn.dataset.copy || '').then(() => toast('已复制', 'success', 1500));
+    });
+  });
   container.querySelector<HTMLButtonElement>('#ai-new-chat')?.addEventListener('click', async () => {
     if (streamActive) {
       toast('请等待当前回答结束后再新建对话', 'warning');
@@ -210,6 +252,7 @@ function render(container: HTMLElement, load: () => Promise<void>) {
     latestFailure = '';
     input.value = '';
     container.querySelector('#ai-streaming-message')?.remove();
+    container.querySelector('#ai-welcome')?.remove();
     appendMessage(container, 'user', text);
     updateStreamingMessage(container, '');
     const sendButton = container.querySelector<HTMLButtonElement>('#ai-send');
@@ -263,7 +306,11 @@ function render(container: HTMLElement, load: () => Promise<void>) {
 function renderMessage(message: { role: string; content: string }): string {
   const role = message.role === 'user' ? 'user' : message.role === 'error' ? 'error' : 'assistant';
   const label = role === 'user' ? '你' : role === 'error' ? '错误' : 'PyMCL AI';
-  return `<article class="ai-message ${role}"><div class="ai-message-label">${label}</div><div class="ai-message-content">${escapeHtml(message.content)}</div></article>`;
+  // 助手消息渲染轻量 Markdown；用户消息保持纯文本
+  const body = role === 'assistant' ? mdLite(message.content) : escapeHtml(message.content);
+  const copy = role === 'assistant'
+    ? `<button class="btn btn-icon btn-sm ai-copy" data-copy="${escapeHtml(message.content)}" title="复制">⧉</button>` : '';
+  return `<article class="ai-message ${role}"><div class="ai-message-label" style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span>${label}</span>${copy}</div><div class="ai-message-content">${body}</div></article>`;
 }
 
 function renderStreamingMessage(text: string, failed = false): string {

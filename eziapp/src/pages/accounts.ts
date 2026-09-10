@@ -1,7 +1,7 @@
 // 账号管理：离线、微软设备代码和 Authlib-Injector 登录。
 import { bridge } from '../bridge';
 import { store, type AccountInfo } from '../store';
-import { confirmDialog, inputDialog, registerPageCleanup, showError, showLoading, toast } from '../ui';
+import { confirmDialog, formDialog, registerPageCleanup, showError, showSkeleton, toast } from '../ui';
 import { errorMessage, escapeHtml } from './common';
 
 interface LoginState {
@@ -17,7 +17,7 @@ let loginState: LoginState | null = null;
 
 export function renderAccountsPage(container: HTMLElement) {
   const token = ++pageToken;
-  showLoading(container);
+  showSkeleton(container, 'cards', 3);
 
   const reload = async () => {
     try {
@@ -105,22 +105,54 @@ function render(container: HTMLElement, reload: () => Promise<void>) {
           </div>
         </div>
       </div>
-      <div class="card">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px">
-          <div class="card-header" style="margin:0">已保存账号</div>
-          <button class="btn btn-sm" id="account-refresh">↻ 刷新</button>
+      <div style="display:grid;grid-template-columns:minmax(0,180px) minmax(0,1fr);gap:16px;align-items:start" class="accounts-split">
+        <div class="card" style="text-align:center">
+          <div class="card-header" style="justify-content:center">皮肤预览</div>
+          <div class="skin-preview"><img id="account-skin" alt="" style="display:none"></div>
+          <div id="account-skin-name" style="font-size:13px;font-weight:650;margin-top:10px">—</div>
+          <div id="account-skin-kind" style="font-size:11px;color:var(--text-secondary);margin-top:2px"></div>
         </div>
-        ${accounts.length ? `<div class="grid-list">${accounts.map((account, index) => renderAccountCard(account, index)).join('')}</div>` : '<div class="empty-state"><div class="empty-state-icon">👤</div><div>还没有保存账号。可直接使用离线模式启动游戏。</div></div>'}
+        <div class="card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px">
+            <div class="card-header" style="margin:0">已保存账号</div>
+            <button class="btn btn-sm" id="account-refresh">↻ 刷新</button>
+          </div>
+          ${accounts.length ? `<div class="grid-list" style="grid-template-columns:repeat(auto-fill,minmax(240px,1fr))">${accounts.map((account, index) => renderAccountCard(account, index)).join('')}</div>` : '<div class="empty-state"><div class="empty-state-icon">👤</div><div>还没有保存账号。可直接使用离线模式启动游戏。</div></div>'}
+        </div>
       </div>
     </div>
   `;
 
+  // 皮肤预览：当前账号的全身渲染（对齐 Qt 版左侧皮肤卡）
+  const active = accounts.find((a) => a.active) || accounts[0];
+  const skinImg = container.querySelector<HTMLImageElement>('#account-skin')!;
+  const skinName = container.querySelector<HTMLElement>('#account-skin-name')!;
+  const skinKind = container.querySelector<HTMLElement>('#account-skin-kind')!;
+  skinName.textContent = active?.name || 'Steve';
+  skinKind.textContent = active ? (renderTypeLabel(active.type)) : '';
+  const paintSkin = (url: string) => {
+    if (!url) return;
+    skinImg.src = url;
+    skinImg.style.display = '';
+    skinImg.onerror = () => { skinImg.style.display = 'none'; };
+  };
+  if (active?.body) paintSkin(active.body);
+  else void bridge.call<{ body?: string }>('skin_urls', { account_name: active?.name || '' })
+    .then((r) => paintSkin(r?.body || '')).catch(() => undefined);
+
   container.querySelector<HTMLButtonElement>('#account-refresh')?.addEventListener('click', () => void reload());
   container.querySelector<HTMLButtonElement>('#account-add-offline')?.addEventListener('click', async () => {
-    const username = await inputDialog('添加离线账号', '游戏内显示的用户名');
-    if (!username?.trim()) return;
+    // 对齐 Qt 版：离线账号可顺带选皮肤（默认 / Steve / Alex）
+    const values = await formDialog('添加离线账号', [
+      { id: 'username', label: '游戏内显示的用户名', placeholder: 'Player' },
+      { id: 'skin', label: '皮肤', type: 'select', value: 'default', options: [
+        { value: 'default', label: '默认' }, { value: 'steve', label: 'Steve' }, { value: 'alex', label: 'Alex' },
+      ]},
+    ]);
+    const username = (values?.username || '').trim();
+    if (!username) return;
     try {
-      await bridge.call<string>('add_offline_account', { username: username.trim() });
+      await bridge.call<string>('add_offline_account', { username, skin: values?.skin || 'default' });
       toast('离线账号已添加', 'success');
       await reload();
     } catch (error) {
@@ -235,11 +267,22 @@ function renderLoginStatus(): string {
   `;
 }
 
+function renderTypeLabel(type: string): string {
+  const typeLabel: Record<string, string> = {
+    microsoft: '微软正版',
+    offline: '离线账号',
+    authlib: '皮肤站',
+    nide8: '统一通行证',
+  };
+  return typeLabel[type] || type || '账号';
+}
+
 function renderAccountCard(account: AccountInfo, index: number): string {
   const typeLabel: Record<string, string> = {
     microsoft: '微软正版',
     offline: '离线账号',
-    authlib: '第三方账号',
+    authlib: '皮肤站',
+    nide8: '统一通行证',
   };
   const avatar = account.avatar ? `<img src="${escapeHtml(account.avatar)}" alt="" style="width:34px;height:34px;border-radius:50%;object-fit:cover;background:var(--bg-tertiary)">` : '<div style="width:34px;height:34px;border-radius:50%;background:var(--primary-light);display:grid;place-items:center">👤</div>';
   return `

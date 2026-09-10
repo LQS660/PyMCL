@@ -3,6 +3,9 @@ import { bridge, initBridge } from './bridge';
 import { router, type PageKey } from './router';
 import { store } from './store';
 import { initBridgeLifecycle, toast, clearPageCleanups, applyAppearance } from './ui';
+import { installRipple, pageSwap, pop } from './motion';
+// 只取类型：`import type` 会被编译掉，不会把 downloads chunk 拽进入口包。
+import type { DownloadCategory } from './pages/downloads';
 
 const app = document.getElementById('app')!;
 
@@ -64,66 +67,117 @@ function renderShell() {
     <div class="toast-container" id="toast-container"></div>`;
 
   document.querySelectorAll('.nav-item').forEach((el) => {
-    el.addEventListener('click', () => router.navigate((el as HTMLElement).dataset.page as PageKey));
+    const key = (el as HTMLElement).dataset.page as PageKey;
+    el.addEventListener('click', () => router.navigate(key));
+    // 指针停到侧栏条目上就把那一页的 chunk 拉回来。真点下去时模块通常已经在内存里，
+    // 转场不必再等一次网络/磁盘往返。
+    el.addEventListener('pointerenter', () => { void loadPage(key).catch(() => undefined); }, { passive: true });
   });
   const resizer = document.getElementById('sidebar-resizer');
   resizer?.addEventListener('pointerdown', (ev) => {
     ev.preventDefault();
+    // 改一次 --sidebar-width 就是整页重排。高回报率鼠标一秒能发两百多个
+    // pointermove，屏幕只刷六十次，所以攒到帧上只写最后那一个位置。
+    let width = 232;
+    let frame = 0;
+    const apply = () => {
+      frame = 0;
+      document.documentElement.style.setProperty('--sidebar-width', `${width}px`);
+    };
     const move = (e: PointerEvent) => {
-      const w = Math.max(140, Math.min(320, e.clientX));
-      document.documentElement.style.setProperty('--sidebar-width', `${w}px`);
+      width = Math.max(140, Math.min(320, e.clientX));
+      if (!frame) frame = requestAnimationFrame(apply);
     };
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
-      const w = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width')) || 232;
-      void bridge.call('save_settings', { ui_sidebar_width: w }).catch(() => undefined);
+      if (frame) cancelAnimationFrame(frame);
+      apply();
+      // 桥接不往返 ui_sidebar_width，存本地覆盖层
+      store.setLocalPrefs({ ui_sidebar_width: width });
     };
-    window.addEventListener('pointermove', move);
+    window.addEventListener('pointermove', move, { passive: true });
     window.addEventListener('pointerup', up);
   });
+
+  // 内容滚下去时给顶栏加一道分隔阴影，滚回顶部再收掉
+  const scroller = document.getElementById('page-content');
+  const header = document.querySelector('.page-header');
+  let raised = false;
+  scroller?.addEventListener('scroll', () => {
+    const next = scroller.scrollTop > 4;
+    if (next === raised) return;
+    raised = next;
+    header?.classList.toggle('raised', next);
+  }, { passive: true });
+
+  installRipple(app);
   router.subscribe(() => void renderPage(router.page));
 }
+
+let renderSeq = 0;
 
 async function renderPage(page: PageKey) {
   const content = document.getElementById('page-content');
   const title = document.getElementById('page-title');
   if (!content || !title) return;
+  const seq = ++renderSeq;
+  // 模块先备好再转场，别让淡出和 import() 串成两段等待。
+  const paint = await loadPage(page);
+  // 等 chunk 的这段时间里用户可能又点了别处，那就让后来的那次说了算。
+  if (seq !== renderSeq) return;
   clearPageCleanups();
   document.querySelectorAll('.nav-item').forEach((el) => {
     el.classList.toggle('active', (el as HTMLElement).dataset.page === page);
   });
   title.textContent = TITLES[page] || 'PyMCL';
-  content.classList.remove('page-enter');
-  void content.offsetWidth;
-  content.classList.add('page-enter');
+  await pageSwap(content, () => paint(content));
+}
 
-  if (page === 'downloads') page = 'vanilla';
-  if (page === 'more') page = 'instances';
+type Painter = (content: HTMLElement) => void;
 
-  switch (page) {
-    case 'launch': (await import('./pages/launch')).renderLaunchPage(content); break;
-    case 'instances': (await import('./pages/instances')).renderInstancesPage(content); break;
-    case 'vanilla': (await import('./pages/downloads')).renderDownloadPage(content, 'vanilla'); break;
-    case 'mods-catalog': (await import('./pages/downloads')).renderDownloadPage(content, 'mods'); break;
-    case 'mods': (await import('./pages/mods')).renderModsPage(content); break;
-    case 'modpacks': (await import('./pages/downloads')).renderDownloadPage(content, 'modpacks'); break;
-    case 'datapacks': (await import('./pages/downloads')).renderDownloadPage(content, 'datapacks'); break;
-    case 'resourcepacks': (await import('./pages/downloads')).renderDownloadPage(content, 'resourcepacks'); break;
-    case 'shaders': (await import('./pages/downloads')).renderDownloadPage(content, 'shaders'); break;
-    case 'worlds': (await import('./pages/downloads')).renderDownloadPage(content, 'worlds'); break;
-    case 'tasks': (await import('./pages/tasks')).renderTasksPage(content); break;
-    case 'accounts': (await import('./pages/accounts')).renderAccountsPage(content); break;
-    case 'java': (await import('./pages/java')).renderJavaPage(content); break;
-    case 'servers': (await import('./pages/servers')).renderServersPage(content); break;
-    case 'playtime': (await import('./pages/playtime')).renderPlaytimePage(content); break;
-    case 'multiplayer': (await import('./pages/multiplayer')).renderMultiplayerPage(content); break;
-    case 'ai': (await import('./pages/ai')).renderAIPage(content); break;
-    case 'settings': (await import('./pages/settings')).renderSettingsPage(content); break;
-    case 'feedback': (await import('./pages/feedback')).renderFeedbackPage(content); break;
-    case 'tools': (await import('./pages/tools')).renderToolsPage(content); break;
-    default: (await import('./pages/launch')).renderLaunchPage(content);
+const pageLoaders: Record<PageKey, () => Promise<Painter>> = {
+  launch: async () => (await import('./pages/launch')).renderLaunchPage,
+  instances: async () => (await import('./pages/instances')).renderInstancesPage,
+  mods: async () => (await import('./pages/mods')).renderModsPage,
+  tasks: async () => (await import('./pages/tasks')).renderTasksPage,
+  accounts: async () => (await import('./pages/accounts')).renderAccountsPage,
+  java: async () => (await import('./pages/java')).renderJavaPage,
+  servers: async () => (await import('./pages/servers')).renderServersPage,
+  playtime: async () => (await import('./pages/playtime')).renderPlaytimePage,
+  multiplayer: async () => (await import('./pages/multiplayer')).renderMultiplayerPage,
+  ai: async () => (await import('./pages/ai')).renderAIPage,
+  settings: async () => (await import('./pages/settings')).renderSettingsPage,
+  feedback: async () => (await import('./pages/feedback')).renderFeedbackPage,
+  tools: async () => (await import('./pages/tools')).renderToolsPage,
+  vanilla: () => downloadPainter('vanilla'),
+  'mods-catalog': () => downloadPainter('mods'),
+  modpacks: () => downloadPainter('modpacks'),
+  datapacks: () => downloadPainter('datapacks'),
+  resourcepacks: () => downloadPainter('resourcepacks'),
+  shaders: () => downloadPainter('shaders'),
+  worlds: () => downloadPainter('worlds'),
+  // 两个分区横条本身不是页面，点它落到该分区的第一项
+  downloads: () => downloadPainter('vanilla'),
+  more: async () => (await import('./pages/instances')).renderInstancesPage,
+};
+
+async function downloadPainter(category: DownloadCategory): Promise<Painter> {
+  const { renderDownloadPage } = await import('./pages/downloads');
+  return (content) => { void renderDownloadPage(content, category); };
+}
+
+const painterCache = new Map<PageKey, Promise<Painter>>();
+
+function loadPage(page: PageKey): Promise<Painter> {
+  let pending = painterCache.get(page);
+  if (!pending) {
+    pending = (pageLoaders[page] || pageLoaders.launch)();
+    // 加载失败不留在缓存里，下次还能重来
+    pending.catch(() => painterCache.delete(page));
+    painterCache.set(page, pending);
   }
+  return pending;
 }
 
 async function loadInitialData() {
@@ -137,7 +191,7 @@ async function loadInitialData() {
   const [settings, instances, versions, javas, accounts] = results;
   if (settings.status === 'fulfilled') {
     store.setSettings(settings.value as any);
-    applyAppearance(settings.value as any);
+    applyAppearance(store.mergedSettings());
   }
   if (instances.status === 'fulfilled') store.setInstances(instances.value as any);
   if (versions.status === 'fulfilled') store.setVersionList(versions.value as any);
@@ -164,7 +218,9 @@ async function maybeClipboardHint() {
     if (!text || !(low.includes('modrinth.com') || low.includes('curseforge.com'))) return;
     if (sessionStorage.getItem('pymcl.clip') === text) return;
     sessionStorage.setItem('pymcl.clip', text);
-    toast(`识别到剪贴板链接：${text.slice(0, 64)}`, 'info', 5000);
+    // 记下链接：进入下载页时自动填进搜索框（对齐 Qt 版 catalog_page.showEvent）
+    store.pendingClipLink = text;
+    toast(`识别到剪贴板链接：${text.slice(0, 56)}（到下载页即自动填入）`, 'info', 5000);
   } catch { /* clipboard may be denied */ }
 }
 
@@ -185,11 +241,15 @@ async function init() {
     bridge.subscribe('game_started', () => { store.gameRunning = true; store.notify(); });
     bridge.subscribe('game_exited', () => { store.gameRunning = false; store.notify(); });
     bridge.subscribe('ui_changed', () => reloadInitialData());
+    const badge = document.getElementById('task-badge');
+    let lastCount = -1;
     store.subscribe(() => {
-      const badge = document.getElementById('task-badge');
-      if (!badge) return;
+      // 这个订阅在下载高峰期每帧都跑，计数没变就一个字节都不写
+      if (!badge || store.taskCount === lastCount) return;
       badge.textContent = String(store.taskCount);
       badge.style.display = store.taskCount > 0 ? '' : 'none';
+      if (lastCount >= 0 && store.taskCount > 0) pop(badge);
+      lastCount = store.taskCount;
     });
     void loadInitialData();
     void maybeClipboardHint();
