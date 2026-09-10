@@ -437,13 +437,36 @@ class BackendAPI:
         from mclauncher import saves as saves_mod
         return saves_mod.list_media(self._instance(instance), kind, version)
 
-    def delete_modpack(self, instance: str, filename: str = ""):
+    def open_media(self, path: str) -> bool:
+        return bool(open_path(path))
+
+    def set_game_dir(self, path: str):
+        p = Path(path).expanduser()
+        target = p if p.is_absolute() else (utils.ROOT / path)
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            probe = target / ".pymcl-write-test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+        except OSError as exc:
+            raise InstanceError(f"游戏目录不可写: {target}\n{exc}") from exc
+        CONFIG.set("instances_dir", str(p) if p.is_absolute() else path)
+        CONFIG.save()
+        self._emit("ui_changed", {})
+        return str(CONFIG.instances_dir)
+
+    def delete_modpack(self, instance: str, filename: str = "", purge_instance: bool = False):
+        """默认只清整合包标记；删整个实例必须显式要求。"""
         inst = self._instance(instance)
         meta = inst.meta() or {}
         pack = meta.get("modpack")
         if not isinstance(pack, dict) or not pack.get("name"):
             raise InstanceError("该实例没有已安装整合包")
-        inst.delete()
+        if purge_instance:
+            inst.delete()
+        else:
+            inst.set_meta("modpack", None)
+        self._emit("ui_changed", {})
 
     def list_global_mods(self) -> list[dict]:
         from mclauncher import global_mods as gm
@@ -516,6 +539,48 @@ class BackendAPI:
     def terracotta_shutdown(self):
         terracotta_mod.stop()
 
+    def terracotta_enter_world(self):
+        info = self.terracotta_snapshot()
+        url = str(info.get("url") or "")
+        if info.get("state") != "guest-ok" or not url:
+            raise terracotta_mod.TerracottaError("还没连上房间。请先输入邀请码加入。")
+        return self._launch_into_server(url, "请到游戏「多人游戏」双击「陶瓦联机大厅」。")
+
+    def terracotta_direct_connect(self, address: str):
+        host, port = terracotta_mod.split_join_url(address)
+        if not host or host in ("127.0.0.1", "localhost"):
+            raise terracotta_mod.TerracottaError("请输入房主的公网地址，例如 1.2.3.4:25565")
+        return self._launch_into_server(f"{host}:{port}", "请到游戏「多人游戏」双击「陶瓦联机大厅」。")
+
+    def _launch_into_server(self, url: str, already_msg: str):
+        inst = self._instance()
+        terracotta_mod.remember_lobby(url, inst.path)
+        info = self.terracotta_snapshot()
+        if info.get("game_running"):
+            return already_msg
+        ids = inst.installed_ids()
+        if not ids:
+            raise LaunchError("请先到「启动」页安装一个版本。")
+        version = max(ids, key=lambda vid: (inst.versions_dir() / vid).stat().st_mtime)
+        host, port = terracotta_mod.split_join_url(url)
+        acc = self.accounts.get_active()
+        if acc and acc.get("type") == "microsoft":
+            account = acc.get("name") or "离线模式"
+            username = acc.get("name") or "Player"
+        else:
+            account = "离线模式"
+            username = (acc or {}).get("name") or self.terracotta_player()
+        return self.launch_game(
+            instance=inst.name,
+            version=version,
+            account=account,
+            username=username,
+            memory_mb=int(CONFIG.get("memory_mb") or 4096),
+            width=int(CONFIG.get("width") or 854),
+            height=int(CONFIG.get("height") or 480),
+            extra_game_args=["--server", host, "--port", str(port)],
+        )
+
     def launch_game(self, instance: str, version: str, account: str,
                     username: str, memory_mb: int, width: int, height: int,
                     java: str = "自动选择", extra_game_args=None) -> str:
@@ -544,10 +609,15 @@ class BackendAPI:
             acc = self.accounts.ensure_valid(acc)
         props = self.accounts.launch_props(acc)
         from mclauncher import launcher
+        from mclauncher import version_settings as _vs
+        auth_server = str(_vs.load(inst, version).get("auth_server") or "").strip()
+        if auth_server and not props.get("authlib_api"):
+            props = dict(props)
+            props["authlib_api"] = auth_server
         java_exe = "自动选择" if java in ("自动选择", "") else java
         cmd, _natives, _vdir, _gdir = launcher.build_launch_command(
             inst, version, props, java_exe, memory_mb=memory_mb,
-            width=width, height=height)
+            width=width, height=height, authlib_api=props.get("authlib_api"))
         return cmd
 
     def start_microsoft_login(self) -> str:
@@ -606,8 +676,9 @@ class BackendAPI:
             return vs.mods_dir(inst, version)
         return inst.path / "mods"
 
-    def get_installed_mods(self, instance: str) -> list[str]:
-        return [p.name for p in mods_mod.list_instance_mods(self._instance(instance))]
+    def get_installed_mods(self, instance: str, version: str = "") -> list[str]:
+        inst = self._instance(instance)
+        return [r["filename"] for r in mods_mod.list_mod_entries_at(self._mods_folder(inst, version)) if r.get("enabled")]
 
     def get_installed_shaders(self, instance: str) -> list[str]:
         return [p.name for p in mods_mod.list_content_files(self._instance(instance), "shaderpacks")]
@@ -823,10 +894,12 @@ class BackendAPI:
         self._emit("ui_changed", {})
         return self.accounts.active
 
-    def add_offline_account(self, username: str):
-        acc = self.accounts.offline_account(username)
+    def add_offline_account(self, username: str, skin: str = ""):
+        acc = self.accounts.offline_account(
+            username, skin=skin or CONFIG.get("offline_skin") or "default")
         self.accounts.add_account({**acc, "type": "offline"})
         self._emit("ui_changed", {})
+        return acc["name"]
         return acc["name"]
 
     def start_authlib_login(self, api: str, username: str, password: str) -> str:
@@ -950,8 +1023,18 @@ class BackendAPI:
     def export_modpack(self, instance: str, dest: str = "") -> str:
         return self.start_task(f"导出整合包 {instance}", self._export_pack_impl, instance, dest)
 
+    def check_mod_updates(self, instance: str) -> list:
+        from mclauncher.mod_update import check_updates
+        return check_updates(self._instance(instance))
+
     def start_mod_updates(self, instance: str) -> str:
         return self.start_task(f"检查模组更新 {instance}", self._mod_update_impl, instance)
+
+    def apply_mod_update(self, instance: str, row: dict) -> str:
+        from mclauncher.mod_update import apply_update
+        name = apply_update(self._instance(instance), row)
+        self._emit("ui_changed", {})
+        return name
 
     def cleaner_preview(self) -> dict:
         from mclauncher import cleaner as cleaner_mod
@@ -976,6 +1059,18 @@ class BackendAPI:
     def lan_hint(self, port: int = 25565) -> str:
         from mclauncher import lan as lan_mod
         return lan_mod.lan_hint(port)
+
+    def local_ips(self) -> list:
+        from mclauncher import lan as lan_mod
+        return lan_mod.local_ips()
+
+    def skin_urls(self, account_name: str = "") -> dict:
+        from mclauncher import skin as skin_mod
+        if not account_name or account_name == "离线模式":
+            acc = {"type": "offline", "name": "Steve"}
+        else:
+            acc = self.accounts.get_account(account_name) or {"type": "offline", "name": account_name}
+        return {"avatar": skin_mod.avatar_url(acc), "body": skin_mod.body_url(acc)}
 
     def authlib_presets(self) -> list:
         from mclauncher.authlib import PRESETS
@@ -1109,16 +1204,17 @@ class BackendAPI:
             "description": hit.get("description") or "",
         }
 
-    def search_modpacks(self, query: str, source: str) -> list[dict]:
-        src = "curseforge" if (source or "").lower().startswith("curse") else "modrinth"
+    def search_modpacks(self, query: str, source: str, extra: dict | None = None) -> list[dict]:
+        src = self._catalog_source(source)
+        extra = extra or {}
         q = (query or "").strip()
         if not q:
             rows = []
             seen = set()
             for title, pack_src, key, slug in POPULAR_MODPACKS:
-                if pack_src != src and pack_src == "modrinth":
+                if src != "all" and pack_src != src and pack_src == "modrinth":
                     continue
-                if pack_src != src and key != CBC_CF_ID:
+                if src != "all" and pack_src != src and key != CBC_CF_ID:
                     continue
                 row = {
                     "name": title,
@@ -1141,9 +1237,16 @@ class BackendAPI:
             return rows
         dm = DownloadManager(threads=2)
         key = CONFIG.get("curseforge_api_key")
+        from mclauncher.catalog_files import category_facets
+        cats = category_facets(extra.get("category") or extra.get("type") or "")
+        gv = extra.get("game_version") or extra.get("version") or ""
+        if isinstance(gv, str) and gv.startswith("全部"):
+            gv = ""
         hits = []
         try:
-            hits = modpack_mod.search_modpacks_chinese(dm, q, limit=25, api_key=key)
+            hits = modpack_mod.search_modpacks_chinese(
+                dm, q, limit=25, api_key=key, game_version=gv or None,
+                categories=cats or None)
         except Exception:
             hits = []
         if hits and any(h.get("matched_alias") for h in hits):
@@ -1151,13 +1254,15 @@ class BackendAPI:
             self._pack_cache = rows
             return rows
         if not hits:
-            try:
-                if src == "curseforge":
-                    hits = modpack_mod.search_cf_modpacks(dm, q, limit=25, api_key=key)
-                else:
-                    hits = modpack_mod.modrinth_search(dm, q, limit=25)
-            except Exception:
-                hits = []
+            fetchers = []
+            if src in ("all", "modrinth"):
+                fetchers.append(("modrinth", lambda: modpack_mod.modrinth_search(
+                    dm, q, limit=25, game_version=gv or None, categories=cats or None)))
+            if src in ("all", "curseforge"):
+                fetchers.append(("curseforge", lambda: modpack_mod.search_cf_modpacks(
+                    dm, q, limit=25, api_key=key, game_version=gv or None,
+                    categories=cats or None)))
+            hits = self._gather_hits(fetchers)
         else:
             hits = sorted(
                 hits,
@@ -1168,12 +1273,12 @@ class BackendAPI:
         return rows
 
     def search_mods(self, query: str, source: str, extra: dict | None = None) -> list[dict]:
-        src = "curseforge" if (source or "").lower().startswith("curse") else "modrinth"
+        src = self._catalog_source(source)
         q = (query or "").strip()
         if not q:
             rows = []
             for title, mod_src, key, *_rest in POPULAR_MODS:
-                if mod_src != src:
+                if src != "all" and mod_src != src:
                     continue
                 rows.append({
                     "name": title,
@@ -1190,17 +1295,20 @@ class BackendAPI:
         gv = extra.get("game_version") or extra.get("version") or ""
         if isinstance(gv, str) and gv.startswith("全部"):
             gv = ""
-        from mclauncher.catalog_files import category_facets
-        cats = category_facets(extra.get("category") or extra.get("type") or "")
-        try:
-            if src == "curseforge":
-                hits = mods_mod.search_curseforge(
-                    dm, q, limit=30, api_key=CONFIG.get("curseforge_api_key"),
-                    class_id=mods_mod.CF_CLASS_MOD, game_version=gv or None)
-            else:
-                hits = mods_mod.search_mods(dm, q, limit=30, game_version=gv or None, categories=cats)
-        except Exception:
-            hits = []
+        from mclauncher.catalog_files import category_facets, cf_category_tokens
+        label = extra.get("category") or extra.get("type") or ""
+        cats = category_facets(label)
+        cf_cats = cf_category_tokens(label)
+        fetchers = []
+        if src in ("all", "modrinth"):
+            fetchers.append(("modrinth", lambda: mods_mod.search_mods(
+                dm, q, limit=30, game_version=gv or None, categories=cats)))
+        if src in ("all", "curseforge"):
+            fetchers.append(("curseforge", lambda: mods_mod.search_curseforge(
+                dm, q, limit=30, api_key=CONFIG.get("curseforge_api_key"),
+                class_id=mods_mod.CF_CLASS_MOD, game_version=gv or None,
+                categories=cf_cats or None)))
+        hits = self._gather_hits(fetchers)
         rows = []
         for h in hits:
             rows.append({
@@ -1215,6 +1323,35 @@ class BackendAPI:
                 "updated": h.get("updated") or "",
             })
         self._mod_cache = rows
+        return rows
+
+    @staticmethod
+    def _catalog_source(source: str) -> str:
+        s = (source or "").strip().lower()
+        if s in ("", "全部", "all"):
+            return "all"
+        if s.startswith("curse"):
+            return "curseforge"
+        return "modrinth"
+
+    @staticmethod
+    def _gather_hits(fetchers) -> list[dict]:
+        """依次取各来源结果。部分源失败保留其余；全部失败才抛出。
+
+        与 app/backend.py 同一套语义：搜索报错不能伪装成「没搜到」。
+        """
+        rows: list[dict] = []
+        errors: list[Exception] = []
+        for tag, fetch in fetchers:
+            try:
+                for hit in fetch() or []:
+                    if isinstance(hit, dict):
+                        hit.setdefault("source", tag)
+                        rows.append(hit)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+        if errors and len(errors) == len(fetchers):
+            raise errors[0]
         return rows
 
     def _content_row(self, hit: dict, default_source: str = "") -> dict:
@@ -1247,29 +1384,27 @@ class BackendAPI:
         gv = extra.get("game_version") or extra.get("version") or ""
         if isinstance(gv, str) and gv.startswith("全部"):
             gv = ""
-        from mclauncher.catalog_files import category_facets
-        cats = category_facets(extra.get("category") or extra.get("type") or "")
+        from mclauncher.catalog_files import category_facets, cf_category_tokens
+        label = extra.get("category") or extra.get("type") or ""
+        cats = category_facets(label)
+        cf_cats = cf_category_tokens(label)
+        fetchers = []
         if want_mr:
-            try:
-                hits = mods_mod.search_modrinth_projects(
-                    dm, q, spec["mr"], limit=30, game_version=gv or None, categories=cats)
-                rows.extend(self._content_row(h, "modrinth") for h in hits)
-            except Exception:
-                pass
+            fetchers.append(("modrinth", lambda: mods_mod.search_modrinth_projects(
+                dm, q, spec["mr"], limit=30, game_version=gv or None, categories=cats)))
         if want_cf:
-            try:
-                hits = mods_mod.search_curseforge(
-                    dm, q or None, limit=30,
-                    api_key=CONFIG.get("curseforge_api_key"),
-                    class_id=spec["cf"],
-                    game_version=gv or None,
-                )
-                for h in hits:
-                    row = self._content_row(h, "curseforge")
-                    row["description"] = h.get("summary") or row["description"]
-                    rows.append(row)
-            except Exception:
-                pass
+            fetchers.append(("curseforge", lambda: mods_mod.search_curseforge(
+                dm, q or None, limit=30,
+                api_key=CONFIG.get("curseforge_api_key"),
+                class_id=spec["cf"],
+                game_version=gv or None,
+                categories=cf_cats or None,
+            )))
+        for hit in self._gather_hits(fetchers):
+            row = self._content_row(hit, hit.get("source") or "")
+            if hit.get("source") == "curseforge":
+                row["description"] = hit.get("summary") or row["description"]
+            rows.append(row)
         return rows
 
     def search_shaders(self, query: str, source: str, extra: dict | None = None) -> list[dict]:
@@ -1698,13 +1833,17 @@ class BackendAPI:
 
     def _self_update_impl(self, progress, log):
         from mclauncher import updater as updater_mod
-        info = updater_mod.check()
+        info = updater_mod.check(self._dm(progress, log))
         if not info.get("has_update"):
             return info.get("message") or "已是最新"
         log(info.get("message") or "下载更新")
-        path = updater_mod.download(info)
-        log(updater_mod.apply_exe(path))
-        return "更新包已就绪，重启后生效"
+        path = updater_mod.download(info, self._dm(progress, log))
+        # 这里不能走 apply_exe：bridge 是宿主壳拉起来的子进程，sys.argv[0]
+        # 指向 bridge 自己而不是 PyMCL.exe，替换脚本会盯错目标、还会一直
+        # 等一个不会退出的进程。只把包备好，交给宿主壳去替换。
+        log(f"更新包已下载: {path}")
+        self._emit("update_staged", {"package": str(path), "version": info.get("latest") or ""})
+        return f"更新包已下载到 {path}，关闭启动器后运行它即可完成更新"
 
     def _nide8_login_impl(self, progress, log, server_id, username, password):
         from mclauncher import nide8 as nide8_mod
@@ -1720,7 +1859,10 @@ class BackendAPI:
         extra.setdefault("name", name)
         inst = self._instance(instance or extra.get("instance"))
         dm = self._dm(progress, log)
-        result = worlds_mod.install_world(dm, extra, inst, on_progress=dm.on_progress)
+        target_version = str(extra.get("version") or "")
+        log(f"安装世界到 {worlds_mod.saves_root(inst, target_version)}")
+        result = worlds_mod.install_world(dm, extra, inst, on_progress=dm.on_progress,
+                                          version_id=target_version)
         files = (result or {}).get("files") or []
         log(f"完成: {', '.join(files) or name}")
         return f"已安装世界 {', '.join(files) or name}"
@@ -1931,10 +2073,19 @@ class BackendAPI:
             log("未发现版本")
             return "无版本可导入"
         log(f"发现 {len(versions)} 个版本")
-        progress(2, 3, f"导入 {len(versions)} 个版本")
+        progress(2, 3, f"导入 {len(versions)} 个版本（含依赖库）")
         result = om.migrate(str(src), instance)
-        log(f"已导入 {len(result.get('versions', []))} 个版本")
-        return f"已导入 {len(result.get('versions', []))} 个版本"
+        imported = result.get("versions") or []
+        accounts = result.get("accounts") or []
+        log(f"已导入 {len(imported)} 个版本（含各版本用到的 libraries）")
+        if accounts:
+            log("已导入账号: " + "、".join(accounts))
+            log("官方只存了访问令牌、没有刷新令牌，过期后需要重新登录")
+        self._emit("ui_changed", {})
+        summary = f"已导入 {len(imported)} 个版本"
+        if accounts:
+            summary += f"、{len(accounts)} 个账号"
+        return summary
 
     # ==================================================================
     # 新增 API：多开
@@ -2015,9 +2166,10 @@ class BackendAPI:
         from mclauncher.sysinfo import get_smart_recommendation
         return get_smart_recommendation()
 
-    def test_ai_connection(self) -> str:
+    def test_ai_connection(self, settings: dict | None = None) -> str:
+        """试连 AI。传 settings 就用它，让设置页能测「还没保存的值」而不必先落盘。"""
         from mclauncher.ai.client import test_connection
-        return test_connection(self.get_settings())
+        return test_connection(settings if settings is not None else self.get_settings())
 
     def ai_list_chats(self) -> dict:
         from mclauncher.ai import store as chat_store
