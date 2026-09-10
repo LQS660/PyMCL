@@ -23,10 +23,19 @@ def search_worlds(dm: DownloadManager | None, query: str, extra: dict | None = N
     return search_projects(dm, "world", query, extra.get("source") or "CurseForge", extra)
 
 
-def install_world(dm: DownloadManager, extra: dict, instance: Instance, on_progress=None) -> dict:
+def saves_root(instance: Instance, version_id: str = "") -> Path:
+    """世界要落到游戏真正读的 saves：开了存档隔离时是 versions/<id>/saves。"""
+    if version_id:
+        from . import version_settings as vs
+        return vs.game_dir(instance, version_id) / "saves"
+    return instance.path / "saves"
+
+
+def install_world(dm: DownloadManager, extra: dict, instance: Instance, on_progress=None,
+                  version_id: str = "") -> dict:
     inst = instance
     inst.ensure_standard_dirs()
-    dest_root = inst.path / "saves"
+    dest_root = saves_root(inst, version_id or str((extra or {}).get("version") or ""))
     dest_root.mkdir(parents=True, exist_ok=True)
     extra = dict(extra or {})
     path = extra.get("path")

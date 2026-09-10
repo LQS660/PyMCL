@@ -5,7 +5,7 @@ from __future__ import annotations
 from .downloader import DownloadManager
 from .installer import (
     BMCLAPI, FABRIC_META, FORGE_MAVEN, NEOFORGE_MAVEN, QUILT_META,
-    bmcl_forge_artifacts, forge_sort_key, parse_maven_versions,
+    Installer, bmcl_forge_artifacts, forge_sort_key, parse_maven_versions,
 )
 
 NEOFORGE_MC_MAP = {
@@ -97,17 +97,49 @@ def _forge(dm, mc):
     return [{"id": v, "label": v, "stable": "-pre" not in v.lower()} for v in found]
 
 
+def neoforge_prefix(mc_version: str) -> str:
+    """该 MC 版本对应的 NeoForge 版本号前缀，取不到返回空串。
+
+    与 `Installer.install_neoforge` 同一套规则：先查 NEOFORGE_MC_MAP，
+    表里没有再按「1.21.4 → 21.4」推导（NeoForge 从 1.20.2 起改用这套号）。
+    """
+    mc = (mc_version or "").strip()
+    if not mc:
+        return ""
+    mapped = NEOFORGE_MC_MAP.get(mc)
+    if mapped:
+        return str(mapped)
+    if Installer._mc_tuple(mc) >= (1, 20, 2):
+        return ".".join(mc.split(".")[1:])
+    return ""
+
+
+def filter_neoforge_versions(versions, mc_version: str) -> list[str]:
+    """从 maven 全量版本里挑出属于该 MC 版本的构建，挑不出就返回空。
+
+    以前只认 NEOFORGE_MC_MAP（写死到 1.21.1），更新的 MC 会让 prefix=None
+    从而**完全不过滤**，把所有 MC 版本的 NeoForge 构建都列进下拉框，
+    用户随手选一条就是版本错配。宁可只留「最新」交给安装器自己解析。
+    """
+    vers = [str(v).strip() for v in (versions or []) if str(v).strip()]
+    mc = (mc_version or "").strip()
+    if not mc or not vers:
+        return []
+    prefix = neoforge_prefix(mc)
+    picked = [v for v in vers if prefix and v.startswith(prefix + ".")]
+    if not picked:
+        # 1.20.1 之前的旧号段是 `<mc>-<build>`
+        picked = [v for v in vers if v.startswith(mc + "-")]
+    return list(reversed(picked[-80:]))
+
+
 def _neoforge(dm, mc):
-    prefix = NEOFORGE_MC_MAP.get(mc)
-    rows = []
     try:
         xml = dm.fetch_text(f"{NEOFORGE_MAVEN}/maven-metadata.xml", timeout=30, expand=False)
         vers = parse_maven_versions(xml)
     except Exception:
         vers = []
-    if prefix:
-        vers = [v for v in vers if str(v).startswith(str(prefix))]
-    vers = list(reversed(vers[-80:])) if vers else []
-    for v in vers:
-        rows.append({"id": v, "label": v, "stable": "beta" not in str(v).lower()})
-    return rows
+    return [
+        {"id": v, "label": v, "stable": "beta" not in v.lower()}
+        for v in filter_neoforge_versions(vers, mc)
+    ]

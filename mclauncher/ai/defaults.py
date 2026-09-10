@@ -16,6 +16,7 @@ WRITE_TOOLS = {
     "install_shader",
     "install_resourcepack",
     "install_datapack",
+    "install_world",
     "download_java",
     "launch_game",
     "create_instance",
@@ -45,6 +46,7 @@ LONG_TOOLS = {
     "install_shader",
     "install_resourcepack",
     "install_datapack",
+    "install_world",
     "download_java",
 }
 

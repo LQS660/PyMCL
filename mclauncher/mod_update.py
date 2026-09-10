@@ -8,13 +8,35 @@ from . import utils
 from .ai.conflict import inspect_jar
 from .downloader import DownloadManager
 from .instances import Instance
-from .mods import list_instance_mod_entries
+from .mods import detect_loader, detect_mc_version, list_instance_mod_entries
 
 API = "https://api.modrinth.com/v2"
 
 
 def _game_mods(instance: Instance, mods_path: Path | None = None) -> Path:
     return Path(mods_path) if mods_path else instance.path / "mods"
+
+
+def resolve_target(instance: Instance, mc_version: str = "", loader: str = "") -> tuple[str, str]:
+    """补全更新目标的 MC 版本与加载器。
+
+    调用方不传时必须从实例推断，绝不能留空：留空时 Modrinth 会返回该项目
+    **全部** MC 版本里最新的一条，CurseForge 同理，`apply_update` 又会删掉旧
+    jar —— 结果是「检查更新」把 1.12.2 的模组换成 1.21 的，旧文件还找不回来。
+    """
+    mc = (mc_version or "").strip()
+    ld = (loader or "").strip()
+    if not mc:
+        try:
+            mc = detect_mc_version(instance) or ""
+        except Exception:
+            mc = ""
+    if not ld:
+        try:
+            ld = detect_loader(instance) or ""
+        except Exception:
+            ld = ""
+    return mc, ld
 
 
 def check_updates(instance: Instance, dm: DownloadManager | None = None,
@@ -25,6 +47,7 @@ def check_updates(instance: Instance, dm: DownloadManager | None = None,
     folder = _game_mods(instance, mods_path)
     if not folder.is_dir():
         return rows
+    mc_version, loader = resolve_target(instance, mc_version, loader)
     for entry in list_instance_mod_entries(instance) if mods_path is None else _entries(folder):
         path = folder / entry["filename"]
         if not path.is_file() or not entry.get("enabled"):
@@ -83,6 +106,8 @@ def _modrinth_update(dm, path: Path, digest: str, mc_version: str, loader: str, 
         "size": (primary or {}).get("size") or 0,
         "filename_new": (primary or {}).get("filename") or "",
         "source": "modrinth",
+        "mc_version": mc_version or "",
+        "game_versions": list(latest.get("game_versions") or []),
     }
 
 
@@ -163,6 +188,8 @@ def _curseforge_update(dm, path: Path, mc_version: str, loader: str, info: dict)
         "filename_new": filename,
         "source": "curseforge",
         "file_id": latest.get("id"),
+        "mc_version": mc_version or "",
+        "game_versions": [str(g) for g in (latest.get("gameVersions") or [])],
     }
 
 
@@ -189,6 +216,15 @@ def apply_update(instance: Instance, row: dict, dm: DownloadManager | None = Non
     new_name = row.get("filename_new") or row.get("filename")
     dest = folder / new_name
     dm.download(url, dest, sha1=row.get("sha1") or None, size=row.get("size") or None)
+    # 只有确认新文件真的落地了才删旧的。CurseForge 那条路径 sha1 为空，
+    # DownloadManager 不做校验，一个 403 的 HTML 错误页也会被当成「下载成功」，
+    # 旧 jar 一删用户就没得回退了。
+    if not dest.is_file() or dest.stat().st_size <= 0:
+        raise RuntimeError(f"更新包没有正确落地，已保留原文件: {new_name}")
+    want = int(row.get("size") or 0)
+    if want > 0 and dest.stat().st_size != want:
+        raise RuntimeError(
+            f"更新包大小与清单不符（{dest.stat().st_size} != {want}），已保留原文件")
     old = folder / row["filename"]
     if old.resolve() != dest.resolve() and old.is_file():
         old.unlink()

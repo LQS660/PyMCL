@@ -9,11 +9,16 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import utils
 from .instances import Instance, _STANDARD_DIRS
+
+_ISO_TS = re.compile(r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})")
 
 
 def official_dir() -> Path:
@@ -50,33 +55,97 @@ def scan_versions(src: Path) -> list[str]:
     return result
 
 
+def _load_version_json(src: Path, version_id: str) -> dict:
+    return utils.read_json(src / "versions" / version_id / f"{version_id}.json", {}) or {}
+
+
+def _inherit_chain(src: Path, version_id: str) -> list[str]:
+    """版本本身 + inheritsFrom 祖先。
+
+    Forge/Fabric 版本的 jar 和大半依赖都挂在被继承的原版上，只搬自己那层
+    等于搬了个空壳。
+    """
+    chain: list[str] = []
+    seen: set[str] = set()
+    cur = version_id
+    while cur and cur not in seen:
+        seen.add(cur)
+        chain.append(cur)
+        cur = str(_load_version_json(src, cur).get("inheritsFrom") or "").strip()
+    return chain
+
+
+def _library_relpaths(src: Path, version_id: str) -> list[str]:
+    """该版本用到的库在 libraries/ 下的相对路径（含本平台 natives）。"""
+    from .installer import select_native_classifier
+
+    rels: list[str] = []
+    seen: set[str] = set()
+    for vid in _inherit_chain(src, version_id):
+        for lib in _load_version_json(src, vid).get("libraries") or []:
+            if not isinstance(lib, dict):
+                continue
+            name = str(lib.get("name") or "")
+            downloads = lib.get("downloads") or {}
+            artifact = downloads.get("artifact") or {}
+            path = artifact.get("path") or (utils.maven_artifact_path(name) if name else "")
+            if path and path not in seen:
+                seen.add(path)
+                rels.append(path)
+            nkey = select_native_classifier(lib)
+            if not nkey:
+                continue
+            entry = (downloads.get("classifiers") or {}).get(nkey) or {}
+            npath = entry.get("path") or (
+                utils.maven_artifact_path(f"{name}:{nkey}") if name else "")
+            if npath and npath not in seen:
+                seen.add(npath)
+                rels.append(npath)
+    return rels
+
+
+def copy_libraries(src: Path, dest: Instance, version_id: str) -> int:
+    """按版本 JSON 把官方 libraries/ 里用得上的库搬过来，返回复制数量。
+
+    官方共享库是 Maven 布局，路径必须原样保留，启动器和预检都按这个路径找。
+    """
+    lib_src = Path(src) / "libraries"
+    if not lib_src.is_dir():
+        return 0
+    lib_dest = dest.libraries_dir()
+    copied = 0
+    for rel in _library_relpaths(Path(src), version_id):
+        f = lib_src / rel
+        if not f.is_file():
+            continue
+        tgt = lib_dest / rel
+        if tgt.is_file() and tgt.stat().st_size == f.stat().st_size:
+            continue
+        tgt.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(f, tgt)
+            copied += 1
+        except OSError as exc:
+            utils.log.warning("复制依赖库失败 %s: %s", rel, exc)
+    return copied
+
+
 def _copy_version(src: Path, dest: Instance, version_id: str) -> str:
-    """复制单个版本到实例。"""
+    """复制单个版本（连同它继承的原版）到实例。"""
     s = src / "versions" / version_id
     if not s.is_dir():
         return ""
-    d = dest.versions_dir() / version_id
-    d.mkdir(parents=True, exist_ok=True)
-    # 复制 version json 和客户端 jar
-    for name in (f"{version_id}.json", f"{version_id}.jar"):
-        f = s / name
-        if f.is_file():
-            shutil.copy2(f, d / name)
-    # 复制独立的 libraries 目录（若有，通常是 1.12 之前）
-    lib_src = s / "libraries"
-    if lib_src.is_dir():
-        lib_dest = dest.libraries_dir() / "minecraft" / version_id
-        lib_dest.mkdir(parents=True, exist_ok=True)
-        for f in lib_src.rglob("*"):
+    for vid in _inherit_chain(src, version_id):
+        vs = src / "versions" / vid
+        if not vs.is_dir():
+            continue
+        d = dest.versions_dir() / vid
+        d.mkdir(parents=True, exist_ok=True)
+        for name in (f"{vid}.json", f"{vid}.jar"):
+            f = vs / name
             if f.is_file():
-                rel = f.relative_to(lib_src)
-                tgt = lib_dest / rel
-                tgt.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(f, tgt)
-    # 复制资产目录
-    assets_src = src / "assets"
-    if assets_src.is_dir():
-        _copy_tree(assets_src, dest.assets_dir(), exts={".json", ".png", ".ogg"})
+                shutil.copy2(f, d / name)
+    copy_libraries(src, dest, version_id)
     return version_id
 
 
@@ -114,25 +183,74 @@ def import_versions(src: Path, instance_name: str = "default", versions: list[st
     return imported
 
 
-def import_accounts(src: Path) -> int:
-    """从官方启动器导入已登录的微软账号参考。"""
-    # 官方启动器把账号 token 放在凭据管理器（Windows）或 launcher_accounts.json，
-    # 出于安全我们不直接复制 token，只记录提示。
-    src = Path(src)
-    count = 0
-    launcher_accounts = src / "launcher_accounts.json"
-    if launcher_accounts.is_file():
+def _expires_at(acc: dict) -> float:
+    """官方写的是纳秒精度 ISO 串，解析不了就当已过期（宁可要求重登）。"""
+    match = _ISO_TS.search(str(acc.get("accessTokenExpiresAt") or ""))
+    if not match:
+        return 0.0
+    try:
+        parts = [int(x) for x in match.groups()]
+        return datetime(*parts, tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def read_official_accounts(src: Path) -> list[dict]:
+    """解析官方 launcher_accounts.json 里的正版档案。"""
+    data = utils.read_json(Path(src) / "launcher_accounts.json", None)
+    if not isinstance(data, dict):
+        return []
+    rows = []
+    for local_id, acc in (data.get("accounts") or {}).items():
+        if not isinstance(acc, dict):
+            continue
+        profile = acc.get("minecraftProfile") or {}
+        name = str(profile.get("name") or "").strip()
+        uuid = str(profile.get("id") or "").strip()
+        if not name or not uuid:
+            continue
+        rows.append({
+            "type": "microsoft",
+            "name": name,
+            "uuid": utils.dashed_uuid(uuid),
+            "access_token": str(acc.get("accessToken") or ""),
+            # 官方只落 MC 访问令牌，没有微软 refresh_token。过期后
+            # ensure_valid 会明确要求重新登录，而不是拿空令牌去启动。
+            "refresh_token": "",
+            "xuid": "",
+            "expires_at": _expires_at(acc),
+            "updated_at": time.time(),
+            "imported_from": "official-launcher",
+            "local_id": str(local_id),
+        })
+    return rows
+
+
+def import_accounts(src: Path, manager=None) -> list[str]:
+    """把官方启动器的正版档案真正写进账号库，返回导入的角色名。
+
+    以前这里只 `len()` 了一下就返回数字，UI 说「导入版本和账号」，
+    账号那半其实一个都没落地。
+    """
+    rows = read_official_accounts(src)
+    if not rows:
+        return []
+    if manager is None:
+        from .auth import AccountManager
+        manager = AccountManager()
+    names = []
+    for acc in rows:
         try:
-            data = utils.read_json(launcher_accounts, None)
-            if isinstance(data, dict):
-                count = len(data.get("accounts", {}))
-        except Exception:
-            pass
-    return count
+            manager.add_account(acc)
+            names.append(acc["name"])
+        except Exception as exc:  # noqa: BLE001
+            utils.log.warning("导入账号失败 %s: %s", acc.get("name"), exc)
+    return names
 
 
 def migrate(official_root: str, instance_name: str = "default",
-            want_versions: bool = True, want_assets: bool = True) -> dict:
+            want_versions: bool = True, want_assets: bool = True,
+            want_accounts: bool = True) -> dict:
     """执行完整迁移。返回统计信息。
 
     参数不能叫 import_versions：那会遮蔽上面的模块级同名函数，
@@ -144,7 +262,7 @@ def migrate(official_root: str, instance_name: str = "default",
     inst = Instance(instance_name)
     if not inst.path.is_dir():
         inst.create()
-    result = {"versions": [], "accounts": 0}
+    result: dict = {"versions": [], "accounts": []}
 
     if want_versions:
         result["versions"] = import_versions(src, instance_name)
@@ -155,5 +273,6 @@ def migrate(official_root: str, instance_name: str = "default",
         if assets_src.is_dir() and assets_src != inst.assets_dir():
             _copy_tree(assets_src, inst.assets_dir())
 
-    result["accounts"] = import_accounts(src)
+    if want_accounts:
+        result["accounts"] = import_accounts(src)
     return result

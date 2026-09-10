@@ -243,12 +243,69 @@ def _list_cf(dm, extra):
     return rows
 
 
+_ALIAS_TABLE: dict[str, str] | None = None
+
+
+def _alias_table() -> dict[str, str]:
+    """中文别名 + 每种语言 tr() 之后的文案 → canonical key。
+
+    下拉框填的是 `tr("科技")`，英文界面下传进来的就是 "Tech"；只认中文键
+    时这些标签查不到 facet，筛选被静默丢弃（选了没反应，也不报错）。
+    这里按 locales 里的实际译文反查，新增语言不用再改表。
+    """
+    global _ALIAS_TABLE
+    if _ALIAS_TABLE is not None:
+        return _ALIAS_TABLE
+    table = {k.strip().lower(): v for k, v in _TYPE_ALIASES.items()}
+    try:
+        from . import i18n
+        for lang in i18n.available_languages():
+            for zh, key in _TYPE_ALIASES.items():
+                shown = str(i18n._(zh, lang) or "").strip().lower()
+                # setdefault：显式的中文别名优先，译文只补空位，
+                # 避免某语言把 "creative" 之类的词翻到已占用的键上。
+                if shown:
+                    table.setdefault(shown, key)
+    except Exception:
+        pass
+    _ALIAS_TABLE = table
+    return table
+
+
+_ANY_LABELS: frozenset | None = None
+
+
+def _any_labels() -> frozenset:
+    """「不限」这一项在各语言下的写法，命中即表示不加分类过滤。"""
+    global _ANY_LABELS
+    if _ANY_LABELS is not None:
+        return _ANY_LABELS
+    words = {"全部", "all", "any"}
+    try:
+        from . import i18n
+        for lang in i18n.available_languages():
+            shown = str(i18n._("全部", lang) or "").strip().lower()
+            if shown:
+                words.add(shown)
+    except Exception:
+        pass
+    _ANY_LABELS = frozenset(words)
+    return _ANY_LABELS
+
+
+def reset_alias_cache():
+    """i18n.add_translations() 之后调用，让别名表重新按新译文构建。"""
+    global _ALIAS_TABLE, _ANY_LABELS
+    _ALIAS_TABLE = None
+    _ANY_LABELS = None
+
+
 def type_key(label) -> str:
     """把 UI 传来的类型标签（canonical key / 中文 / 翻译文本）归一成 canonical key。"""
     s = str(label or "").strip().lower()
-    if not s or s in ("全部", "all", "any"):
+    if not s or s in _any_labels():
         return ""
-    return _TYPE_ALIASES.get(s, s)
+    return _alias_table().get(s, s)
 
 
 def category_facets(label) -> list[str]:

@@ -118,6 +118,21 @@ TOOL_SCHEMAS = [
         "name": {"type": "string"}, "instance": {"type": "string"},
         "source": {"type": "string"}, "slug": {"type": "string"},
     }, ["name"]),
+    _schema("search_content",
+            "搜索光影 / 资源包 / 数据包（支持中文名）。装之前先用它拿 slug 或 id。", {
+        "kind": {"type": "string", "description": "shader / resourcepack / datapack"},
+        "query": {"type": "string"},
+        "source": {"type": "string", "description": "全部 / Modrinth / CurseForge"},
+    }, ["kind", "query"]),
+    _schema("search_worlds", "搜索地图存档（CurseForge 世界）", {
+        "query": {"type": "string"},
+        "source": {"type": "string"},
+    }, ["query"]),
+    _schema("install_world", "安装地图存档到实例的 saves", {
+        "name": {"type": "string"}, "instance": {"type": "string"},
+        "source": {"type": "string"}, "slug": {"type": "string"},
+        "id": {"type": "string", "description": "CurseForge 数字 id"},
+    }, ["name"]),
     _schema("create_instance", "新建隔离实例，装整合包前建议先建", {
         "name": {"type": "string"},
     }, ["name"]),
@@ -393,6 +408,7 @@ def confirm_label(name: str, args: dict) -> str:
         "install_shader": f"安装光影 {args.get('name')} → {inst}",
         "install_resourcepack": f"安装资源包 {args.get('name')} → {inst}",
         "install_datapack": f"安装数据包 {args.get('name')} → {inst}",
+        "install_world": f"安装地图 {args.get('name')} → {inst}",
         "download_java": f"下载 Java {args.get('major')}",
         "launch_game": f"启动 {args.get('version') or '当前版本'} @ {inst}",
         "create_instance": f"新建实例 {args.get('name')}",
@@ -487,6 +503,32 @@ def execute_tool(backend, name: str, args: dict, wait=True, cancelled=None):
             out["hint"] = note
             return out
         return f"{out}\n{note}"
+    if name == "search_content":
+        kind = str(args.get("kind") or "shader").lower()
+        finder = {
+            "shader": getattr(backend, "search_shaders", None),
+            "shaderpack": getattr(backend, "search_shaders", None),
+            "resourcepack": getattr(backend, "search_resourcepacks", None),
+            "datapack": getattr(backend, "search_datapacks", None),
+        }.get(kind)
+        if not callable(finder):
+            return f"未知内容类型: {kind}"
+        rows = finder(args.get("query") or "", args.get("source") or "全部", {})
+        return _trim_hits(rows) if rows else "没有搜到匹配内容"
+    if name == "search_worlds":
+        rows = backend.search_worlds(
+            args.get("query") or "", args.get("source") or "CurseForge", {})
+        return _trim_hits(rows) if rows else "没有搜到匹配地图"
+    if name == "install_world":
+        extra = {
+            "instance": inst_name,
+            "source": args.get("source") or "CurseForge",
+            "slug": args.get("slug") or "",
+            "id": args.get("id") or "",
+            "name": args.get("name"),
+        }
+        tid = backend.install_world(args.get("name"), inst_name, extra)
+        return backend.wait_task(tid, cancelled=cancelled) if wait else {"task_id": tid, "queued": True}
     if name == "create_instance":
         raw = args.get("name") or "游戏"
         inst = Instance(unique_instance_name(raw))

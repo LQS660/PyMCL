@@ -114,11 +114,17 @@ def read_json(path, default=None):
     # Windows can briefly reject a read while another *process* atomically
     # replaces the file.  A couple of short retries avoid treating a healthy
     # cache as corrupt during a concurrent refresh.
+    #
+    # utf-8-sig 而不是 utf-8：记事本 / VSCode「UTF-8 with BOM」/ PowerShell
+    # `Set-Content -Encoding UTF8` 存出来的文件带 BOM，用 utf-8 读会抛
+    # 「Unexpected UTF-8 BOM」，然后这里返回 default —— 上层 Config.load()
+    # 就把整份 config.json 当成不存在，静默重置成默认值（账号、布局、
+    # 游戏时长同理）。utf-8-sig 对无 BOM 的文件行为与 utf-8 完全一致。
     last_error = None
     lock = _json_file_lock(path)
     for attempt in range(3):
         try:
-            with lock, open(path, "r", encoding="utf-8") as f:
+            with lock, open(path, "r", encoding="utf-8-sig") as f:
                 return json.load(f)
         except FileNotFoundError:
             return default

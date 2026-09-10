@@ -95,20 +95,53 @@ def download(info: dict, dm: DownloadManager | None = None) -> str:
     return str(dest)
 
 
-def apply_exe(package: str) -> str:
-    """下载完成后写 bat，退出后替换当前 exe。"""
+def write_apply_script(package: str, exe: Path) -> Path:
+    """生成替换脚本：等本进程真的退出再覆盖，而不是盲等 2 秒。"""
     src = Path(package)
-    exe = Path(sys.argv[0]).resolve()
-    if exe.suffix.lower() != ".exe":
-        return "当前不是打包版，请用新压缩包覆盖源码目录。"
     bat = exe.with_name("pymcl-apply-update.bat")
+    pid = os.getpid()
     bat.write_text(
-        "@echo off\n"
-        "timeout /t 2 /nobreak >nul\n"
-        f'copy /Y "{src}" "{exe}"\n'
-        f'start "" "{exe}"\n'
-        f'del "%~f0"\n',
+        "@echo off\r\n"
+        "setlocal\r\n"
+        ":waitloop\r\n"
+        f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul\r\n'
+        "if not errorlevel 1 (\r\n"
+        "  timeout /t 1 /nobreak >nul\r\n"
+        "  goto waitloop\r\n"
+        ")\r\n"
+        f'copy /Y "{src}" "{exe}"\r\n'
+        f'start "" "{exe}"\r\n'
+        'del "%~f0"\r\n',
         encoding="gbk",
         errors="replace",
     )
-    return str(bat)
+    return bat
+
+
+def apply_exe(package: str, spawn: bool = True) -> str:
+    """写替换脚本并把它拉起来。
+
+    以前这里只写了个 bat 就返回路径，没人执行、进程也不退出：
+    「检查更新」下完一个包，然后什么都没发生。
+    """
+    exe = Path(sys.argv[0]).resolve()
+    if exe.suffix.lower() != ".exe":
+        return "当前不是打包版，请用新压缩包覆盖源码目录。"
+    bat = write_apply_script(package, exe)
+    if not spawn:
+        return str(bat)
+    import subprocess
+    creationflags = 0
+    if utils.IS_WINDOWS:
+        creationflags = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                         | getattr(subprocess, "DETACHED_PROCESS", 0))
+    subprocess.Popen(
+        ["cmd", "/c", str(bat)],
+        cwd=str(exe.parent),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        creationflags=creationflags,
+        close_fds=True,
+    )
+    return "UPDATE_STAGED"
