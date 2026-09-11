@@ -33,8 +33,19 @@ cJSON *py_rpc_call(const char *method, cJSON *params) {
         return NULL;
     }
     GetTempPathA(sizeof(tmpdir), tmpdir);
-    snprintf(pin, sizeof(pin), "%spymcl-rpc-in-%u.json", tmpdir, (unsigned)GetCurrentProcessId());
-    snprintf(pout, sizeof(pout), "%spymcl-rpc-out-%u.json", tmpdir, (unsigned)GetCurrentProcessId() ^ 0xA5A5u);
+    /* 文件名必须一次调用一套。桥是多线程 HTTP 服务，只按进程 ID 取名的话，
+       两个同时落到 Python 回落的请求会抢同一对 in/out 文件：后到的覆盖先到的
+       入参，先返回的把对方的 out 文件删掉。表现出来就是随机的
+       "unknown method"，以及某个方法拿回另一个方法的结果——实测 list_themes
+       返回过陶瓦联机的快照。加线程 ID 和自增序号把它们隔开。 */
+    {
+        static volatile LONG seq = 0;
+        LONG n = InterlockedIncrement(&seq);
+        unsigned pid = (unsigned)GetCurrentProcessId();
+        unsigned tid = (unsigned)GetCurrentThreadId();
+        snprintf(pin, sizeof(pin), "%spymcl-rpc-%u-%u-%ld-in.json", tmpdir, pid, tid, (long)n);
+        snprintf(pout, sizeof(pout), "%spymcl-rpc-%u-%u-%ld-out.json", tmpdir, pid, tid, (long)n);
+    }
 
     cJSON *body = params ? cJSON_Duplicate(params, 1) : cJSON_CreateObject();
     if (!cJSON_IsObject(body)) {
