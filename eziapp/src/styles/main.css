@@ -128,16 +128,17 @@ body.has-bg .sidebar, body.has-bg .main-content, body.has-bg .page-header { back
 }
 .nav-section > .nav-item { font-weight: 650; }
 /* 分组默认收起：grid-template-rows 从 0fr 过渡到 1fr，内容多高都能动画，
-   不用像 max-height 那样猜一个够大的值。对齐 Qt 版 PclSideBar 的折叠行为。 */
+   不用像 max-height 那样猜一个够大的值。对齐 Qt 版 PclSideBar 的折叠行为。
+   条目必须裹在 .nav-children-inner 里只占一行——直接把 N 个条目摆进来的话，
+   0fr 只管得住第一行，其余 N-1 个会落进 auto 的隐式行，收起后照样占着高度。 */
 .nav-children {
-  display: grid; gap: 2px; padding: 0 0 0 8px;
+  display: grid; padding: 0 0 0 8px;
   grid-template-rows: 0fr;
-  visibility: hidden;
   transition: grid-template-rows 220ms cubic-bezier(.2, .9, .25, 1), padding 220ms ease;
 }
-.nav-children > * { min-height: 0; overflow: hidden; }
+.nav-children-inner { min-height: 0; overflow: hidden; display: grid; gap: 2px; }
 .nav-section.open > .nav-children {
-  grid-template-rows: 1fr; visibility: visible; padding: 2px 0 6px 8px;
+  grid-template-rows: 1fr; padding: 2px 0 6px 8px;
 }
 .nav-children .nav-item { padding: 7px 10px; font-size: 12.5px; }
 .nav-chevron {
@@ -504,7 +505,9 @@ body.has-bg .sidebar, body.has-bg .main-content, body.has-bg .page-header { back
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
-@media (max-width: 1080px) {
+/* 900 而不是 1080：打包版默认开出来的 Edge 窗口就是 1050 宽，按 1080 算的话
+   一启动就是纯图标态，文字永远见不着。 */
+@media (max-width: 900px) {
   .sidebar { width: 64px; min-width: 64px; }
   .sidebar-title .nav-label, .nav-item .nav-label, .nav-group-title, .sidebar-edit .nav-label { display: none; }
   .sidebar-edit { justify-content: center; padding: 8px; }

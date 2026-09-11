@@ -106,7 +106,7 @@ function navSection(id: string, head: NavChild, children: NavChild[]): string {
         <span class="nav-icon">${head.icon}</span><span class="nav-label">${head.label}</span>
         <span class="nav-chevron" data-section-toggle="${id}" role="button" aria-label="展开或收起">▾</span>
       </a>
-      <div class="nav-children">${children.map(navChild).join('')}</div>
+      <div class="nav-children"><div class="nav-children-inner">${children.map(navChild).join('')}</div></div>
     </div>`;
 }
 
