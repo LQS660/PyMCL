@@ -19,6 +19,72 @@ static void die(const wchar_t *msg) {
     ExitProcess(1);
 }
 
+/* ---- window chrome ------------------------------------------------------
+   Controls created without an explicit font inherit SYSTEM_FONT, a bitmap
+   face from the Windows 3.x days: jagged at 100% and stretched to mush on any
+   scaled display. Everything below draws with the shell's own UI font instead
+   and sizes itself from the real DPI. */
+static int g_dpi = 96;
+static HFONT g_ui_font;
+static HFONT g_ui_font_title;
+
+/* design pixels (96 dpi) -> device pixels */
+static int dp(int px) { return MulDiv(px, g_dpi, 96); }
+
+static void ui_init(void) {
+    HMODULE u32 = GetModuleHandleW(L"user32.dll");
+    if (u32) {
+        typedef BOOL(WINAPI * set_aware_fn)(void);
+        set_aware_fn set_aware = (set_aware_fn)(void *)GetProcAddress(u32, "SetProcessDPIAware");
+        if (set_aware) set_aware(); /* without this Windows bitmap-stretches the whole window */
+    }
+    HDC dc = GetDC(NULL);
+    if (dc) {
+        g_dpi = GetDeviceCaps(dc, LOGPIXELSX);
+        ReleaseDC(NULL, dc);
+    }
+    NONCLIENTMETRICSW ncm;
+    memset(&ncm, 0, sizeof(ncm));
+    ncm.cbSize = sizeof(ncm);
+    if (!SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, ncm.cbSize, &ncm, 0)) {
+        /* pre-Vista layout has no iPaddedBorderWidth; retry with the short struct */
+        memset(&ncm, 0, sizeof(ncm));
+        ncm.cbSize = sizeof(ncm) - sizeof(int);
+        if (!SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, ncm.cbSize, &ncm, 0)) {
+            g_ui_font = g_ui_font_title = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+            return;
+        }
+    }
+    g_ui_font = CreateFontIndirectW(&ncm.lfMessageFont);
+    ncm.lfMessageFont.lfWeight = FW_SEMIBOLD;
+    ncm.lfMessageFont.lfHeight = MulDiv(ncm.lfMessageFont.lfHeight, 5, 4); /* lfHeight is negative */
+    g_ui_font_title = CreateFontIndirectW(&ncm.lfMessageFont);
+    if (!g_ui_font) g_ui_font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    if (!g_ui_font_title) g_ui_font_title = g_ui_font;
+}
+
+static void ui_font(HWND w, HFONT f) {
+    if (w && f) SendMessageW(w, WM_SETFONT, (WPARAM)f, TRUE);
+}
+
+/* place a window of the given client size in the middle of the work area */
+static void ui_center(HWND w, int client_w, int client_h) {
+    RECT rc = { 0, 0, client_w, client_h };
+    AdjustWindowRect(&rc, (DWORD)GetWindowLongPtrW(w, GWL_STYLE), FALSE);
+    int ww = rc.right - rc.left;
+    int wh = rc.bottom - rc.top;
+    RECT work;
+    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) {
+        work.left = work.top = 0;
+        work.right = GetSystemMetrics(SM_CXSCREEN);
+        work.bottom = GetSystemMetrics(SM_CYSCREEN);
+    }
+    SetWindowPos(w, NULL,
+                 work.left + ((work.right - work.left) - ww) / 2,
+                 work.top + ((work.bottom - work.top) - wh) / 2,
+                 ww, wh, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 static int read_all(const wchar_t *path, char *out, int cap) {
     FILE *f = _wfopen(path, L"rb");
     if (!f) return 0;
@@ -65,13 +131,14 @@ static HWND show_splash(void) {
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = L"PyMCLSplash";
     RegisterClassW(&wc);
-    int sw = GetSystemMetrics(SM_CXSCREEN);
-    int sh = GetSystemMetrics(SM_CYSCREEN);
     HWND w = CreateWindowExW(WS_EX_TOPMOST, L"PyMCLSplash", L"PyMCL",
-        WS_POPUP | WS_CAPTION | WS_VISIBLE, sw / 2 - 200, sh / 2 - 50, 400, 100,
+        WS_POPUP | WS_CAPTION, 0, 0, dp(400), dp(104),
         NULL, NULL, wc.hInstance, NULL);
-    CreateWindowExW(0, L"STATIC", L"正在解压运行时，请稍候…",
-        WS_CHILD | WS_VISIBLE | SS_CENTER, 10, 28, 370, 24, w, NULL, wc.hInstance, NULL);
+    ui_center(w, dp(400), dp(64));
+    HWND text = CreateWindowExW(0, L"STATIC", L"正在解压运行时，请稍候…",
+        WS_CHILD | WS_VISIBLE | SS_CENTER, dp(12), dp(22), dp(376), dp(26),
+        w, NULL, wc.hInstance, NULL);
+    ui_font(text, g_ui_font);
     ShowWindow(w, SW_SHOW);
     UpdateWindow(w);
     pump();
@@ -214,10 +281,31 @@ static int bridge_dlls_ok(const wchar_t *bridgedir, wchar_t *missing, size_t mis
     return 1;
 }
 
+#define STAY_ID_TITLE 101
+#define STAY_ID_BODY  102
+#define STAY_ID_QUIT  103
+
 static LRESULT CALLBACK stay_wnd_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
-    if (m == WM_CLOSE || m == WM_DESTROY) {
+    switch (m) {
+    case WM_CTLCOLORSTATIC: {
+        /* headline in near-black, explanation in grey, both on the window face */
+        HDC dc = (HDC)wp;
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, GetDlgCtrlID((HWND)lp) == STAY_ID_TITLE ? RGB(26, 26, 26) : RGB(92, 92, 92));
+        return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+    }
+    case WM_COMMAND:
+        if (LOWORD(wp) == STAY_ID_QUIT) {
+            PostQuitMessage(0);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+    case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
+    default:
+        break;
     }
     return DefWindowProcW(w, m, wp, lp);
 }
@@ -231,19 +319,44 @@ static int stay_until_closed(HANDLE bridge_proc, int port) {
     wc.hInstance = GetModuleHandleW(NULL);
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.hIcon = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(1));
+    if (!wc.hIcon) wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
     wc.lpszClassName = L"PyMCLStay";
     RegisterClassW(&wc);
+    const int cw = dp(480);
+    const int ch = dp(178);
+    const int pad = dp(24);
     HWND w = CreateWindowExW(0, L"PyMCLStay", L"PyMCL 运行中",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 360, 140, NULL, NULL, wc.hInstance, NULL);
-    CreateWindowExW(0, L"STATIC",
-        L"启动器后端已在运行。\r\n关闭本窗口将退出 PyMCL。\r\n界面在 Edge 应用窗中。",
-        WS_CHILD | WS_VISIBLE | SS_LEFT, 16, 24, 320, 70, w, NULL, wc.hInstance, NULL);
+        0, 0, cw, ch, NULL, NULL, wc.hInstance, NULL);
+    ui_center(w, cw, ch);
+    HWND title = CreateWindowExW(0, L"STATIC", L"PyMCL 正在运行",
+        WS_CHILD | WS_VISIBLE | SS_LEFT, pad, dp(18), cw - pad * 2, dp(26),
+        w, (HMENU)STAY_ID_TITLE, wc.hInstance, NULL);
+    HWND body = CreateWindowExW(0, L"STATIC",
+        L"启动器后端已在运行，界面在 Edge 应用窗口里。\r\n"
+        L"关掉这个窗口就会退出 PyMCL。",
+        WS_CHILD | WS_VISIBLE | SS_LEFT, pad, dp(52), cw - pad * 2, dp(52),
+        w, (HMENU)STAY_ID_BODY, wc.hInstance, NULL);
+    HWND quit = CreateWindowExW(0, L"BUTTON", L"退出 PyMCL",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        cw - pad - dp(112), ch - dp(50), dp(112), dp(32),
+        w, (HMENU)STAY_ID_QUIT, wc.hInstance, NULL);
+    ui_font(title, g_ui_font_title);
+    ui_font(body, g_ui_font);
+    ui_font(quit, g_ui_font);
     ShowWindow(w, SW_SHOW);
     UpdateWindow(w);
 
     MSG msg;
     for (;;) {
+        /* Sleep in the wait instead of spinning on Sleep(200): the window stays
+           responsive to clicks while the bridge handle is still watched. */
+        DWORD r = MsgWaitForMultipleObjects(1, &bridge_proc, FALSE, 200, QS_ALLINPUT);
+        if (r == WAIT_OBJECT_0) {
+            MessageBoxW(NULL, L"C 桥已退出，界面将无法连接。", L"PyMCL", MB_ICONERROR);
+            return 1;
+        }
         while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
                 TerminateProcess(bridge_proc, 0);
@@ -252,12 +365,7 @@ static int stay_until_closed(HANDLE bridge_proc, int port) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        if (WaitForSingleObject(bridge_proc, 0) == WAIT_OBJECT_0) {
-            MessageBoxW(NULL, L"C 桥已退出，界面将无法连接。", L"PyMCL", MB_ICONERROR);
-            return 1;
-        }
         /* If health dies unexpectedly, still keep the stay window. */
-        Sleep(200);
         (void)port;
     }
 }
@@ -285,6 +393,7 @@ static HANDLE open_edge_app(const wchar_t *url) {
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show) {
     (void)inst; (void)prev; (void)cmdline; (void)show;
+    ui_init(); /* DPI + shell UI font, before anything puts a window on screen */
     wchar_t self[MAX_PATH];
     if (!GetModuleFileNameW(NULL, self, MAX_PATH)) die(L"无法定位自身");
 
