@@ -7,7 +7,9 @@
     "dev": "eziapp-builder --mode debug",
     "build:web": "vite build",
     "build": "eziapp-builder --mode release",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test:layout": "node tests/layout_geom.fuzz.ts"
   },
   "dependencies": {
     "@eziapp-org/bridge": "0.0.0-beta.2"

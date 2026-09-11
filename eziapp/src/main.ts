@@ -4,32 +4,40 @@ import { router, type PageKey } from './router';
 import { store } from './store';
 import { initBridgeLifecycle, toast, clearPageCleanups, applyAppearance } from './ui';
 import { installRipple, pageSwap, pop } from './motion';
+// 极小模块，静态引它不会把 dashboard chunk 拽进入口包（见 layout_bus 头注释）。
+import { requestLayoutEdit } from './layout_bus';
 // 只取类型：`import type` 会被编译掉，不会把 downloads chunk 拽进入口包。
 import type { DownloadCategory } from './pages/downloads';
 
 const app = document.getElementById('app')!;
 
-const DOWNLOAD_CHILDREN: { key: PageKey; label: string }[] = [
-  { key: 'vanilla', label: '原版游戏' },
-  { key: 'mods-catalog', label: 'Mod' },
-  { key: 'modpacks', label: '整合包' },
-  { key: 'datapacks', label: '数据包' },
-  { key: 'resourcepacks', label: '资源包' },
-  { key: 'shaders', label: '光影包' },
-  { key: 'worlds', label: '世界' },
-  { key: 'java', label: 'Java' },
+// 窄屏下侧栏收成 64px 只剩图标，子项没有图标就会塌成一排空格子，所以每项都得配一个。
+type NavChild = { key: PageKey; label: string; icon: string };
+
+const DOWNLOAD_CHILDREN: NavChild[] = [
+  { key: 'vanilla', label: '原版游戏', icon: '🎮' },
+  { key: 'mods-catalog', label: 'Mod', icon: '🧩' },
+  { key: 'modpacks', label: '整合包', icon: '📦' },
+  { key: 'datapacks', label: '数据包', icon: '🗂' },
+  { key: 'resourcepacks', label: '资源包', icon: '🎨' },
+  { key: 'shaders', label: '光影包', icon: '✨' },
+  { key: 'worlds', label: '世界', icon: '🌍' },
+  { key: 'java', label: 'Java', icon: '☕' },
 ];
-const MORE_CHILDREN: { key: PageKey; label: string }[] = [
-  { key: 'instances', label: '实例' },
-  { key: 'mods', label: '模组' },
-  { key: 'accounts', label: '账号' },
-  { key: 'multiplayer', label: '联机' },
-  { key: 'servers', label: '服务器' },
-  { key: 'playtime', label: '时长' },
-  { key: 'feedback', label: '反馈' },
-  { key: 'settings', label: '设置' },
-  { key: 'tools', label: '工具' },
+const MORE_CHILDREN: NavChild[] = [
+  { key: 'instances', label: '实例', icon: '🗃' },
+  { key: 'mods', label: '模组', icon: '🔧' },
+  { key: 'accounts', label: '账号', icon: '👤' },
+  { key: 'multiplayer', label: '联机', icon: '🛰' },
+  { key: 'servers', label: '服务器', icon: '🌐' },
+  { key: 'playtime', label: '时长', icon: '⏱' },
+  { key: 'feedback', label: '反馈', icon: '💬' },
+  { key: 'settings', label: '设置', icon: '⚙' },
+  { key: 'tools', label: '工具', icon: '🧰' },
 ];
+
+const navChild = (it: NavChild) =>
+  `<a class="nav-item" data-page="${it.key}" title="${it.label}"><span class="nav-icon">${it.icon}</span><span class="nav-label">${it.label}</span></a>`;
 
 const TITLES: Record<PageKey, string> = {
   launch: '启动', instances: '实例', downloads: '下载', vanilla: '原版游戏',
@@ -48,15 +56,16 @@ function renderShell() {
         <a class="nav-item" data-page="launch"><span class="nav-icon">▶</span><span class="nav-label">启动</span></a>
         <div class="nav-section">
           <a class="nav-item" data-page="downloads"><span class="nav-icon">⬇</span><span class="nav-label">下载</span></a>
-          <div class="nav-children">${DOWNLOAD_CHILDREN.map((it) => `<a class="nav-item" data-page="${it.key}"><span class="nav-label">${it.label}</span></a>`).join('')}</div>
+          <div class="nav-children">${DOWNLOAD_CHILDREN.map(navChild).join('')}</div>
         </div>
         <a class="nav-item" data-page="ai"><span class="nav-icon">✦</span><span class="nav-label">AI 助手</span></a>
         <div class="nav-section">
           <a class="nav-item" data-page="more"><span class="nav-icon">⋯</span><span class="nav-label">更多</span></a>
-          <div class="nav-children">${MORE_CHILDREN.map((it) => `<a class="nav-item" data-page="${it.key}"><span class="nav-label">${it.label}</span></a>`).join('')}</div>
+          <div class="nav-children">${MORE_CHILDREN.map(navChild).join('')}</div>
         </div>
         <a class="nav-item" data-page="tasks"><span class="nav-icon">☰</span><span class="nav-label">下载任务</span><span class="badge" id="task-badge" style="display:none">0</span></a>
       </nav>
+      <button class="sidebar-edit" id="edit-layout" type="button" title="自由调整启动页布局：拖动、缩放、增删卡片"><span class="nav-icon">✎</span><span class="nav-label">编辑布局</span></button>
       <div class="sidebar-foot" id="bridge-status">桥接: 未连接</div>
       <div class="sidebar-resizer" id="sidebar-resizer"></div>
     </div>
@@ -72,6 +81,10 @@ function renderShell() {
     // 指针停到侧栏条目上就把那一页的 chunk 拉回来。真点下去时模块通常已经在内存里，
     // 转场不必再等一次网络/磁盘往返。
     el.addEventListener('pointerenter', () => { void loadPage(key).catch(() => undefined); }, { passive: true });
+  });
+  // 不在启动页时画布还没挂上：layout_bus 记下这次请求，切过去后由画布自己领走
+  document.getElementById('edit-layout')?.addEventListener('click', () => {
+    if (!requestLayoutEdit()) router.navigate('launch');
   });
   const resizer = document.getElementById('sidebar-resizer');
   resizer?.addEventListener('pointerdown', (ev) => {

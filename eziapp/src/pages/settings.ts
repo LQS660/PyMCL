@@ -4,18 +4,20 @@ import { store } from '../store';
 import { applyAppearance, confirmDialog, dismissOverlay, formDialog, inputDialog, showError, showSkeleton, toast } from '../ui';
 import { escapeHtml, errorMessage } from './common';
 import { showGlobalMods } from './dialogs';
+import { requestLayoutEdit } from '../layout_bus';
 
 export async function renderSettingsPage(container: HTMLElement) {
   showSkeleton(container, 'rows', 6);
   try {
-    const [settings, multi, lang, langs] = await Promise.all([
+    const [settings, multi, lang, langs, layout] = await Promise.all([
       bridge.call<any>('get_settings'),
       bridge.call<boolean>('allow_multi_instance').catch(() => false),
       bridge.call<string>('get_language').catch(() => 'zh_CN'),
       bridge.call<Record<string, string>>('available_languages').catch(() => ({ zh_CN: '简体中文' })),
+      bridge.call<unknown>('get_layout').catch(() => null),
     ]);
     store.setSettings(settings);
-    render(container, store.mergedSettings(), { multi: !!multi, lang, langs });
+    render(container, store.mergedSettings(), { multi: !!multi, lang, langs, layout: layoutState(layout) });
   } catch (e: any) {
     showError(container, '加载设置失败: ' + (e.message || '未知错误'), () => renderSettingsPage(container));
   }
@@ -28,7 +30,19 @@ function toggle(id: string, on: boolean) {
   return `<label class="toggle"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}><span class="toggle-slider"></span></label>`;
 }
 
-interface Extra { multi: boolean; lang: string; langs: Record<string, string> }
+interface Extra { multi: boolean; lang: string; langs: Record<string, string>; layout: LayoutState | null }
+
+/** get_layout / activate_layout_profile … 这一组 RPC 都回同一个结构，取出要用的两项。 */
+interface LayoutState { profile: string; profiles: string[]; doc: unknown }
+function layoutState(raw: unknown): LayoutState | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const d = raw as Record<string, unknown>;
+  return {
+    profile: String(d.profile || ''),
+    profiles: Array.isArray(d.profiles) ? d.profiles.map(String) : [],
+    doc: d.doc,
+  };
+}
 
 function render(container: HTMLElement, s: any, extra: Extra) {
   container.innerHTML = `
@@ -66,6 +80,17 @@ function render(container: HTMLElement, s: any, extra: Extra) {
           <button class="btn" id="del-theme">删除主题</button>
           <button class="btn" id="import-theme">导入</button>
           <button class="btn" id="export-theme">导出</button>
+        </div>
+      </div>
+      <div class="card"><div class="settings-section-title">个性化布局</div>
+        ${row('启动页画布', '拖动、八向缩放、网格吸附、增删卡片', '<button class="btn" id="layout-edit">进入编辑</button>')}
+        ${row('布局方案', '存多套摆法随时切换；与 Qt 版界面共用同一份', '<select class="select" id="layout_profile" style="min-width:180px"></select>')}
+        <div class="form-row" style="margin-top:8px">
+          <button class="btn" id="layout-save-as">另存为方案</button>
+          <button class="btn" id="layout-del">删除方案</button>
+          <button class="btn" id="layout-reset">重置为默认</button>
+          <button class="btn" id="layout-import">导入</button>
+          <button class="btn" id="layout-export">导出</button>
         </div>
       </div>
       <div class="card"><div class="settings-section-title">下载与性能</div>
@@ -206,6 +231,7 @@ function render(container: HTMLElement, s: any, extra: Extra) {
     } catch (e) { toast(errorMessage(e, 'AI 连接失败'), 'error', 6000); }
     finally { btn.disabled = false; btn.textContent = '测试 AI 连接'; }
   });
+  wireLayout(extra.layout);
   document.getElementById('global-mods')?.addEventListener('click', () => void showGlobalMods());
   document.getElementById('goto-tools')?.addEventListener('click', () => router.navigate('tools'));
   document.getElementById('recommend')?.addEventListener('click', async () => {
@@ -276,6 +302,111 @@ function render(container: HTMLElement, s: any, extra: Extra) {
       const out = await bridge.call<string>('export_theme', { name: values.name.trim(), dest: (values.dest || '').trim() });
       toast(out ? `已导出：${out}` : '已导出主题', 'success');
     } catch (e) { toast(errorMessage(e, '导出失败'), 'error'); }
+  });
+}
+
+/** 导出：浏览器直接下地，不走后端文件对话框（对齐 Qt 版 export_current_layout 的产物格式）。 */
+function downloadJson(filename: string, data: unknown) {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+/** 导入：<input type=file> + FileReader，同样不必经过后端。取消选择时 resolve(null)。 */
+function pickJsonFile(): Promise<string | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json,application/json';
+    input.style.display = 'none';
+    const done = (value: string | null) => { input.remove(); resolve(value); };
+    input.addEventListener('cancel', () => done(null));
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      if (!file) { done(null); return; }
+      const reader = new FileReader();
+      reader.onload = () => done(String(reader.result || ''));
+      reader.onerror = () => done(null);
+      reader.readAsText(file, 'utf-8');
+    });
+    document.body.appendChild(input);
+    input.click();
+  });
+}
+
+/**
+ * 「个性化布局」组：方案切换 / 另存 / 删除 / 重置 / 导入导出 + 进入编辑。
+ * 这几个 RPC 回的都是完整的布局状态，拿回来直接重画下拉，不必再读一次。
+ */
+function wireLayout(initial: LayoutState | null) {
+  const select = document.getElementById('layout_profile') as HTMLSelectElement | null;
+  if (!select) return;
+  let state: LayoutState = initial || { profile: '', profiles: [], doc: null };
+
+  const paint = () => {
+    select.innerHTML = '<option value="">默认（未命名）</option>'
+      + state.profiles.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('');
+    select.value = state.profiles.includes(state.profile) ? state.profile : '';
+  };
+  paint();
+
+  /** 跑一个会改动布局的 RPC，成功就用回执刷新本组状态。 */
+  const run = async (method: string, params: Record<string, unknown>, ok: string, fail: string) => {
+    try {
+      const next = layoutState(await bridge.call<unknown>(method, params));
+      if (next) { state = next; paint(); }
+      toast(ok, 'success');
+      return true;
+    } catch (e) {
+      toast(errorMessage(e, fail), 'error');
+      paint(); // 切换失败时把下拉拨回真正生效的那个
+      return false;
+    }
+  };
+
+  document.getElementById('layout-edit')?.addEventListener('click', () => {
+    // 画布只活在启动页：不在那儿就先记下请求，切过去后它自己进编辑态
+    if (!requestLayoutEdit()) router.navigate('launch');
+  });
+  select.addEventListener('change', () => {
+    const name = select.value;
+    void run('activate_layout_profile', { name }, name ? `已切换到「${name}」` : '已切回默认布局', '切换失败');
+  });
+  document.getElementById('layout-save-as')?.addEventListener('click', async () => {
+    const name = await inputDialog('另存为布局方案', '方案名称', state.profile || '我的布局');
+    if (!name?.trim()) return;
+    await run('save_layout_profile', { name: name.trim() }, `已保存方案「${name.trim()}」`, '保存失败');
+  });
+  document.getElementById('layout-del')?.addEventListener('click', async () => {
+    if (!state.profile) { toast('当前用的是默认布局，没有可删除的方案', 'warning'); return; }
+    const name = state.profile;
+    if (!await confirmDialog('删除布局方案', `删除方案「${name}」？当前生效的布局本身不会变。`)) return;
+    await run('delete_layout_profile', { name }, `已删除方案「${name}」`, '删除失败');
+  });
+  document.getElementById('layout-reset')?.addEventListener('click', async () => {
+    if (!await confirmDialog('重置启动页布局', '恢复成内置默认摆法？当前未另存为方案的改动会丢失。')) return;
+    await run('reset_layout', {}, '布局已重置', '重置失败');
+  });
+  document.getElementById('layout-export')?.addEventListener('click', async () => {
+    try {
+      const cur = layoutState(await bridge.call<unknown>('get_layout'));
+      if (!cur?.doc) { toast('没有可导出的布局', 'warning'); return; }
+      downloadJson(`pymcl-layout-${cur.profile || 'default'}.json`, cur.doc);
+      toast('布局已导出', 'success');
+    } catch (e) { toast(errorMessage(e, '导出失败'), 'error'); }
+  });
+  document.getElementById('layout-import')?.addEventListener('click', async () => {
+    const text = await pickJsonFile();
+    if (text === null) return;
+    let doc: unknown;
+    try { doc = JSON.parse(text); }
+    catch { toast('这不是一份有效的 JSON 文件', 'error'); return; }
+    await run('import_layout', { doc }, '布局已导入，回到启动页即可看到', '导入失败');
   });
 }
 

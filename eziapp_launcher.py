@@ -21,6 +21,21 @@ ROOT = Path(__file__).resolve().parent
 LOOPBACK_HOST = "127.0.0.1"
 
 
+def _asset_root() -> Path:
+    """前端产物在哪儿：打包成 exe 后是 PyInstaller 的解包目录，源码运行就是项目目录。"""
+    bundled = getattr(sys, "_MEIPASS", None)
+    return Path(bundled) if bundled else ROOT
+
+
+def _data_root() -> Path:
+    """配置 / 实例 / 缓存落在哪儿。打包后交给 mclauncher 自己判断（exe 旁边优先，
+    目录不可写时退到 APPDATA），不能用 _MEIPASS——那是每次启动都会换的临时目录。"""
+    if getattr(sys, "frozen", False):
+        from mclauncher.utils import ROOT as portable_root
+        return Path(portable_root)
+    return ROOT
+
+
 def _ui_origin(url: str) -> str:
     parsed = urlparse(url)
     if (
@@ -89,7 +104,15 @@ def _start_static(directory: Path, bridge_config: dict[str, str]):
 def _start_bridge(token: str, allowed_origin: str):
     from bridge.server import BridgeState, _prepare_root, create_http_server
 
-    _prepare_root(ROOT)
+    root = _data_root()
+    root.mkdir(parents=True, exist_ok=True)
+    if getattr(sys, "frozen", False):
+        # 冻结包的模块都在 _MEIPASS 里，别再把 exe 旁边那个目录插到 sys.path 最前面，
+        # 否则用户放在 exe 同级的任意 .py 都能顶掉打进去的同名模块。
+        os.environ["PYMCL_HOME"] = str(root)
+        os.chdir(root)
+    else:
+        _prepare_root(root)
     from bridge.api import BackendAPI, EventBus
 
     bus = EventBus()
@@ -121,7 +144,7 @@ def main(argv=None):
     token = secrets.token_urlsafe(32)
     bridge_config: dict[str, str] = {}
     try:
-        dist_dir = ROOT / "eziapp" / "dist"
+        dist_dir = _asset_root() / "eziapp" / "dist"
         if args.ui_url:
             ui_url = args.ui_url
             ui_origin = _ui_origin(ui_url)
@@ -142,7 +165,7 @@ def main(argv=None):
         bridge_config.update({"rpc_url": f"http://{LOOPBACK_HOST}:{bridge_port}", "token": token})
         launch_url = _with_runtime_config(ui_url, bridge_config) if args.ui_url or static_server is None else ui_url
 
-        print(f"PYMCL_BRIDGE port={bridge_port} host={LOOPBACK_HOST} root={ROOT} auth=token")
+        print(f"PYMCL_BRIDGE port={bridge_port} host={LOOPBACK_HOST} root={_data_root()} auth=token")
         print(f"EziApp UI: {_safe_display_url(launch_url)}")
         if not args.no_browser:
             webbrowser.open(launch_url)

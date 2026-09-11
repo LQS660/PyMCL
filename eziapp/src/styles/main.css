@@ -224,11 +224,6 @@ body.has-bg .sidebar, body.has-bg .main-content, body.has-bg .page-header { back
   transition: box-shadow var(--transition), border-color var(--transition);
   animation: rise 400ms cubic-bezier(.2, .8, .2, 1) backwards;
 }
-.dash > .card:nth-child(2) { animation-delay: 50ms; }
-.dash > .card:nth-child(3) { animation-delay: 100ms; }
-.dash > .card:nth-child(4) { animation-delay: 150ms; }
-.dash > .card:nth-child(5) { animation-delay: 200ms; }
-.dash > .card:nth-child(n + 6) { animation-delay: 250ms; }
 .card-header { font-size: 15px; font-weight: 680; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
 .form-group { margin-bottom: 12px; }
 .form-label { display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 5px; }
@@ -366,8 +361,6 @@ body.has-bg .sidebar, body.has-bg .main-content, body.has-bg .page-header { back
 .grid-item-meta { font-size: 12px; color: var(--text-secondary); display: flex; gap: 8px; flex-wrap: wrap; }
 .grid-item-actions { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
 
-.dash { display: grid; grid-template-columns: 1.4fr .8fr; gap: 14px; align-items: start; }
-.dash-wide { grid-column: 1 / -1; }
 /* 底色不再参与动画。原来是让两层大渐变的 background-position 常年漂移，
    等于每帧重画整张 hero；现在渐变静止，只让一团光斑和一道扫光靠 transform 走。 */
 .hero {
@@ -492,11 +485,13 @@ body.has-bg .sidebar, body.has-bg .main-content, body.has-bg .page-header { back
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
 @media (max-width: 1080px) {
-  .dash { grid-template-columns: 1fr; }
   .sidebar { width: 64px; min-width: 64px; }
-  .sidebar-title .nav-label, .nav-item .nav-label, .nav-group-title { display: none; }
+  .sidebar-title .nav-label, .nav-item .nav-label, .nav-group-title, .sidebar-edit .nav-label { display: none; }
+  .sidebar-edit { justify-content: center; padding: 8px; }
   .nav-item { justify-content: center; padding: 9px; }
   .nav-children { padding-left: 0; }
+  /* 收起态只剩图标，子项靠略小一号跟顶层拉开层级 */
+  .nav-children .nav-item { padding: 7px; opacity: .82; font-size: 12px; }
   .nav-item .badge { margin-left: 0; position: absolute; transform: translate(14px, -10px); }
   .sidebar-nav .nav-item { position: relative; }
 }
@@ -573,3 +568,148 @@ details.faq summary:hover { color: var(--primary); }
 }
 .ctx-menu-item:hover { background: var(--bg-tertiary); }
 .ctx-menu-item.danger { color: var(--danger); }
+
+/* ======================================================================
+   启动页自由布局画布（对齐 Qt 版 app/dashboard.py）
+   Qt 里为拦鼠标 / 画点阵 / 防最小尺寸钉死写的胶水，在这里分别是
+   pointer-events:none、一张 radial-gradient 背景、overflow:auto。
+   ====================================================================== */
+.dash-host {
+  position: relative;
+  height: calc(100vh - var(--header-height) - 46px);
+  min-height: 560px;
+}
+.dash-canvas {
+  position: relative;
+  width: 100%; height: 100%;
+  overflow: hidden;
+  border-radius: var(--radius);
+}
+.dash-grid {
+  position: absolute; inset: 0;
+  pointer-events: none;
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--text) 28%, transparent) 1px, transparent 1.3px);
+  opacity: 0;
+  transition: opacity 220ms ease;
+}
+.dash-canvas.editing .dash-grid { opacity: 1; }
+
+.dash-card {
+  position: absolute;
+  display: flex; flex-direction: column;
+  background: color-mix(in srgb, var(--bg-secondary) 94%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  transition: box-shadow var(--transition), border-color var(--transition);
+}
+.dash-card.editing {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--primary) 55%, var(--border));
+  cursor: move;
+  user-select: none;
+}
+.dash-card.editing:hover { box-shadow: var(--shadow-lg); }
+.dash-card.dragging { box-shadow: var(--shadow-lg); border-color: var(--primary); border-style: solid; }
+.dash-card.entering { animation: dash-card-in 180ms cubic-bezier(.2, .8, .2, 1); }
+.dash-card.leaving { animation: dash-card-out 130ms ease forwards; pointer-events: none; }
+@keyframes dash-card-in { from { opacity: 0; transform: scale(.96); } }
+@keyframes dash-card-out { to { opacity: 0; transform: scale(.96); } }
+
+.dash-card-head {
+  display: flex; align-items: center; gap: 8px;
+  height: 40px; flex: 0 0 40px;
+  padding: 0 10px 0 14px;
+  font-size: 14px; font-weight: 680;
+  border-bottom: 1px solid var(--border-light);
+}
+.dash-card-icon { font-size: 14px; opacity: .85; }
+.dash-card-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dash-card-tool {
+  border: 0; background: transparent; color: var(--text-secondary);
+  width: 26px; height: 26px; border-radius: 8px; cursor: pointer;
+  font: inherit; font-size: 13px; display: inline-grid; place-items: center;
+  transition: background var(--transition), color var(--transition);
+}
+.dash-card-tool:hover { background: var(--bg-tertiary); color: var(--text); }
+.dash-card-tool.danger:hover { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.dash-card-body { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; }
+.dash-card-body.bare { padding: 0; }
+/* 编辑态：正文不吃鼠标，落到卡片上的按下就是整卡拖动（替代 Qt 的 _Shield） */
+.dash-card.editing .dash-card-body { pointer-events: none; user-select: none; opacity: .92; }
+
+/* 8 向缩放手柄：贴在卡片内缘，角上画一个小方块提示可缩放 */
+.dash-grip { position: absolute; display: none; z-index: 3; }
+.dash-card.editing .dash-grip { display: block; }
+.dash-grip-n, .dash-grip-s { left: 14px; right: 14px; height: 8px; }
+.dash-grip-e, .dash-grip-w { top: 14px; bottom: 14px; width: 8px; }
+.dash-grip-n { top: 0; } .dash-grip-s { bottom: 0; }
+.dash-grip-e { right: 0; } .dash-grip-w { left: 0; }
+.dash-grip-ne, .dash-grip-nw, .dash-grip-se, .dash-grip-sw { width: 14px; height: 14px; }
+.dash-grip-ne { top: 0; right: 0; } .dash-grip-nw { top: 0; left: 0; }
+.dash-grip-se { bottom: 0; right: 0; } .dash-grip-sw { bottom: 0; left: 0; }
+.dash-grip-ne::after, .dash-grip-nw::after, .dash-grip-se::after, .dash-grip-sw::after {
+  content: ''; position: absolute; inset: 3px; border-radius: 3px;
+  background: var(--primary); box-shadow: 0 0 0 2px var(--bg-secondary);
+}
+
+/* 编辑工具条 / 查看态的悬浮入口 */
+.dash-toolbar {
+  position: absolute; top: 8px; right: 8px; z-index: 6000;
+  display: none; align-items: center; gap: 8px;
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--bg-secondary) 96%, transparent);
+  border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-lg);
+  animation: dash-toolbar-in 200ms cubic-bezier(.2, .8, .2, 1);
+}
+.dash-canvas.editing .dash-toolbar { display: flex; }
+@keyframes dash-toolbar-in { from { opacity: 0; transform: translateY(-10px); } }
+.dash-toolbar-label { font-size: 12px; color: var(--text-secondary); }
+.dash-grid-select { padding: 4px 8px; font-size: 12px; }
+.dash-edit-fab {
+  position: absolute; top: 10px; right: 10px; z-index: 5999;
+  padding: 5px 11px; border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-secondary) 88%, transparent);
+  color: var(--text-secondary); font: inherit; font-size: 12px; cursor: pointer;
+  opacity: .55;
+  transition: opacity var(--transition), color var(--transition), border-color var(--transition), transform var(--transition), box-shadow var(--transition);
+}
+.dash-canvas:hover .dash-edit-fab { opacity: 1; }
+.dash-edit-fab:hover { color: var(--primary); border-color: var(--primary); transform: translateY(-1px); box-shadow: var(--shadow); }
+.dash-canvas.editing .dash-edit-fab { display: none; }
+
+/* 添加卡片调色板 */
+.dash-palette { width: min(520px, calc(100vw - 32px)); }
+.dash-palette-hint { font-size: 13px; color: var(--text-secondary); margin-bottom: 10px; }
+.dash-palette-list { display: flex; flex-direction: column; gap: 6px; max-height: 56vh; overflow: auto; }
+.dash-palette-row {
+  display: flex; align-items: center; gap: 10px; text-align: left;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--bg-secondary); color: var(--text); font: inherit; font-size: 13px; cursor: pointer;
+  transition: border-color var(--transition), background var(--transition), transform var(--transition);
+}
+.dash-palette-row:hover { border-color: var(--primary); background: var(--primary-light); transform: translateX(2px); }
+
+/* 卡片正文 */
+.dash-hero { min-height: 100%; padding: 16px 20px; gap: 10px; justify-content: center; }
+.dash-hero .hero-title { font-size: 24px; }
+.dash-log { height: 100%; max-height: none; }
+.dash-log:empty::before { content: attr(data-placeholder); color: var(--text-disabled); }
+.dash-notes { width: 100%; height: 100%; resize: none; display: block; }
+.dash-news-head { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+.dash-quick .quick-grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+.dash-stat { font-size: 22px; font-weight: 760; margin-bottom: 8px; }
+.dash-stat-detail { font-size: 12.5px; color: var(--text-secondary); white-space: pre-line; line-height: 1.6; }
+.dash-config .form-group { margin-bottom: 8px; }
+
+/* 侧栏底部「编辑布局」入口（对齐 Qt 版 pcl_chrome 的 edit_btn） */
+.sidebar-edit {
+  margin: 0 10px 6px; padding: 8px 10px; border-radius: 10px;
+  border: 1px dashed var(--border); background: transparent;
+  color: var(--text-secondary); font: inherit; font-size: 12.5px; cursor: pointer;
+  display: flex; align-items: center; gap: 8px;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+.sidebar-edit:hover { background: var(--bg-tertiary); color: var(--primary); border-color: var(--primary); }

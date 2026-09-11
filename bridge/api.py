@@ -1262,7 +1262,7 @@ class BackendAPI:
                 fetchers.append(("curseforge", lambda: modpack_mod.search_cf_modpacks(
                     dm, q, limit=25, api_key=key, game_version=gv or None,
                     categories=cats or None)))
-            hits = self._gather_hits(fetchers)
+            hits = mods_mod.rank_hits(self._gather_hits(fetchers), q, "modpack")
         else:
             hits = sorted(
                 hits,
@@ -1272,24 +1272,26 @@ class BackendAPI:
         self._pack_cache = rows
         return rows
 
+    def _popular_mods_offline(self, src: str) -> list[dict]:
+        """联网拿不到热门榜时退回内置的中文推荐清单。"""
+        rows = []
+        for title, mod_src, key, *_rest in POPULAR_MODS:
+            if src != "all" and mod_src != src:
+                continue
+            rows.append({
+                "name": title,
+                "author": "CurseForge" if mod_src == "curseforge" else "Modrinth",
+                "downloads": 0,
+                "id": key if mod_src == "curseforge" else None,
+                "slug": None if mod_src == "curseforge" else key,
+                "source": mod_src,
+            })
+        self._mod_cache = rows
+        return rows
+
     def search_mods(self, query: str, source: str, extra: dict | None = None) -> list[dict]:
         src = self._catalog_source(source)
         q = (query or "").strip()
-        if not q:
-            rows = []
-            for title, mod_src, key, *_rest in POPULAR_MODS:
-                if src != "all" and mod_src != src:
-                    continue
-                rows.append({
-                    "name": title,
-                    "author": "CurseForge" if mod_src == "curseforge" else "Modrinth",
-                    "downloads": 0,
-                    "id": key if mod_src == "curseforge" else None,
-                    "slug": None if mod_src == "curseforge" else key,
-                    "source": mod_src,
-                })
-            self._mod_cache = rows
-            return rows
         dm = DownloadManager(threads=2)
         extra = extra or {}
         gv = extra.get("game_version") or extra.get("version") or ""
@@ -1305,12 +1307,21 @@ class BackendAPI:
                 dm, q, limit=30, game_version=gv or None, categories=cats)))
         if src in ("all", "curseforge"):
             fetchers.append(("curseforge", lambda: mods_mod.search_curseforge(
-                dm, q, limit=30, api_key=CONFIG.get("curseforge_api_key"),
+                dm, q or None, limit=30, api_key=CONFIG.get("curseforge_api_key"),
                 class_id=mods_mod.CF_CLASS_MOD, game_version=gv or None,
                 categories=cf_cats or None)))
-        hits = self._gather_hits(fetchers)
+        # 空查询走的是同一条路：两个源各自按下载量取头一页，合并后按折算下载量排，
+        # 也就是「热门推荐」。联网整个失败时才退回内置清单。
+        try:
+            hits = self._gather_hits(fetchers)
+        except Exception:
+            if q:
+                raise
+            hits = []
+        if not q and not hits:
+            return self._popular_mods_offline(src)
         rows = []
-        for h in hits:
+        for h in mods_mod.rank_hits(hits, q, "mod"):
             rows.append({
                 "name": h.get("title") or h.get("name") or "?",
                 "author": h.get("author") or "?",
@@ -1400,7 +1411,7 @@ class BackendAPI:
                 game_version=gv or None,
                 categories=cf_cats or None,
             )))
-        for hit in self._gather_hits(fetchers):
+        for hit in mods_mod.rank_hits(self._gather_hits(fetchers), q, kind):
             row = self._content_row(hit, hit.get("source") or "")
             if hit.get("source") == "curseforge":
                 row["description"] = hit.get("summary") or row["description"]
@@ -2034,6 +2045,80 @@ class BackendAPI:
     def export_theme(self, name: str, dest: str) -> str:
         from mclauncher import themes as themes_mod
         return themes_mod.export_theme(name, dest)
+
+    # ==================================================================
+    # 新增 API：启动页自定义布局
+    # 与 Qt 版 app/dashboard.py 共用 mclauncher.ui_layout 这一份数据层和
+    # config.json 里同一组键：一边拖好的布局，另一边打开就是同一个。
+    # 文档格式见 ui_layout 模块头；导入/导出的文件读写由前端自己完成，
+    # 这里只收发已经解析好的 JSON 对象。
+    # ==================================================================
+
+    def get_layout(self) -> dict:
+        """当前生效布局 + 方案列表 + 内置默认 + 各卡片最小尺寸，一次拿全。"""
+        from mclauncher import ui_layout as lm
+        return {
+            "doc": lm.load_active_doc().to_dict(),
+            "profile": lm.active_profile(),
+            "profiles": sorted(lm.list_profiles().keys()),
+            "default": lm.default_doc().to_dict(),
+            "min_sizes": {k: list(v) for k, v in lm.CARD_MIN_SIZE.items()},
+        }
+
+    def save_layout(self, doc: dict) -> dict:
+        """落盘当前布局。命名方案生效中时同步写回方案表（对齐 Qt 版
+        LaunchPage._persist_layout_now），切换回来不丢改动。"""
+        from mclauncher import ui_layout as lm
+        parsed = lm.parse_doc(doc)
+        if parsed is None:
+            raise ValueError("不是有效的布局文档")
+        name = lm.active_profile()
+        lm.save_active_doc(parsed)
+        if name:
+            lm.save_profile(name, parsed)
+        return {"profile": name}
+
+    def save_layout_profile(self, name: str, doc: dict | None = None) -> dict:
+        """把布局另存为方案并切换到它。doc 缺省 = 当前生效布局。"""
+        from mclauncher import ui_layout as lm
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("方案名称不能为空")
+        if doc is None:
+            parsed = lm.load_active_doc()
+        else:
+            parsed = lm.parse_doc(doc)
+            if parsed is None:
+                raise ValueError("不是有效的布局文档")
+        lm.save_profile(name, parsed)
+        return self.get_layout()
+
+    def activate_layout_profile(self, name: str = "") -> dict:
+        """切换布局方案；空名 = 回到内置默认。"""
+        from mclauncher import ui_layout as lm
+        lm.activate_profile(name)
+        return self.get_layout()
+
+    def delete_layout_profile(self, name: str) -> dict:
+        from mclauncher import ui_layout as lm
+        if not lm.delete_profile(name):
+            raise ValueError(f"布局方案「{name}」不存在")
+        return self.get_layout()
+
+    def reset_layout(self) -> dict:
+        from mclauncher import ui_layout as lm
+        lm.reset_to_default()
+        return self.get_layout()
+
+    def import_layout(self, doc: dict) -> dict:
+        """导入一份布局文档（前端已读好的 JSON）。未知卡片类型丢弃，
+        结构不对抛错；应用后不改当前方案名（对齐 Qt 版 import_layout_file）。"""
+        from mclauncher import ui_layout as lm
+        parsed = lm.parse_doc(doc)
+        if parsed is None:
+            raise ValueError("不是有效的布局文件")
+        lm.save_active_doc(parsed)
+        return self.get_layout()
 
     # ==================================================================
     # 新增 API：官方启动器迁移
