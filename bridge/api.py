@@ -762,6 +762,11 @@ class BackendAPI:
             "offline_skin": CONFIG.get("offline_skin") or "default",
             "default_java": CONFIG.get("default_java") or "",
             "ui_dark": bool(CONFIG.get("ui_dark", False)),
+            # 侧栏编排：Qt 版一直在写这几个键，之前没暴露给桥，非 Qt 前端只能
+            # 画一套写死的侧栏，用户在 Qt 里排好的顺序被静默忽略。
+            "ui_nav_order": list(CONFIG.get("ui_nav_order") or []),
+            "ui_nav_pinned": list(CONFIG.get("ui_nav_pinned") or []),
+            "ui_nav_hidden": list(CONFIG.get("ui_nav_hidden") or []),
         }
 
     def save_settings(self, data: dict):

@@ -127,8 +127,28 @@ body.has-bg .sidebar, body.has-bg .main-content, body.has-bg .page-header { back
   line-height: 18px;
 }
 .nav-section > .nav-item { font-weight: 650; }
-.nav-children { display: grid; gap: 2px; padding: 2px 0 6px 8px; }
+/* 分组默认收起：grid-template-rows 从 0fr 过渡到 1fr，内容多高都能动画，
+   不用像 max-height 那样猜一个够大的值。对齐 Qt 版 PclSideBar 的折叠行为。 */
+.nav-children {
+  display: grid; gap: 2px; padding: 0 0 0 8px;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  transition: grid-template-rows 220ms cubic-bezier(.2, .9, .25, 1), padding 220ms ease;
+}
+.nav-children > * { min-height: 0; overflow: hidden; }
+.nav-section.open > .nav-children {
+  grid-template-rows: 1fr; visibility: visible; padding: 2px 0 6px 8px;
+}
 .nav-children .nav-item { padding: 7px 10px; font-size: 12.5px; }
+.nav-chevron {
+  margin-left: auto; font-size: 11px; line-height: 1; padding: 3px 4px;
+  border-radius: 6px; color: var(--text-secondary);
+  transition: transform 220ms cubic-bezier(.2, .9, .25, 1), background var(--transition);
+}
+.nav-chevron:hover { background: var(--bg-tertiary); color: var(--primary); }
+.nav-section:not(.open) .nav-chevron { transform: rotate(-90deg); }
+/* 子页面是从页内 tab 进的时候，父分组也要有个在场感 */
+.nav-item.active-branch:not(.active) { color: var(--primary); }
 .sidebar-foot {
   padding: 10px 14px 14px;
   font-size: 11px;

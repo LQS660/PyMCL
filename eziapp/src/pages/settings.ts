@@ -127,7 +127,9 @@ function render(container: HTMLElement, s: any, extra: Extra) {
           <button class="btn" id="recommend">智能推荐</button>
           <button class="btn" id="global-mods">全局 Mod</button>
           <button class="btn" id="goto-tools">维护工具</button>
+          <button class="btn" id="goto-playtime">游玩时长</button>
         </div>
+        <div style="font-size:11px;color:var(--text-disabled)">维护工具与游玩时长不再占用侧栏位置，从这里或启动页的快捷入口卡片进入。</div>
       </div>
       <div class="card"><div class="settings-section-title">AI 助手</div>
         ${row('接入方式', '公益接口已内置', `<select class="select" id="ai_mode"><option value="public" ${s.ai_mode !== 'custom' ? 'selected' : ''}>公益接口</option><option value="custom" ${s.ai_mode === 'custom' ? 'selected' : ''}>自定义 NewAPI</option></select>`)}
@@ -234,6 +236,7 @@ function render(container: HTMLElement, s: any, extra: Extra) {
   wireLayout(extra.layout);
   document.getElementById('global-mods')?.addEventListener('click', () => void showGlobalMods());
   document.getElementById('goto-tools')?.addEventListener('click', () => router.navigate('tools'));
+  document.getElementById('goto-playtime')?.addEventListener('click', () => router.navigate('playtime'));
   document.getElementById('recommend')?.addEventListener('click', async () => {
     try {
       const data = await bridge.call<any>('get_smart_recommendation');

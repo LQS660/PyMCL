@@ -25,6 +25,31 @@ LAYOUT_KEYS = (
 )
 
 
+class NavLayoutExposureTests(unittest.TestCase):
+    """侧栏编排必须经 get_settings 出得去，两套后端都得给。
+
+    Qt 版自己直接读 CONFIG，所以这几个键一直只在 Qt 里生效；桥不回这些键的话，
+    eziapp / WPF 只能画一套写死的侧栏，用户排好的顺序被静默丢掉。
+    """
+
+    NAV_KEYS = ("ui_nav_order", "ui_nav_pinned", "ui_nav_hidden")
+
+    def _settings(self, backend_cls):
+        shim = type("Shim", (), {"get_settings": backend_cls.get_settings})()
+        return shim.get_settings()
+
+    def test_both_backends_return_nav_keys(self):
+        import bridge.api as bridge_api
+        import app.backend as qt_backend
+        for label, cls in (("bridge", bridge_api.BackendAPI),
+                           ("qt", qt_backend.BackendAPI)):
+            settings = self._settings(cls)
+            for key in self.NAV_KEYS:
+                with self.subTest(backend=label, key=key):
+                    self.assertIn(key, settings)
+                    self.assertIsInstance(settings[key], list)
+
+
 class ConfigWhitelistTests(unittest.TestCase):
     def test_layout_keys_are_declared(self):
         for key in LAYOUT_KEYS:

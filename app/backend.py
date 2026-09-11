@@ -992,6 +992,10 @@ class BackendAPI(QObject):
             "instances_dir": str(CONFIG.get("instances_dir") or ".minecraft"),
             "game_dir": str(CONFIG.instances_dir),
             "root": str(utils.ROOT),
+            # 侧栏编排：Qt 版自己直接读 CONFIG，这里一并回出去让两套前端同源
+            "ui_nav_order": list(CONFIG.get("ui_nav_order") or []),
+            "ui_nav_pinned": list(CONFIG.get("ui_nav_pinned") or []),
+            "ui_nav_hidden": list(CONFIG.get("ui_nav_hidden") or []),
         }
 
     def save_settings(self, data: dict):

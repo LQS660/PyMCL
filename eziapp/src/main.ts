@@ -14,30 +14,60 @@ const app = document.getElementById('app')!;
 // 窄屏下侧栏收成 64px 只剩图标，子项没有图标就会塌成一排空格子，所以每项都得配一个。
 type NavChild = { key: PageKey; label: string; icon: string };
 
+/** 全部可导航的页面，按「常驻侧栏」「分组内」「只走快捷入口」三档摆。 */
+const NAV_META: Record<string, NavChild> = {
+  launch: { key: 'launch', label: '启动', icon: '▶' },
+  downloads: { key: 'downloads', label: '下载', icon: '⬇' },
+  java: { key: 'java', label: 'Java', icon: '☕' },
+  ai: { key: 'ai', label: 'AI 助手', icon: '✦' },
+  instances: { key: 'instances', label: '实例', icon: '🗃' },
+  mods: { key: 'mods', label: '模组', icon: '🔧' },
+  accounts: { key: 'accounts', label: '账号', icon: '👤' },
+  multiplayer: { key: 'multiplayer', label: '联机', icon: '🛰' },
+  servers: { key: 'servers', label: '服务器', icon: '🌐' },
+  playtime: { key: 'playtime', label: '时长', icon: '⏱' },
+  feedback: { key: 'feedback', label: '反馈', icon: '💬' },
+  settings: { key: 'settings', label: '设置', icon: '⚙' },
+  tools: { key: 'tools', label: '工具', icon: '🧰' },
+  tasks: { key: 'tasks', label: '下载任务', icon: '☰' },
+};
+
+// 下载页顶部本来就有一条覆盖全部七个分类的 tab（downloads.ts renderShell），
+// 侧栏再铺一遍是同一组入口出现两次。这里只留一个总入口，分类交给页内 tab。
 const DOWNLOAD_CHILDREN: NavChild[] = [
-  { key: 'vanilla', label: '原版游戏', icon: '🎮' },
-  { key: 'mods-catalog', label: 'Mod', icon: '🧩' },
-  { key: 'modpacks', label: '整合包', icon: '📦' },
-  { key: 'datapacks', label: '数据包', icon: '🗂' },
-  { key: 'resourcepacks', label: '资源包', icon: '🎨' },
-  { key: 'shaders', label: '光影包', icon: '✨' },
-  { key: 'worlds', label: '世界', icon: '🌍' },
-  { key: 'java', label: 'Java', icon: '☕' },
+  { key: 'vanilla', label: '内容下载', icon: '🧩' },
+  NAV_META.java,
 ];
+// 工具页的清理 / 更新 / 诊断 / 全局 Mod 在设置页都有入口（settings.ts 的「维护」组
+// 甚至有个按钮直接跳过去），时长在启动页有常驻卡片——两者都不再占侧栏位置，
+// 仍可从设置页和启动页的快捷入口卡片进。
 const MORE_CHILDREN: NavChild[] = [
-  { key: 'instances', label: '实例', icon: '🗃' },
-  { key: 'mods', label: '模组', icon: '🔧' },
-  { key: 'accounts', label: '账号', icon: '👤' },
-  { key: 'multiplayer', label: '联机', icon: '🛰' },
-  { key: 'servers', label: '服务器', icon: '🌐' },
-  { key: 'playtime', label: '时长', icon: '⏱' },
-  { key: 'feedback', label: '反馈', icon: '💬' },
-  { key: 'settings', label: '设置', icon: '⚙' },
-  { key: 'tools', label: '工具', icon: '🧰' },
+  NAV_META.instances, NAV_META.multiplayer, NAV_META.servers,
+  NAV_META.feedback, NAV_META.settings,
 ];
+/** 没有用户配置时，默认把这两项提到侧栏根——它们是改得最勤的两页。 */
+const DEFAULT_PINNED = ['mods', 'accounts'];
 
 const navChild = (it: NavChild) =>
   `<a class="nav-item" data-page="${it.key}" title="${it.label}"><span class="nav-icon">${it.icon}</span><span class="nav-label">${it.label}</span></a>`;
+
+/** Qt 版把固定项写在 ui_nav_pinned 里（键名是 account/mods 这套），这里对齐过来。 */
+const PIN_ALIASES: Record<string, string> = {
+  account: 'accounts', instance: 'instances', version: 'vanilla',
+  mod: 'mods-catalog', download: 'downloads',
+};
+
+function pinnedKeys(): NavChild[] {
+  const raw = store.mergedSettings()?.ui_nav_pinned;
+  const list = Array.isArray(raw) && raw.length ? raw : DEFAULT_PINNED;
+  const hidden = new Set(
+    (store.mergedSettings()?.ui_nav_hidden as string[] | undefined) || []);
+  const seen = new Set<string>();
+  return list
+    .map((k) => PIN_ALIASES[String(k)] || String(k))
+    .filter((k) => !hidden.has(k) && !seen.has(k) && (seen.add(k), NAV_META[k]))
+    .map((k) => NAV_META[k]);
+}
 
 const TITLES: Record<PageKey, string> = {
   launch: '启动', instances: '实例', downloads: '下载', vanilla: '原版游戏',
@@ -48,22 +78,75 @@ const TITLES: Record<PageKey, string> = {
   tools: '工具', more: '更多',
 };
 
+/**
+ * 每个分组「管辖」哪些页面。这跟侧栏上摆出来的子项不是一回事：下载组只露两项，
+ * 但七个分类页都归它管，从页内 tab 跳过去时也要让它亮起来。
+ */
+const SECTION_MEMBERS: Record<string, Set<PageKey>> = {
+  downloads: new Set<PageKey>(['downloads', 'vanilla', 'mods-catalog', 'modpacks',
+    'datapacks', 'resourcepacks', 'shaders', 'worlds', 'java']),
+  more: new Set<PageKey>(['more', 'instances', 'multiplayer', 'servers',
+    'playtime', 'feedback', 'settings', 'tools']),
+};
+
+/** 分组当前是否展开：记在 localStorage，切页不丢。 */
+function sectionOpen(id: string): boolean {
+  return localStorage.getItem(`pymcl.nav.${id}`) === '1';
+}
+
+/**
+ * 可折叠的分组。对齐 Qt 版 PclSideBar 的行为——eziapp 之前两个分组永远摊开，
+ * 22 个条目全挤在侧栏里，这是「臃肿」的直接来源。
+ */
+function navSection(id: string, head: NavChild, children: NavChild[]): string {
+  const open = sectionOpen(id);
+  return `
+    <div class="nav-section${open ? ' open' : ''}" data-section="${id}">
+      <a class="nav-item nav-section-head" data-page="${head.key}" title="${head.label}">
+        <span class="nav-icon">${head.icon}</span><span class="nav-label">${head.label}</span>
+        <span class="nav-chevron" data-section-toggle="${id}" role="button" aria-label="展开或收起">▾</span>
+      </a>
+      <div class="nav-children">${children.map(navChild).join('')}</div>
+    </div>`;
+}
+
+function bindNavItems(host: ParentNode) {
+  host.querySelectorAll('.nav-item').forEach((el) => {
+    const key = (el as HTMLElement).dataset.page as PageKey;
+    el.addEventListener('click', () => router.navigate(key));
+    // 指针停到侧栏条目上就把那一页的 chunk 拉回来。真点下去时模块通常已经在内存里，
+    // 转场不必再等一次网络/磁盘往返。
+    el.addEventListener('pointerenter', () => { void loadPage(key).catch(() => undefined); }, { passive: true });
+  });
+}
+
+/**
+ * 侧栏是在设置回来之前就画好的，那一刻只能用默认固定项。设置到手后按
+ * ui_nav_pinned / ui_nav_hidden 重排一次；内容没变就不动 DOM。
+ */
+function syncPinnedNav() {
+  const host = document.getElementById('nav-pinned');
+  if (!host) return;
+  const html = pinnedKeys().map(navChild).join('');
+  if (host.innerHTML === html) return;
+  host.innerHTML = html;
+  bindNavItems(host);
+  document.querySelectorAll('.nav-item').forEach((el) => {
+    el.classList.toggle('active', (el as HTMLElement).dataset.page === router.page);
+  });
+}
+
 function renderShell() {
   app.innerHTML = `
     <div class="sidebar">
       <div class="sidebar-title"><span class="nav-icon">⛏️</span><span class="nav-label">PyMCL</span></div>
       <nav class="sidebar-nav">
-        <a class="nav-item" data-page="launch"><span class="nav-icon">▶</span><span class="nav-label">启动</span></a>
-        <div class="nav-section">
-          <a class="nav-item" data-page="downloads"><span class="nav-icon">⬇</span><span class="nav-label">下载</span></a>
-          <div class="nav-children">${DOWNLOAD_CHILDREN.map(navChild).join('')}</div>
-        </div>
-        <a class="nav-item" data-page="ai"><span class="nav-icon">✦</span><span class="nav-label">AI 助手</span></a>
-        <div class="nav-section">
-          <a class="nav-item" data-page="more"><span class="nav-icon">⋯</span><span class="nav-label">更多</span></a>
-          <div class="nav-children">${MORE_CHILDREN.map(navChild).join('')}</div>
-        </div>
-        <a class="nav-item" data-page="tasks"><span class="nav-icon">☰</span><span class="nav-label">下载任务</span><span class="badge" id="task-badge" style="display:none">0</span></a>
+        ${navChild(NAV_META.launch)}
+        ${navSection('downloads', NAV_META.downloads, DOWNLOAD_CHILDREN)}
+        <div id="nav-pinned">${pinnedKeys().map(navChild).join('')}</div>
+        ${navChild(NAV_META.ai)}
+        ${navSection('more', { key: 'more', label: '更多', icon: '⋯' }, MORE_CHILDREN)}
+        <a class="nav-item" data-page="tasks" title="下载任务"><span class="nav-icon">☰</span><span class="nav-label">下载任务</span><span class="badge" id="task-badge" style="display:none">0</span></a>
       </nav>
       <button class="sidebar-edit" id="edit-layout" type="button" title="自由调整启动页布局：拖动、缩放、增删卡片"><span class="nav-icon">✎</span><span class="nav-label">编辑布局</span></button>
       <div class="sidebar-foot" id="bridge-status">桥接: 未连接</div>
@@ -75,13 +158,18 @@ function renderShell() {
     </div>
     <div class="toast-container" id="toast-container"></div>`;
 
-  document.querySelectorAll('.nav-item').forEach((el) => {
-    const key = (el as HTMLElement).dataset.page as PageKey;
-    el.addEventListener('click', () => router.navigate(key));
-    // 指针停到侧栏条目上就把那一页的 chunk 拉回来。真点下去时模块通常已经在内存里，
-    // 转场不必再等一次网络/磁盘往返。
-    el.addEventListener('pointerenter', () => { void loadPage(key).catch(() => undefined); }, { passive: true });
+  // 箭头只管折叠，不跟着跳页；点条目本身仍然跳转（并顺手展开那一组）
+  document.querySelectorAll<HTMLElement>('[data-section-toggle]').forEach((el) => {
+    el.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const id = el.dataset.sectionToggle!;
+      const host = document.querySelector(`.nav-section[data-section="${id}"]`);
+      const open = host?.classList.toggle('open') ?? false;
+      localStorage.setItem(`pymcl.nav.${id}`, open ? '1' : '0');
+    });
   });
+
+  bindNavItems(app);
   // 不在启动页时画布还没挂上：layout_bus 记下这次请求，切过去后由画布自己领走
   document.getElementById('edit-layout')?.addEventListener('click', () => {
     if (!requestLayoutEdit()) router.navigate('launch');
@@ -143,6 +231,15 @@ async function renderPage(page: PageKey) {
   document.querySelectorAll('.nav-item').forEach((el) => {
     el.classList.toggle('active', (el as HTMLElement).dataset.page === page);
   });
+  // 七个下载分类里只有一个在侧栏露面，其余靠页内 tab 到达；不管走哪条路，
+  // 「下载」这一组都得亮起来，并且把它所在的分组展开。
+  for (const [id, members] of Object.entries(SECTION_MEMBERS)) {
+    const host = document.querySelector(`.nav-section[data-section="${id}"]`);
+    if (!host) continue;
+    const inside = members.has(page);
+    host.querySelector('.nav-section-head')?.classList.toggle('active-branch', inside);
+    if (inside) host.classList.add('open');
+  }
   title.textContent = TITLES[page] || 'PyMCL';
   await pageSwap(content, () => paint(content));
 }
@@ -205,6 +302,7 @@ async function loadInitialData() {
   if (settings.status === 'fulfilled') {
     store.setSettings(settings.value as any);
     applyAppearance(store.mergedSettings());
+    syncPinnedNav();
   }
   if (instances.status === 'fulfilled') store.setInstances(instances.value as any);
   if (versions.status === 'fulfilled') store.setVersionList(versions.value as any);
