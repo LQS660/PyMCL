@@ -11,31 +11,63 @@ import type { DownloadCategory } from './pages/downloads';
 
 const app = document.getElementById('app')!;
 
-// 窄屏下侧栏收成 64px 只剩图标，子项没有图标就会塌成一排空格子，所以每项都得配一个。
+/**
+ * 侧栏图标用内联 SVG，不用字符。Unicode 那套里 ▶ ⚙ ☕ 这些在 Windows 上会被
+ * 挑成彩色 emoji 字形，跟 ✦ ⋯ ☰ 这类纯文本字形混在一排，粗细和颜色都对不齐。
+ * 统一成 1.5px 描边、跟随 currentColor 的 20x20 路径，一套到底。
+ */
+const ICONS: Record<string, string> = {
+  brand: 'M10 2.8 16.6 6.6v7.6L10 18 3.4 14.2V6.6ZM3.4 6.6 10 10.4l6.6-3.8M10 10.4V18',
+  launch: 'M7.4 4.8v10.4l8.2-5.2Z',
+  download: 'M10 3.6v8.2M6.6 8.6 10 12l3.4-3.4M4.4 16.4h11.2',
+  grid: 'M3.8 4.2h5.2v5.2H3.8ZM11 4.2h5.2v5.2H11ZM3.8 10.8h5.2V16H3.8ZM11 10.8h5.2V16H11Z',
+  java: 'M5.4 7.2h8.2v4.2a4.1 4.1 0 0 1-8.2 0ZM13.6 8.2h1.4a1.8 1.8 0 0 1 0 3.6h-1.4M4.4 16.4h10.2',
+  ai: 'M10 3 11.5 7.4 16 8.9l-4.5 1.5L10 14.8 8.5 10.4 4 8.9l4.5-1.5Z',
+  instances: 'M10 3.4 16.4 6.6 10 9.8 3.6 6.6ZM3.6 10.2 10 13.4l6.4-3.2M3.6 13.6 10 16.8l6.4-3.2',
+  mods: 'M4.2 5.6h11.6v8.8H4.2ZM4.2 10h11.6M8.2 5.6V10M12 10v4.4',
+  accounts: 'M10 9.8a2.9 2.9 0 1 0 0-5.8 2.9 2.9 0 0 0 0 5.8ZM4.6 16.4a5.4 5.4 0 0 1 10.8 0',
+  multiplayer: 'M10 3.4a6.6 6.6 0 1 0 0 13.2 6.6 6.6 0 0 0 0-13.2ZM3.4 10h13.2M10 3.4a9.4 6.6 0 0 1 0 13.2 9.4 6.6 0 0 1 0-13.2',
+  servers: 'M4 4.6h12v4H4ZM4 11.4h12v4H4ZM6.3 6.6h1.4M6.3 13.4h1.4',
+  playtime: 'M10 3.4a6.6 6.6 0 1 0 0 13.2 6.6 6.6 0 0 0 0-13.2ZM10 6.4v4l2.6 1.6',
+  feedback: 'M3.8 4.8h12.4v8.4H9.4L6 16.2v-3H3.8Z',
+  settings: 'M10 7.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6ZM10 2.8v2M10 15.2v2M2.8 10h2M15.2 10h2M4.9 4.9l1.4 1.4M13.7 13.7l1.4 1.4M15.1 4.9l-1.4 1.4M6.3 13.7l-1.4 1.4',
+  tools: 'M13.3 3.8a3.9 3.9 0 0 0-5 4.9L4 13l3 3 4.3-4.3a3.9 3.9 0 0 0 4.9-5l-2.3 2.3-2.2-.6-.6-2.2Z',
+  tasks: 'M4.2 6h11.6M4.2 10h11.6M4.2 14h7.6',
+  // 三个点得画成真圆去填充：零长度线段靠 round cap 凑出来的点，在 17px 下
+  // 小到几乎看不见，实测「更多」那一行就是空的。
+  more: 'M4.7 10a1 1 0 1 1 2 0 1 1 0 1 1-2 0M9 10a1 1 0 1 1 2 0 1 1 0 1 1-2 0M13.3 10a1 1 0 1 1 2 0 1 1 0 1 1-2 0',
+  chevron: 'M7.6 5.4 12.2 10l-4.6 4.6',
+};
+
+const FILLED = new Set(['more']);
+
+const icon = (name: string) =>
+  `<svg class="nav-svg${FILLED.has(name) ? ' filled' : ''}" viewBox="0 0 20 20" aria-hidden="true"><path d="${ICONS[name] || ''}"/></svg>`;
+
 type NavChild = { key: PageKey; label: string; icon: string };
 
 /** 全部可导航的页面，按「常驻侧栏」「分组内」「只走快捷入口」三档摆。 */
 const NAV_META: Record<string, NavChild> = {
-  launch: { key: 'launch', label: '启动', icon: '▶' },
-  downloads: { key: 'downloads', label: '下载', icon: '⬇' },
-  java: { key: 'java', label: 'Java', icon: '☕' },
-  ai: { key: 'ai', label: 'AI 助手', icon: '✦' },
-  instances: { key: 'instances', label: '实例', icon: '🗃' },
-  mods: { key: 'mods', label: '模组', icon: '🔧' },
-  accounts: { key: 'accounts', label: '账号', icon: '👤' },
-  multiplayer: { key: 'multiplayer', label: '联机', icon: '🛰' },
-  servers: { key: 'servers', label: '服务器', icon: '🌐' },
-  playtime: { key: 'playtime', label: '时长', icon: '⏱' },
-  feedback: { key: 'feedback', label: '反馈', icon: '💬' },
-  settings: { key: 'settings', label: '设置', icon: '⚙' },
-  tools: { key: 'tools', label: '工具', icon: '🧰' },
-  tasks: { key: 'tasks', label: '下载任务', icon: '☰' },
+  launch: { key: 'launch', label: '启动', icon: 'launch' },
+  downloads: { key: 'downloads', label: '下载', icon: 'download' },
+  java: { key: 'java', label: 'Java', icon: 'java' },
+  ai: { key: 'ai', label: 'AI 助手', icon: 'ai' },
+  instances: { key: 'instances', label: '实例', icon: 'instances' },
+  mods: { key: 'mods', label: '模组', icon: 'mods' },
+  accounts: { key: 'accounts', label: '账号', icon: 'accounts' },
+  multiplayer: { key: 'multiplayer', label: '联机', icon: 'multiplayer' },
+  servers: { key: 'servers', label: '服务器', icon: 'servers' },
+  playtime: { key: 'playtime', label: '时长', icon: 'playtime' },
+  feedback: { key: 'feedback', label: '反馈', icon: 'feedback' },
+  settings: { key: 'settings', label: '设置', icon: 'settings' },
+  tools: { key: 'tools', label: '工具', icon: 'tools' },
+  tasks: { key: 'tasks', label: '下载任务', icon: 'tasks' },
 };
 
 // 下载页顶部本来就有一条覆盖全部七个分类的 tab（downloads.ts renderShell），
 // 侧栏再铺一遍是同一组入口出现两次。这里只留一个总入口，分类交给页内 tab。
 const DOWNLOAD_CHILDREN: NavChild[] = [
-  { key: 'vanilla', label: '内容下载', icon: '🧩' },
+  { key: 'vanilla', label: '内容下载', icon: 'grid' },
   NAV_META.java,
 ];
 // 工具页的清理 / 更新 / 诊断 / 全局 Mod 在设置页都有入口（settings.ts 的「维护」组
@@ -49,7 +81,7 @@ const MORE_CHILDREN: NavChild[] = [
 const DEFAULT_PINNED = ['mods', 'accounts'];
 
 const navChild = (it: NavChild) =>
-  `<a class="nav-item" data-page="${it.key}" title="${it.label}"><span class="nav-icon">${it.icon}</span><span class="nav-label">${it.label}</span></a>`;
+  `<a class="nav-item" data-page="${it.key}" title="${it.label}"><span class="nav-icon">${icon(it.icon)}</span><span class="nav-label">${it.label}</span></a>`;
 
 /** Qt 版把固定项写在 ui_nav_pinned 里（键名是 account/mods 这套），这里对齐过来。 */
 const PIN_ALIASES: Record<string, string> = {
@@ -103,8 +135,8 @@ function navSection(id: string, head: NavChild, children: NavChild[]): string {
   return `
     <div class="nav-section${open ? ' open' : ''}" data-section="${id}">
       <a class="nav-item nav-section-head" data-page="${head.key}" title="${head.label}">
-        <span class="nav-icon">${head.icon}</span><span class="nav-label">${head.label}</span>
-        <span class="nav-chevron" data-section-toggle="${id}" role="button" aria-label="展开或收起">▾</span>
+        <span class="nav-icon">${icon(head.icon)}</span><span class="nav-label">${head.label}</span>
+        <span class="nav-chevron" data-section-toggle="${id}" role="button" aria-label="展开或收起">${icon('chevron')}</span>
       </a>
       <div class="nav-children"><div class="nav-children-inner">${children.map(navChild).join('')}</div></div>
     </div>`;
@@ -139,16 +171,16 @@ function syncPinnedNav() {
 function renderShell() {
   app.innerHTML = `
     <div class="sidebar">
-      <div class="sidebar-title"><span class="nav-icon">⛏️</span><span class="nav-label">PyMCL</span></div>
+      <div class="sidebar-title"><span class="nav-icon">${icon('brand')}</span><span class="nav-label">PyMCL</span></div>
       <nav class="sidebar-nav">
         ${navChild(NAV_META.launch)}
         ${navSection('downloads', NAV_META.downloads, DOWNLOAD_CHILDREN)}
         <div id="nav-pinned">${pinnedKeys().map(navChild).join('')}</div>
         ${navChild(NAV_META.ai)}
-        ${navSection('more', { key: 'more', label: '更多', icon: '⋯' }, MORE_CHILDREN)}
-        <a class="nav-item" data-page="tasks" title="下载任务"><span class="nav-icon">☰</span><span class="nav-label">下载任务</span><span class="badge" id="task-badge" style="display:none">0</span></a>
+        ${navSection('more', { key: 'more', label: '更多', icon: 'more' }, MORE_CHILDREN)}
+        <a class="nav-item" data-page="tasks" title="下载任务"><span class="nav-icon">${icon('tasks')}</span><span class="nav-label">下载任务</span><span class="badge" id="task-badge" style="display:none">0</span></a>
       </nav>
-      <button class="sidebar-edit" id="edit-layout" type="button" title="自由调整启动页布局：拖动、缩放、增删卡片"><span class="nav-icon">✎</span><span class="nav-label">编辑布局</span></button>
+      <button class="sidebar-edit" id="edit-layout" type="button" title="自由调整启动页布局：拖动、缩放、增删卡片"><span class="nav-icon">${icon('tools')}</span><span class="nav-label">编辑布局</span></button>
       <div class="sidebar-foot" id="bridge-status">桥接: 未连接</div>
       <div class="sidebar-resizer" id="sidebar-resizer"></div>
     </div>
