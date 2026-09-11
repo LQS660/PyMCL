@@ -713,3 +713,16 @@ details.faq summary:hover { color: var(--primary); }
   transition: background var(--transition), color var(--transition), border-color var(--transition);
 }
 .sidebar-edit:hover { background: var(--bg-tertiary); color: var(--primary); border-color: var(--primary); }
+
+/* 工具条上「没东西可操作」的那一档：比 :disabled 淡一点但仍可点，
+   点下去给一句「先选一张卡」的提示，而不是毫无反应 */
+.dash-toolbar .dash-tool-idle { opacity: .55; }
+.dash-toolbar .dash-tool-idle:hover { opacity: 1; }
+
+/* 编辑态选中的那一张：工具条的「删除」和 Delete 键对准的就是它。
+   实线 + 一圈光晕，跟未选中卡片的虚线边框区分开。 */
+.dash-card.editing.selected {
+  border-style: solid;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 34%, transparent), var(--shadow-lg);
+}

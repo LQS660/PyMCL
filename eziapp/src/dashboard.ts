@@ -6,7 +6,8 @@
  *
  * - 查看模式：卡片正常交互，右上角悬浮「编辑布局」入口；
  * - 编辑模式：整卡拖动、8 向手柄缩放、网格吸附（可调/可关）、邻卡联动、
- *   顶层置前、删除卡片、添加卡片（调色板）、适应窗口、重置布局；
+ *   顶层置前、选中/删除卡片（Delete）、恢复上一步（Ctrl+Z）、添加卡片
+ *   （调色板）、适应窗口、重置布局；
  * - 所有改动经 onChange 回调通知宿主页持久化（结构改动立即，几何改动 300ms 防抖）。
  *
  * 卡片类型由外部注册表提供（见 pages/launch.ts），画布只负责框架行为，不关心卡片内容。
@@ -20,7 +21,7 @@ import {
   newItem, nextZ, normalize, placeAll, resizeBy, resizeLinked, setGeometryPx, toDict,
   visibleItems,
 } from './layout_geom';
-import { dismissOverlay } from './ui';
+import { dismissOverlay, toast } from './ui';
 
 export interface CardSpec {
   key: string;
@@ -45,6 +46,9 @@ const CURSORS: Record<Dir, string> = {
   n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize',
   ne: 'nesw-resize', sw: 'nesw-resize', nw: 'nwse-resize', se: 'nwse-resize',
 };
+
+/** 撤销栈上限：每一步是一份完整布局文档（几百字节），50 步足够一次编辑用。 */
+const HISTORY_MAX = 50;
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', text = ''): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -119,7 +123,7 @@ export class DashboardCard {
     this.el.addEventListener('pointerdown', (e) => {
       if (!canvas.editing) return;
       const t = e.target as HTMLElement | null;
-      if (t?.closest('.dash-card-tool, .dash-grip')) return;
+      if (t?.closest('.dash-card-tool, .dash-grip')) return; // 手柄的 pointerdown 自己处理
       canvas.beginDrag(this, e);
     });
     this.setEditMode(canvas.editing);
@@ -156,9 +160,15 @@ export class DashboardCanvas {
   private readonly toolbar: HTMLElement;
   private readonly gridSelect: HTMLSelectElement;
   private readonly editFab: HTMLButtonElement;
+  private readonly deleteBtn: HTMLButtonElement;
+  private readonly undoBtn: HTMLButtonElement;
   doc: LayoutDoc = defaultDoc();
   cards: DashboardCard[] = [];
   editing = false;
+  /** 编辑态里当前选中的卡片：工具条的「删除」和 Delete 键都对它下手。 */
+  selected: DashboardCard | null = null;
+  /** 撤销栈：每一步是动手之前的整份文档，删掉的卡片靠它原样回来。 */
+  private history: LayoutDoc[] = [];
   /** 布局有变化：structural=true 立即；几何改动经 300ms 防抖再来一次。宿主页负责落盘。 */
   onChange: ((structural: boolean) => void) | null = null;
   private persistTimer = 0;
@@ -174,6 +184,14 @@ export class DashboardCanvas {
     const addBtn = el('button', 'btn btn-sm', '＋ 添加卡片');
     addBtn.type = 'button';
     addBtn.addEventListener('click', () => this.openPalette());
+    this.deleteBtn = el('button', 'btn btn-sm', '🗑 删除');
+    this.deleteBtn.type = 'button';
+    this.deleteBtn.title = '删除选中的卡片（选中后按 Delete 也行）';
+    this.deleteBtn.addEventListener('click', () => this.deleteSelected());
+    this.undoBtn = el('button', 'btn btn-sm', '↶ 恢复');
+    this.undoBtn.type = 'button';
+    this.undoBtn.title = '恢复上一步（Ctrl+Z）：删掉的卡片、挪动过的位置都能撤回来';
+    this.undoBtn.addEventListener('click', () => this.undo());
     const gridLabel = el('span', 'dash-toolbar-label', '吸附');
     this.gridSelect = el('select', 'select dash-grid-select');
     for (const v of GRID_CHOICES) {
@@ -182,6 +200,7 @@ export class DashboardCanvas {
       this.gridSelect.appendChild(o);
     }
     this.gridSelect.addEventListener('change', () => {
+      this.pushHistory();
       this.doc.grid = parseInt(this.gridSelect.value, 10) || 0;
       this.paintGrid();
       this.touch(true);
@@ -195,8 +214,16 @@ export class DashboardCanvas {
     const doneBtn = el('button', 'btn btn-sm btn-primary', '✓ 完成');
     doneBtn.type = 'button';
     doneBtn.addEventListener('click', () => this.setEditMode(false));
-    this.toolbar.append(addBtn, gridLabel, this.gridSelect, fitBtn, resetBtn, doneBtn);
+    this.toolbar.append(addBtn, this.deleteBtn, this.undoBtn, gridLabel, this.gridSelect, fitBtn, resetBtn, doneBtn);
     this.el.appendChild(this.toolbar);
+    this.syncToolbar();
+
+    // 点画布空白处取消选中（点在卡片上时卡片自己的处理已经把它选起来了）
+    this.el.addEventListener('pointerdown', (e) => {
+      if (!this.editing) return;
+      const t = e.target as HTMLElement | null;
+      if (t === this.el || t === this.gridLayer) this.select(null);
+    });
 
     // 查看模式：右上角悬浮入口
     this.editFab = el('button', 'dash-edit-fab', '✎ 编辑布局');
@@ -218,10 +245,89 @@ export class DashboardCanvas {
 
   destroy() {
     this.ro?.disconnect();
+    document.removeEventListener('keydown', this.onKeyDown);
     if (this.persistTimer) clearTimeout(this.persistTimer);
     this.persistTimer = 0;
     this.el.remove();
   }
+
+  // ------------------------------------------------------------------
+  // 选中 / 删除 / 恢复
+  // ------------------------------------------------------------------
+  /** 编辑态里选中一张卡（传 null 取消选中）。 */
+  select(card: DashboardCard | null) {
+    if (this.selected === card) return;
+    this.selected?.el.classList.remove('selected');
+    this.selected = card && this.cards.includes(card) ? card : null;
+    this.selected?.el.classList.add('selected');
+    this.syncToolbar();
+  }
+
+  deleteSelected() {
+    // 按钮不置灰、改成给一句提示：置灰的按钮说不清「要先选一张」，
+    // 而选中这件事本身是要教给人的
+    if (!this.selected) {
+      toast('先点一下要删除的卡片，再按「删除」（或直接按 Delete）', 'info');
+      return;
+    }
+    this.removeCard(this.selected);
+  }
+
+  /** 动手之前存一份：删卡、加卡、适应窗口、重置、改吸附、每一次拖动/缩放。 */
+  pushHistory() {
+    this.history.push(this.snapshot());
+    if (this.history.length > HISTORY_MAX) this.history.shift();
+    this.syncToolbar();
+  }
+
+  /** 手势用：前后真的变了才记一步，光点一下不该占掉一次撤销。 */
+  private commitHistory(before: LayoutDoc) {
+    if (JSON.stringify(toDict(before)) === JSON.stringify(this.currentDoc())) return;
+    this.history.push(before);
+    if (this.history.length > HISTORY_MAX) this.history.shift();
+    this.syncToolbar();
+  }
+
+  /** 恢复上一步。返回是否真的退了一步（栈空时 false）。 */
+  undo(): boolean {
+    const prev = this.history.pop();
+    if (!prev) return false;
+    this.select(null);
+    this.buildFromDoc(prev);
+    this.touch(true);
+    this.syncToolbar();
+    return true;
+  }
+
+  private syncToolbar() {
+    this.deleteBtn.classList.toggle('dash-tool-idle', !this.selected);
+    this.undoBtn.disabled = !this.history.length;
+  }
+
+  /** 编辑态的键盘操作；焦点在输入控件里时一律不拦。 */
+  private readonly onKeyDown = (e: KeyboardEvent) => {
+    if (!this.editing) return;
+    // 调色板/对话框开着时键盘归它：否则 Esc 会从它背后把编辑态关掉，
+    // Delete 也会删到看不见的那张卡上
+    if (document.querySelector('.modal-overlay')) return;
+    const t = e.target as HTMLElement | null;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      this.undo();
+      return;
+    }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && this.selected) {
+      e.preventDefault();
+      this.deleteSelected();
+      return;
+    }
+    if (e.key === 'Escape') {
+      // 有选中先取消选中，没选中才退出编辑——免得一下子全退掉
+      if (this.selected) this.select(null);
+      else this.setEditMode(false);
+    }
+  };
 
   // ------------------------------------------------------------------
   // 构建 / 重建
@@ -236,6 +342,9 @@ export class DashboardCanvas {
   }
 
   private rebuild() {
+    // 卡片对象整批换新，选中状态按 item.id 认回去（认不回就当没选）
+    const selectedId = this.selected?.item.id || '';
+    this.selected = null;
     for (const card of this.cards) {
       const body = card.body;
       if (body) {
@@ -256,6 +365,8 @@ export class DashboardCanvas {
     this.applyGeometry();
     this.syncGridSelect();
     this.paintGrid();
+    this.select(this.cards.find((c) => c.item.id === selectedId) || null);
+    this.syncToolbar(); // 选中被整批换掉时 select() 会提前返回，按钮状态得自己补一次
   }
 
   /** 按文档比例重摆全部卡片（构建后 / 画布尺寸变化时调用）。 */
@@ -291,6 +402,14 @@ export class DashboardCanvas {
     this.editing = on;
     this.el.classList.toggle('editing', on);
     for (const card of this.cards) card.setEditMode(on);
+    if (on) {
+      document.addEventListener('keydown', this.onKeyDown);
+    } else {
+      document.removeEventListener('keydown', this.onKeyDown);
+      this.select(null);
+      // 撤销栈特意留着：退出编辑后才反应过来「刚才那张不该删」是常事，
+      // 再点进来还能按「恢复」退回去（整页卸载时随画布一起丢）。
+    }
   }
 
   private openPalette() {
@@ -334,6 +453,7 @@ export class DashboardCanvas {
     const spec = this.registry[type];
     if (!spec) return null;
     if (spec.single && this.cards.some((c) => c.item.type === type)) return null;
+    this.pushHistory();
     const [, , fw, fh] = ADD_DEFAULT[type] || [0.3, 0.3, 0.3, 0.26];
     const cw = this.width;
     const ch = this.height;
@@ -348,6 +468,7 @@ export class DashboardCanvas {
     card.el.classList.add('entering');
     card.el.addEventListener('animationend', () => card.el.classList.remove('entering'), { once: true });
     this.el.appendChild(card.el);
+    this.select(card);   // 刚添的这张直接选中：位置不合适可以立刻删掉重来
     this.touch(true);
     return card;
   }
@@ -355,6 +476,8 @@ export class DashboardCanvas {
   removeCard(card: DashboardCard) {
     const i = this.cards.indexOf(card);
     if (i < 0) return;
+    this.pushHistory();          // 删之前存一份，「恢复」就能把这张原样放回来
+    if (this.selected === card) this.select(null);
     this.cards.splice(i, 1);
     const body = card.body;
     if (body) {
@@ -370,12 +493,14 @@ export class DashboardCanvas {
   }
 
   fitToWindow() {
+    this.pushHistory();
     fitToWindow(this.doc, this.width, this.height);
     this.rebuild();
     this.touch(true);
   }
 
   resetLayout() {
+    this.pushHistory();          // 重置也能退回来，不必怕手抖点到
     this.buildFromDoc(defaultDoc());
     this.touch(true);
   }
@@ -416,6 +541,8 @@ export class DashboardCanvas {
   beginDrag(card: DashboardCard, ev: PointerEvent) {
     if (!this.editing || ev.button !== 0) return;
     ev.preventDefault();
+    this.select(card);
+    const before = this.snapshot();
     const host = this.el.getBoundingClientRect();
     const anchor = { x: ev.clientX - host.left - card.rect.x, y: ev.clientY - host.top - card.rect.y };
     const cw = this.width;
@@ -442,6 +569,7 @@ export class DashboardCanvas {
       apply();
       card.el.classList.remove('dragging');
       setGeometryPx(card.item, card.rect, cw, ch);
+      this.commitHistory(before);
       this.touch(false);
     };
     try { card.el.setPointerCapture(ev.pointerId); } catch { /* 触控板等不支持时退回冒泡 */ }
@@ -453,7 +581,9 @@ export class DashboardCanvas {
   beginResize(card: DashboardCard, dir: Dir, ev: PointerEvent) {
     if (!this.editing || ev.button !== 0) return;
     ev.preventDefault();
-    ev.stopPropagation();
+    ev.stopPropagation();       // 手柄自己吃掉，卡片那层不当整卡拖动
+    this.select(card);
+    const before = this.snapshot();
     const grip = ev.currentTarget as HTMLElement;
     const start: Rect = { ...card.rect };
     const sx = ev.clientX;
@@ -495,6 +625,7 @@ export class DashboardCanvas {
       setGeometryPx(card.item, card.rect, cw, ch);
       // 松手时把联动过的邻居几何一并写回布局文档（否则下次重摆会弹回）
       for (const c of touched) setGeometryPx(c.item, c.rect, cw, ch);
+      this.commitHistory(before);
       this.touch(false);
     };
     try { grip.setPointerCapture(ev.pointerId); } catch { /* ignore */ }

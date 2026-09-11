@@ -15,8 +15,8 @@
 
 import {
   CARD_MIN_SIZE, DIRS, type CardGeom, type Dir, type LayoutDoc, type Rect,
-  cardMinPx, defaultDoc, dragTo, findFreeSpot, fitToWindow, linkFollowers,
-  newItem, placeAll, resizeBy, resizeLinked, setGeometryPx, visibleItems,
+  cardMinPx, cloneDoc, defaultDoc, dragTo, findFreeSpot, fitToWindow, linkFollowers,
+  newItem, placeAll, resizeBy, resizeLinked, setGeometryPx, toDict, visibleItems,
 } from '../src/layout_geom.ts';
 
 // 贴边/取整允许的误差：resizeBy 走 Math.round，联动那侧也有一次取整
@@ -231,7 +231,39 @@ function fuzzFit(rng: () => number, rounds: number) {
 }
 
 // ----------------------------------------------------------------------
-// 4. 定点联动场景：与 Qt 侧 _resize_link_smoke.py 逐条对齐
+// 4. 撤销栈依赖的三条性质（画布上的「恢复」就建在它们上面）
+// ----------------------------------------------------------------------
+function historyInvariants(rng: () => number, rounds: number) {
+  for (let round = 0; round < rounds; round++) {
+    const doc = defaultDoc();
+    for (const it of doc.items) {
+      it.x = rng() * 0.5;
+      it.y = rng() * 0.5;
+      it.w = 0.12 + rng() * 0.35;
+      it.h = 0.12 + rng() * 0.35;
+    }
+    const snap = cloneDoc(doc);
+    const before = JSON.stringify(toDict(snap));
+    // ① 快照和原文档在落盘格式上一模一样：没动过就不该占掉一次撤销
+    check(before === JSON.stringify(toDict(doc)), `撤销.快照失真 round=${round}`);
+
+    // ② 删掉一张卡之后一定不同：删卡必须记下一步，否则恢复不回来
+    const victim = doc.items.splice(Math.floor(rng() * doc.items.length), 1)[0];
+    check(before !== JSON.stringify(toDict(doc)), `撤销.删卡后没差异 ${victim.id}`);
+
+    // ③ 从快照复原，被删那张原样回来（id / 类型 / 几何都对得上）
+    const restored = cloneDoc(snap);
+    const back = restored.items.find((it) => it.id === victim.id);
+    check(!!back && back.type === victim.type
+      && Math.abs(back.x - victim.x) < 1e-4 && Math.abs(back.y - victim.y) < 1e-4
+      && Math.abs(back.w - victim.w) < 1e-4 && Math.abs(back.h - victim.h) < 1e-4,
+      `撤销.恢复后对不上 ${victim.id} ${back ? `${back.x},${back.y} ${back.w}×${back.h}` : '没找回来'}`);
+  }
+  console.log(`  撤销栈性质 ${rounds} 轮`);
+}
+
+// ----------------------------------------------------------------------
+// 5. 定点联动场景：与 Qt 侧 _resize_link_smoke.py 逐条对齐
 // ----------------------------------------------------------------------
 function near(a: number, b: number, tol = 3) { return Math.abs(a - b) <= tol; }
 
@@ -302,6 +334,7 @@ scenarios();
 fuzzResize(rng, rounds);
 fuzzDrag(rng, rounds);
 fuzzFit(rng, rounds);
+historyInvariants(rng, rounds);
 
 console.log(`\n断言 ${checks} 条，失败 ${failures.length} 条`);
 if (failures.length) {
