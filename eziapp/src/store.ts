@@ -44,6 +44,10 @@ export interface AccountInfo {
   avatar: string;
   body: string;
   active: boolean;
+  /** 离线账号绑定的自定义皮肤文件名；空表示用游戏内置默认皮肤 */
+  skin_file?: string;
+  /** 'classic'（宽臂）或 'slim'（细臂） */
+  skin_model?: string;
 }
 
 export interface ModInfo {

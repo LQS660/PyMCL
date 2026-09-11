@@ -882,8 +882,62 @@ class BackendAPI:
                 "avatar": skin_mod.avatar_url(acc),
                 "body": skin_mod.body_url(acc),
                 "active": acc.get("name") == self.accounts.active,
+                "skin_file": acc.get("skin_file") or "",
+                "skin_model": skin_mod.skin_model(acc),
             })
         return rows
+
+    def set_account_skin(self, name: str, path: str = "", model: str = "classic",
+                         data: str = "") -> dict:
+        """给离线账号绑一张自定义皮肤（PNG）。path 和 data 都空表示清除。
+
+        `data` 收浏览器文件选择器读出来的 base64（可带 data: 前缀）——Web 前端拿不到
+        真实路径，只能走这条；桌面端仍可直接传 `path`。真正让皮肤显示出来的是启动时
+        拉起的本地 Yggdrasil 服务，见 mclauncher/skinserver.py。
+        """
+        import base64
+        import binascii
+        from mclauncher import skin as skin_mod
+        acc = self.accounts.get_account(name)
+        if not acc:
+            raise ValueError(f"没有这个账号：{name}")
+        if acc.get("type") != "offline":
+            raise ValueError("自定义皮肤只对离线账号有效；正版和皮肤站账号的皮肤在各自的网站上改")
+        blob = (data or "").strip()
+        if blob:
+            raw = blob.split(",", 1)[-1] if blob.startswith("data:") else blob
+            try:
+                png = base64.b64decode(raw, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError("皮肤数据不是有效的 base64") from exc
+            skin_mod.validate_skin(png)
+            acc["skin_file"] = skin_mod.save_skin_bytes(name, png)
+            acc["skin_model"] = skin_mod.SLIM if str(model).lower() == "slim" else skin_mod.CLASSIC
+        elif not (path or "").strip():
+            skin_mod.remove_skin(acc)
+            acc.pop("skin_file", None)
+            acc.pop("skin_model", None)
+        else:
+            acc["skin_file"] = skin_mod.import_skin(name, path)
+            acc["skin_model"] = skin_mod.SLIM if str(model).lower() == "slim" else skin_mod.CLASSIC
+        self.accounts.save()
+        self._emit("ui_changed", {})
+        return {"name": name, "skin_file": acc.get("skin_file") or "",
+                "skin_model": skin_mod.skin_model(acc)}
+
+    def get_account_skin(self, name: str) -> dict:
+        """账号当前绑的皮肤；`data_url` 可以直接塞进 <img src> 预览。"""
+        import base64
+        from mclauncher import skin as skin_mod
+        acc = self.accounts.get_account(name) or {}
+        png = skin_mod.load_skin_png(acc)
+        return {
+            "name": name,
+            "skin_file": acc.get("skin_file") or "",
+            "skin_model": skin_mod.skin_model(acc),
+            "data_url": ("data:image/png;base64,"
+                         + base64.b64encode(png).decode("ascii")) if png else "",
+        }
 
     def remove_account(self, name: str):
         self.accounts.remove_account(name)

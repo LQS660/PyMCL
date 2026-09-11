@@ -233,6 +233,31 @@ def watch_window_title(proc, title: str, timeout: float = 90.0):
     threading.Thread(target=loop, daemon=True).start()
 
 
+def _offline_skin_api(props: dict) -> str:
+    """离线账号设了自定义皮肤时，起本地 Yggdrasil 服务并返回它的地址。
+
+    皮肤是锦上添花，任何一步出问题都只是没皮肤，不该连游戏都起不来，
+    所以这里一律吞掉异常。
+    """
+    if not (props or {}).get("skin_file"):
+        return ""
+    try:
+        from . import authlib as authlib_mod
+        from . import skin as skin_mod
+        from . import skinserver
+
+        png = skin_mod.load_skin_png(props)
+        if not png:
+            return ""
+        # authlib-injector 的 jar 得先在本地；已存在时这一步是空转
+        authlib_mod.ensure_injector()
+        return skinserver.api_for(
+            props.get("uuid") or "", props.get("name") or "Player",
+            png, skin_mod.skin_model(props))
+    except Exception:
+        return ""
+
+
 def build_launch_command(instance, version_id, account_props, java_exe,
                          memory_mb=4096, width=None, height=None,
                          extra_game_args=None, extra_jvm_args=None,
@@ -389,6 +414,8 @@ def build_launch_command(instance, version_id, account_props, java_exe,
     default_jvm = split_args(CONFIG.get("default_jvm_args") or "")
     jvm_args = default_jvm + extra_jvm + jvm_args
     jvm_args = _apply_memory(jvm_args, memory_mb)
+    if not authlib_api:
+        authlib_api = _offline_skin_api(props)
     if authlib_api:
         from . import authlib as authlib_mod
         agent = authlib_mod.javaagent_arg(authlib_api)

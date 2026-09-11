@@ -235,6 +235,8 @@ function render(container: HTMLElement, reload: () => Promise<void>) {
         if (action === 'activate') {
           await bridge.call('set_active_account', { name: account.name });
           toast(`${account.name} 已设为当前账号`, 'success');
+        } else if (action === 'skin') {
+          if (!await editSkin(account)) return;
         } else if (action === 'delete') {
           const confirmed = await confirmDialog('删除账号', `确定要删除账号“${account.name}”吗？`);
           if (!confirmed) return;
@@ -277,6 +279,78 @@ function renderTypeLabel(type: string): string {
   return typeLabel[type] || type || '账号';
 }
 
+/** 弹一个系统文件选择器，拿回 base64（不含 data: 前缀）。取消返回 null。 */
+function pickPng(): Promise<{ name: string; base64: string } | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/png,.png';
+    input.style.display = 'none';
+    // 用户按了取消不会触发 change，只能靠窗口重新聚焦收尾，否则这个 Promise 永远挂着
+    let settled = false;
+    const finish = (value: { name: string; base64: string } | null) => {
+      if (settled) return;
+      settled = true;
+      input.remove();
+      resolve(value);
+    };
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      if (!file) return finish(null);
+      const reader = new FileReader();
+      reader.onerror = () => finish(null);
+      reader.onload = () => finish({
+        name: file.name,
+        base64: String(reader.result || '').split(',', 2)[1] || '',
+      });
+      reader.readAsDataURL(file);
+    });
+    window.addEventListener('focus', () => {
+      setTimeout(() => { if (!input.files?.length) finish(null); }, 400);
+    }, { once: true });
+    document.body.appendChild(input);
+    input.click();
+  });
+}
+
+/** 离线账号的皮肤设置。返回 true 表示改动了，调用方需要刷新列表。 */
+async function editSkin(account: AccountInfo): Promise<boolean> {
+  const hasSkin = Boolean(account.skin_file);
+  const values = await formDialog(`${account.name} 的皮肤`, [
+    {
+      id: 'action', label: '操作', type: 'select',
+      value: 'pick',
+      options: hasSkin
+        ? [{ value: 'pick', label: '换一张图片' }, { value: 'clear', label: '清除，用游戏默认皮肤' }]
+        : [{ value: 'pick', label: '选择一张 PNG 皮肤' }],
+    },
+    {
+      id: 'model', label: '手臂模型', type: 'select',
+      value: account.skin_model === 'slim' ? 'slim' : 'classic',
+      options: [{ value: 'classic', label: '宽臂（Steve）' }, { value: 'slim', label: '细臂（Alex）' }],
+    },
+  ]);
+  if (!values) return false;
+
+  try {
+    if (values.action === 'clear') {
+      await bridge.call('set_account_skin', { name: account.name });
+      toast('已清除自定义皮肤', 'success');
+      return true;
+    }
+    const picked = await pickPng();
+    if (!picked) return false;
+    await bridge.call('set_account_skin', {
+      name: account.name, data: picked.base64, model: values.model,
+    });
+    toast(`皮肤已设为 ${picked.name}，下次启动生效`, 'success');
+    return true;
+  } catch (error) {
+    toast(errorMessage(error, '设置皮肤失败'), 'error');
+    return false;
+  }
+}
+
 function renderAccountCard(account: AccountInfo, index: number): string {
   const typeLabel: Record<string, string> = {
     microsoft: '微软正版',
@@ -295,8 +369,10 @@ function renderAccountCard(account: AccountInfo, index: number): string {
         </div>
       </div>
       ${account.api ? `<div style="font-size:11px;color:var(--text-secondary);margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(account.api)}</div>` : ''}
+      ${account.type === 'offline' && account.skin_file ? `<div style="font-size:11px;color:var(--text-secondary);margin-top:8px">已设自定义皮肤 · ${account.skin_model === 'slim' ? '细臂' : '宽臂'}</div>` : ''}
       <div class="grid-item-actions">
         ${account.active ? '' : `<button class="btn btn-sm btn-primary" data-account-action="activate" data-account-index="${index}">设为当前</button>`}
+        ${account.type === 'offline' ? `<button class="btn btn-sm" data-account-action="skin" data-account-index="${index}">皮肤</button>` : ''}
         <button class="btn btn-sm btn-danger" data-account-action="delete" data-account-index="${index}">删除</button>
       </div>
     </div>

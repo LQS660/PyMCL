@@ -459,6 +459,10 @@ class AccountManager:
 
     def remove_account(self, name):
         self._remove_stored_secrets(name)
+        gone = self.get_account(name)
+        if gone and gone.get("skin_file"):
+            from . import skin as skin_mod
+            skin_mod.remove_skin(gone)
         self.accounts = [a for a in self.accounts if a.get("name") != name]
         if self.active == name:
             self.active = self.accounts[0]["name"] if self.accounts else None
@@ -570,4 +574,7 @@ class AccountManager:
             "token": "0",
             "user_type": "legacy",
             "xuid": "",
+            # 自定义皮肤要在启动时起一个本地 Yggdrasil 服务，见 launcher._offline_skin_api
+            "skin_file": account.get("skin_file") or "",
+            "skin_model": account.get("skin_model") or "",
         }
