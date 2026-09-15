@@ -31,17 +31,21 @@ class Theme:
     row_hover = "#F3F7F5"
     row_line = "#EEF3F7"
     _version = 0  # 每次 apply 自增，方便 widget 检测主题变更
-    # 背景图生效中：页面表面必须刷透明，否则不透明 Theme.bg 会把
-    # stackedWidget 上的 border-image 整张盖住，背景图看起来「设置无效」。
+    # 背景图生效中：页面表面必须刷透明，否则不透明 Theme.bg 会把压在
+    # 窗口最底层的壁纸整张盖住，背景图看起来「设置无效」。
     # 由 MainWindow._apply_background 统一裁决，paint_theme_surfaces 只读。
     background_active = False
+    # 侧栏与标题栏的不透明度 0–100。壁纸铺在整窗底下，这个值调低它俩就透得出壁纸。
+    # 名字跟配置键 ui_sidebar_opacity 保持一致，别只看名字以为只管侧栏。
+    # 由 MainWindow.apply_theme 从配置写入，各家 restyle 只读。
+    sidebar_opacity = 100
 
     @classmethod
     def apply(cls, dark: bool):
         dark = bool(dark)
         # 只在深浅真正翻转时才自增 _version：ensure_theme_surfaces 的守卫
-        # 靠它判断「表面要不要重刷」。以前每次 apply 都 +1，主窗口里
-        # apply_theme 一被重复调用（设置保存、探针、双重保险路径）就把
+        # 靠它判断「表面要不要重刷」。若每次 apply 都 +1，主窗口里
+        # apply_theme 一被重复调用（设置保存、探针、双重保险路径）就会把
         # 所有已构造页面整树重刷一遍，21 个页面一次好几秒。
         changed = dark != cls.dark
         cls.dark = dark
@@ -100,12 +104,71 @@ TITLE_H = 40
 SIDE_W = 188
 
 
+def rgba(color: str, opacity: int) -> str:
+    """`#RRGGBB` + 0–100 不透明度 → QSS 的 `rgba(...)`；满值时原样返回。
+
+    满值走原样是有意的：QSS 里 `rgba(r,g,b,1.0)` 和 `#RRGGBB` 画出来一样，
+    但前者会让 Qt 把控件判成非不透明，白白多走一遍「先画父控件和下层兄弟」。
+    """
+    pct = max(0, min(100, int(opacity)))
+    if pct >= 100:
+        return color
+    c = QColor(color)
+    return f"rgba({c.red()}, {c.green()}, {c.blue()}, {pct / 100:.3f})"
+
+
+def mark_opaque(widget, opaque: bool) -> None:
+    """告诉 Qt「这块矩形被我自己填满了」（或者不再是）。
+
+    上面那句「满值原样返回就不会被判成非不透明」只对了一半：QSS 画的背景
+    根本不参与 Qt 的 isOpaque 判定，只有调色板填充和这个属性算数。于是壁纸
+    一开，窗口每次重绘都要把整棵树自下而上重新合成——实测 90 帧要走 6100 次
+    paint，不开壁纸只要 1700 次，光侧栏那 9 颗导航按钮就占 810 次（每颗都要
+    现渲一遍 SVG 图标）。
+
+    不透明度满 100 的侧栏与标题栏本来就是实底，标上之后 Qt 会把这两块从上层
+    重绘区里减掉，它们和它们的子控件都不用再跟着壁纸重画。
+
+    只在「整块矩形都被实色填满」时才标：有圆角、或者用户把不透明度调下去了，
+    标了就会留下一片没人画的脏像素。
+    """
+    if widget is None:
+        return
+    try:
+        if widget.testAttribute(Qt.WA_OpaquePaintEvent) != bool(opaque):
+            widget.setAttribute(Qt.WA_OpaquePaintEvent, bool(opaque))
+            widget.update()
+    except RuntimeError:
+        pass
+
+
+def _lend_wallpaper(root, transparent: bool) -> None:
+    """壁纸生效时，让页面根部直接拿「它盖住的那块壁纸」当自己的不透明底。
+
+    画出来跟透到底下那一层一模一样，区别只在 Qt 知不知道这块矩形被填满了：
+    透明时窗口每重绘一次，整棵页面树都要自下而上重新合成（实测 90 帧 6100
+    次 paint）；换成不透明底之后，重绘停在页面这一层，静态壁纸下鼠标划过
+    界面几乎不再产生重绘。
+
+    只借给页面根部这一层：滚动区内部的宿主会跟着内容滚，裁片会错位。
+    动态壁纸由背景层自己回绝（每帧都在变，借了只是多一次整幅拷贝）。
+    """
+    if root is None:
+        return
+    layer = getattr(root.window(), "_bg_layer", None)
+    if layer is None or not hasattr(layer, "adopt_surface"):
+        return
+    if transparent:
+        layer.adopt_surface(root)
+    else:
+        layer.release_surface(root)
+
+
 def ensure_theme_surfaces(root, allow_transparent: bool = True) -> None:
     """paint_theme_surfaces 的带守卫版本：主题/背景态没变过就跳过。
 
-    paint_theme_surfaces 每次都要对 root 做 4 轮 findChildren 全树
-    遍历（ScrollArea / QFrame / QLabel / 全部 QWidget 查 QFormLayout），
-    导航切页、任务完成后的页面刷新以前都会把已刷过的页面再刷一遍。
+    paint_theme_surfaces 要对 root 做整树 findChildren 遍历，导航切页、
+    任务完成后的页面刷新都会点到已刷过的页面，没有守卫就是一遍遍重刷。
     守卫键 = (Theme._version, background_active, allow_transparent)；
     新构造的页面没有标记，首次必定真刷。
     """
@@ -124,6 +187,127 @@ def ensure_theme_surfaces(root, allow_transparent: bool = True) -> None:
         pass
 
 
+def _surface_color(allow_transparent: bool) -> str:
+    """页面容器此刻该刷成什么底：壁纸生效就透明，否则 Theme.bg。"""
+    transparent = bool(Theme.background_active) and allow_transparent
+    return "transparent" if transparent else Theme.bg
+
+
+def _ensure_name(w, hint: str) -> str:
+    name = w.objectName()
+    if not name:
+        name = f"{hint}_{id(w)}"
+        w.setObjectName(name)
+    return name
+
+
+def _set_palette(w, color: QColor) -> None:
+    from PySide6.QtGui import QPalette
+    if w is None:
+        return
+    # 写前去重：palette 一致就跳过，setPalette 会触发 changeEvent
+    # + 样式重算，几百个控件每个都写一遍就是卡顿。
+    pal = w.palette()
+    if (pal.color(QPalette.ColorRole.Window) == color
+            and pal.color(QPalette.ColorRole.Base) == color
+            and w.autoFillBackground()):
+        return
+    pal.setColor(QPalette.ColorRole.Window, color)
+    pal.setColor(QPalette.ColorRole.Base, color)
+    w.setPalette(pal)
+    # 容器需要自绘底；子控件不要开 autoFill，否则字旁又出色块
+    w.setAutoFillBackground(True)
+
+
+def _clear_fill(w) -> None:
+    """透明模式：palette 底清成全透明并关掉 autoFill，否则 palette 填充
+    仍会在 QSS 透明背景下面垫一层实色。"""
+    from PySide6.QtGui import QPalette
+    if w is None:
+        return
+    transparent = QColor(0, 0, 0, 0)
+    pal = w.palette()
+    if (pal.color(QPalette.ColorRole.Window) == transparent
+            and not w.autoFillBackground()):
+        return
+    pal.setColor(QPalette.ColorRole.Window, QColor(0, 0, 0, 0))
+    pal.setColor(QPalette.ColorRole.Base, QColor(0, 0, 0, 0))
+    w.setPalette(pal)
+    w.setAutoFillBackground(False)
+    # 刚把底刷没了：如果这块之前借着壁纸裁片，标记也得跟着落下，
+    # 否则「标记说借着、刷子其实是空的」，下游按不透明处理就画不出东西。
+    # 紧随其后的 _lend_wallpaper 会重新借一次。
+    w.setProperty("pymclLentWallpaper", False)
+
+
+def _set_qss(w, qss: str) -> None:
+    if w.styleSheet() != qss:
+        w.setStyleSheet(qss)
+
+
+def _paint_one(w, surface: str, *, hint: str = "pymclSurf", fill: str | None = None) -> None:
+    if w is None:
+        return
+    color = fill or surface
+    name = _ensure_name(w, hint)
+    w.setAttribute(Qt.WA_StyledBackground, True)
+    # 只用 ID 选择器，禁止无选择器规则
+    _set_qss(w, f"#{name} {{ background-color: {color}; border: none; }}")
+    if color == "transparent":
+        _clear_fill(w)
+    else:
+        _set_palette(w, QColor(color))
+
+
+def _paint_scroll(w, surface: str, bg_c: QColor) -> None:
+    """滚动区三件套：外框、视口、内容宿主，各自只刷自己（ID 选择器）。"""
+    transparent = surface == "transparent"
+    sname = _ensure_name(w, "pymclScroll")
+    w.setAttribute(Qt.WA_StyledBackground, True)
+    _set_qss(w, f"#{sname} {{ background-color: {surface}; border: none; }}")
+    if transparent:
+        _clear_fill(w)
+    else:
+        _set_palette(w, bg_c)
+    vp = w.viewport()
+    if vp is not None:
+        vname = _ensure_name(vp, "pymclVp")
+        vp.setAttribute(Qt.WA_StyledBackground, True)
+        _set_qss(vp, f"#{vname} {{ background-color: {surface}; border: none; }}")
+        if transparent:
+            _clear_fill(vp)
+        else:
+            _set_palette(vp, bg_c)
+    inner = w.widget() if hasattr(w, "widget") else None
+    if inner is not None:
+        _paint_one(inner, surface, hint="pymclHost")
+
+
+def prestyle_page(root, *scrolls, allow_transparent: bool = True) -> None:
+    """页面构造早期就把根 / 滚动区 / 视口 / 宿主刷成 paint_theme_surfaces
+    之后会刷的那一套（同名、同 QSS、同 palette）。
+
+    为什么要提前：容器上每一次 setStyleSheet，Qt 都要把它**整棵子树**重新
+    polish 一遍（setStyle_helper 递归到每个后代 + StyleChange 事件）。
+    设置页有 54 张卡、几百个控件，页面建完再来刷根 / 滚动区 / 视口 / 宿主
+    这四下，光这四次 setStyleSheet 就是 ~150ms，占首次进设置页一半以上。
+    子控件还没进来时刷，同一句话几乎不花钱；等 _finish_page_build 里的
+    paint_theme_surfaces 再走到这些容器，字符串已经相等，直接跳过。
+
+    用法：`scroll.setWidget(host)` 之后、往 host 里加第一个子控件之前调
+    `prestyle_page(self, scroll)`。不接管 ensure_theme_surfaces 的守卫键：
+    标签清底 / SettingCard 补色仍由它首次真刷一遍。
+    """
+    if root is None:
+        return
+    surface = _surface_color(allow_transparent)
+    bg_c = QColor(Theme.bg)
+    _paint_one(root, surface, hint="pymclPage")
+    for w in scrolls:
+        if w is not None and not w.property("pymclTransparentScroll"):
+            _paint_scroll(w, surface, bg_c)
+
+
 def paint_theme_surfaces(root, allow_transparent: bool = True) -> None:
     """把 root 下承托 Fluent 卡片的容器刷成 Theme.bg。
 
@@ -135,7 +319,6 @@ def paint_theme_surfaces(root, allow_transparent: bool = True) -> None:
     border-image 从页面底下透出来；对话框里的表单宿主传 allow_transparent=False
     保持实底，不透出主窗背景图。
     """
-    from PySide6.QtGui import QPalette
     from PySide6.QtWidgets import QAbstractScrollArea, QFormLayout, QFrame, QLabel, QWidget
 
     if root is None:
@@ -145,137 +328,97 @@ def paint_theme_surfaces(root, allow_transparent: bool = True) -> None:
     fg = Theme.text
     bg_c = QColor(bg)
     card_c = QColor(card)
-    transparent = bool(Theme.background_active) and allow_transparent
-    surface = "transparent" if transparent else bg
+    surface = _surface_color(allow_transparent)
+    transparent = surface == "transparent"
 
-    def _ensure_name(w: QWidget, hint: str) -> str:
-        name = w.objectName()
-        if not name:
-            name = f"{hint}_{id(w)}"
-            w.setObjectName(name)
-        return name
+    _paint_one(root, surface, hint="pymclPage")
+    _lend_wallpaper(root, transparent)
 
-    def _set_palette(w: QWidget, color: QColor):
-        if w is None:
-            return
-        # 写前去重：palette 一致就跳过，setPalette 会触发 changeEvent
-        # + 样式重算，几百个控件每个都写一遍就是卡顿。
-        pal = w.palette()
-        if (pal.color(QPalette.ColorRole.Window) == color
-                and pal.color(QPalette.ColorRole.Base) == color
-                and w.autoFillBackground()):
-            return
-        pal.setColor(QPalette.ColorRole.Window, color)
-        pal.setColor(QPalette.ColorRole.Base, color)
-        w.setPalette(pal)
-        # 容器需要自绘底；子控件不要开 autoFill，否则字旁又出色块
-        w.setAutoFillBackground(True)
-
-    def _clear_fill(w: QWidget):
-        """透明模式：palette 底清成全透明并关掉 autoFill，否则 palette 填充
-        仍会在 QSS 透明背景下面垫一层实色。"""
-        if w is None:
-            return
-        transparent = QColor(0, 0, 0, 0)
-        pal = w.palette()
-        if (pal.color(QPalette.ColorRole.Window) == transparent
-                and not w.autoFillBackground()):
-            return
-        pal.setColor(QPalette.ColorRole.Window, QColor(0, 0, 0, 0))
-        pal.setColor(QPalette.ColorRole.Base, QColor(0, 0, 0, 0))
-        w.setPalette(pal)
-        w.setAutoFillBackground(False)
-
-    def _set_qss(w: QWidget, qss: str):
-        if w.styleSheet() != qss:
-            w.setStyleSheet(qss)
-
-    def _paint_one(w: QWidget, *, hint: str = "pymclSurf", fill: str | None = None):
-        if w is None:
-            return
-        color = fill or surface
-        name = _ensure_name(w, hint)
-        w.setAttribute(Qt.WA_StyledBackground, True)
-        # 只用 ID 选择器，禁止无选择器规则
-        _set_qss(w, f"#{name} {{ background-color: {color}; border: none; }}")
-        if color == "transparent":
-            _clear_fill(w)
-        else:
-            _set_palette(w, QColor(color))
-
-    _paint_one(root, hint="pymclPage")
-
-    for scroll in root.findChildren(QAbstractScrollArea):
-        if scroll.property("pymclTransparentScroll"):
-            # 透明滚动区（布局卡片内部）：保持透明，别刷成页面底色
-            # 在卡片 (Theme.card) 上出色块。
-            continue
-        sname = _ensure_name(scroll, "pymclScroll")
-        scroll.setAttribute(Qt.WA_StyledBackground, True)
-        _set_qss(scroll, f"#{sname} {{ background-color: {surface}; border: none; }}")
-        if transparent:
-            _clear_fill(scroll)
-        else:
-            _set_palette(scroll, bg_c)
-        vp = scroll.viewport()
-        if vp is not None:
-            vname = _ensure_name(vp, "pymclVp")
-            vp.setAttribute(Qt.WA_StyledBackground, True)
-            _set_qss(vp, f"#{vname} {{ background-color: {surface}; border: none; }}")
-            if transparent:
-                _clear_fill(vp)
-            else:
-                _set_palette(vp, bg_c)
-        inner = scroll.widget() if hasattr(scroll, "widget") else None
-        if inner is not None:
-            _paint_one(inner, hint="pymclHost")
-
-    # SettingCard：补卡片底色（选择器限定在 SettingCard，不会灌进子 QLabel）
     try:
         from qfluentwidgets import SettingCard as FluentSettingCard
     except Exception:
         FluentSettingCard = type(None)
-    for card_w in root.findChildren(QFrame):
-        if FluentSettingCard is type(None) or not isinstance(card_w, FluentSettingCard):
-            continue
-        prev = card_w.styleSheet() or ""
-        marker = "/*pymcl-card*/"
-        base = prev.split(marker)[0].rstrip() if marker in prev else prev
-        target = f"{base}\n{marker}\nSettingCard {{ background-color: {card}; border-radius: 6px; }}"
-        if prev != target:
-            card_w.setStyleSheet(target)
-        _set_palette(card_w, card_c)
-
-    # 清掉子 QLabel 上被旧无选择器 QSS / palette 染上的实心底
     transparent_c = QColor(0, 0, 0, 0)
-    for lab in root.findChildren(QLabel):
-        lab.setAutoFillBackground(False)
-        # Pill 等有意设了实心底的跳过
-        if lab.property("pymclKeepBg"):
-            continue
-        # FluentLabel 自己管 color；只确保不要 opaque Window 底
-        try:
-            pal = lab.palette()
-            if pal.color(QPalette.ColorRole.Window) == transparent_c:
+    form_labels = []
+
+    # 整棵子树只走一趟：findChildren 每调一次就把整棵子树重新包一遍
+    # Python 对象，设置页几百个控件，分成滚动区 / QFrame / QLabel / QFormLayout
+    # 四趟查就是四份包装开销（光这个函数就要 200ms+）。
+    for w in root.findChildren(QWidget):
+        lay = w.layout()
+        if isinstance(lay, QFormLayout):
+            # QFormLayout 的系统标签留到最后统一刷（保持原来的先后顺序）
+            for i in range(lay.rowCount()):
+                item = lay.itemAt(i, QFormLayout.ItemRole.LabelRole)
+                lab = item.widget() if item is not None else None
+                if isinstance(lab, QLabel) and "FluentLabel" not in type(lab).__name__:
+                    form_labels.append(lab)
+
+        if isinstance(w, QAbstractScrollArea):
+            if w.property("pymclTransparentScroll"):
+                # 透明滚动区（布局卡片内部）：保持透明，别刷成页面底色
+                # 在卡片 (Theme.card) 上出色块。
                 continue
-            pal.setColor(QPalette.ColorRole.Window, transparent_c)
-            lab.setPalette(pal)
-        except Exception:
-            pass
+            _paint_scroll(w, surface, bg_c)
+            continue
+
+        # SettingCard：补卡片底色（选择器限定在 SettingCard，不灌进子 QLabel）
+        if isinstance(w, QFrame) and isinstance(w, FluentSettingCard):
+            prev = w.styleSheet() or ""
+            marker = "/*pymcl-card*/"
+            base = prev.split(marker)[0].rstrip() if marker in prev else prev
+            target = (f"{base}\n{marker}\nSettingCard {{ background-color: {card};"
+                      " border-radius: 6px; }")
+            if prev != target:
+                w.setStyleSheet(target)
+            _set_palette(w, card_c)
+            continue
+
+        # 清掉子 QLabel 上被旧无选择器 QSS / palette 染上的实心底
+        if isinstance(w, QLabel):
+            _clear_label_fill(w, transparent_c)
 
     # QFormLayout 系统标签：字色跟 Theme，底透明
-    for layout in root.findChildren(QWidget):
-        lay = layout.layout()
-        if not isinstance(lay, QFormLayout):
-            continue
-        for i in range(lay.rowCount()):
-            item = lay.itemAt(i, QFormLayout.ItemRole.LabelRole)
-            if item is None:
-                continue
-            lab = item.widget()
-            if isinstance(lab, QLabel) and "FluentLabel" not in type(lab).__name__:
-                lab.setAutoFillBackground(False)
-                _set_qss(lab, f"QLabel {{ color: {fg}; background: transparent; }}")
+    for lab in form_labels:
+        if lab.autoFillBackground():
+            lab.setAutoFillBackground(False)
+        _set_qss(lab, f"QLabel {{ color: {fg}; background: transparent; }}")
+
+
+def _clear_label_fill(lab, transparent_c=None) -> None:
+    """标签不要实心底。写前先读：autoFillBackground / setPalette 都会触发
+    changeEvent + 样式重算，一页几百个标签每个都盲写一遍就是白卡。"""
+    from PySide6.QtGui import QPalette
+    if transparent_c is None:
+        transparent_c = QColor(0, 0, 0, 0)
+    if lab.autoFillBackground():
+        lab.setAutoFillBackground(False)
+    # Pill 等有意设了实心底的跳过
+    if lab.property("pymclKeepBg"):
+        return
+    # FluentLabel 自己管 color；只确保不要 opaque Window 底
+    try:
+        pal = lab.palette()
+        if pal.color(QPalette.ColorRole.Window) == transparent_c:
+            return
+        pal.setColor(QPalette.ColorRole.Window, transparent_c)
+        lab.setPalette(pal)
+    except Exception:
+        pass
+
+
+def clear_label_fills(root) -> None:
+    """只做「清标签实心底」这一件事的轻量入口。
+
+    新添几张卡时不必为它们整页重刷一遍表面（那要走整棵树 + 一堆
+    setStyleSheet）；卡片自己带样式，真正会被旧 QSS 染上底的只有标签。
+    """
+    from PySide6.QtWidgets import QLabel
+    if root is None:
+        return
+    transparent_c = QColor(0, 0, 0, 0)
+    for lab in root.findChildren(QLabel):
+        _clear_label_fill(lab, transparent_c)
 
 
 def form_label(text: str):
@@ -329,8 +472,11 @@ class PclTitleBar(TitleBar):
         self.restyle()
 
     def restyle(self):
+        # 跟侧栏共用一个不透明度，两条边框才不会一边实一边透
+        mark_opaque(self, Theme.sidebar_opacity >= 100)
         self.setStyleSheet(
-            f"PclTitleBar {{ background-color: {Theme.bg}; border-bottom: 1px solid {Theme.line}; }}"
+            f"PclTitleBar {{ background-color: {rgba(Theme.bg, Theme.sidebar_opacity)};"
+            f" border-bottom: 1px solid {rgba(Theme.line, Theme.sidebar_opacity)}; }}"
             f"QLabel#pclBrand {{ color: {Theme.text}; font-size: 16px; font-weight: 700;"
             " background: transparent; padding-left: 16px; }"
         )
@@ -363,11 +509,14 @@ class PclNavButton(QPushButton):
         pad = 40 if self._indent else 14
         fs = "12px" if self._indent else "13px"
         idle = Theme.muted if self._indent else Theme.text
+        # 侧栏半透明时高亮底也得跟着透，否则悬停/选中是一块实色方块糊在壁纸上。
+        # 比侧栏本身多给一点不透明度，高亮才读得出来。
+        hover = rgba(Theme.hover, min(100, Theme.sidebar_opacity + 15))
         self.setStyleSheet(
             f"PclNavButton {{ border: none; text-align: left; padding-left: {pad}px;"
             f" color: {idle}; background: transparent; font-size: {fs}; }}"
-            f"PclNavButton:hover {{ background: {Theme.hover}; }}"
-            f"PclNavButton:checked {{ color: {Theme.green}; background: {Theme.hover}; font-weight: 600; }}"
+            f"PclNavButton:hover {{ background: {hover}; }}"
+            f"PclNavButton:checked {{ color: {Theme.green}; background: {hover}; font-weight: 600; }}"
             f'PclNavButton[sectionOn="true"] {{ color: {Theme.green}; font-weight: 600; }}'
         )
         self._sync_icon(self.isChecked())
@@ -478,8 +627,8 @@ class PclSideBar(QFrame):
         if not had_stretch:
             sl.addStretch(1)
 
-        # 底部动作：编辑启动页布局。放在侧栏最底（画布被卡片铺满，
-        # 悬浮按钮放页面里总会压住卡片文字——用户两轮实测）。
+        # 底部动作：编辑启动页布局。放在侧栏最底：画布被卡片铺满，
+        # 悬浮按钮放页面里总会压住卡片文字。
         from qfluentwidgets import FluentIcon as _FIF
         from mclauncher.i18n import tr as _tr
         self.edit_btn = PclNavButton(_FIF.EDIT, _tr("编辑布局"), indent=False)
@@ -607,8 +756,12 @@ class PclSideBar(QFrame):
         drag.exec(Qt.CopyAction)
 
     def restyle(self):
+        # 半透明靠 rgba 背景，不用 QGraphicsOpacityEffect：后者会把整棵子树
+        # （图标、文字、角标）一起调淡，导航项直接糊掉。
+        mark_opaque(self, Theme.sidebar_opacity >= 100)
         self.setStyleSheet(
-            f"#pclSide {{ background: {Theme.card}; border-right: 1px solid {Theme.line}; }}"
+            f"#pclSide {{ background: {rgba(Theme.card, Theme.sidebar_opacity)};"
+            f" border-right: 1px solid {rgba(Theme.line, Theme.sidebar_opacity)}; }}"
         )
         for lab in self._headers:
             lab.setStyleSheet(
@@ -711,9 +864,11 @@ class PclSideBar(QFrame):
                 target = max(1, host.sizeHint().height())
                 host.setMaximumHeight(0)
                 host.setVisible(True)
+                # context=host：侧栏被 _rebuild_sidebar 整个重建时 host 先死，
+                # 动画得随它一起停，不然剩下的几帧都打在死控件上。
                 info["anim"] = tween(
                     lambda h: host.setMaximumHeight(int(h)), 0, target, ms=180,
-                    on_done=lambda: host.setMaximumHeight(16777215))
+                    on_done=lambda: host.setMaximumHeight(16777215), context=host)
             else:
                 host.setMaximumHeight(16777215)
                 info["anim"] = None
@@ -722,7 +877,7 @@ class PclSideBar(QFrame):
             info["anim"] = tween(
                 lambda h: host.setMaximumHeight(int(h)), target, 0, ms=160,
                 on_done=lambda: host.hide() if not info["expanded"]
-                else host.setMaximumHeight(16777215))
+                else host.setMaximumHeight(16777215), context=host)
         current_in = any(
             self._buttons[k].isChecked() for k in info["children"] if k in self._buttons
         )
@@ -756,9 +911,9 @@ PclSubButton = PclNavButton
 
 
 def fade_stack_to(stack, widget, holder, duration: int = 170):
-    """主栈切页。曾经做过「截图封面滑入/淡出」，但每点一次导航都要
-    同步抓整屏光栅图，弱机就是肉眼可见的顿挫——换页直接瞬时，
-    动效只留给小范围的局部动画（进度补间、角标脉冲等）。
+    """主栈切页：直接瞬时，不做「截图封面滑入/淡出」——那要在每点一次导航时
+    同步抓整屏光栅图，弱机就是肉眼可见的顿挫。动效只留给小范围的局部动画
+    （进度补间、角标脉冲等）。
     """
     _cleanup_nav_covers(holder)
     _set_stack(stack, widget)

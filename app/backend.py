@@ -16,7 +16,11 @@ from PySide6.QtCore import QObject, QThread, Qt, Signal
 from mclauncher import utils
 from mclauncher.auth import AccountManager, MicrosoftAuthenticator
 from mclauncher.catalog import CBC_CF_ID, CBC_CF_SLUG, CDC_CF_ID, CDC_CF_SLUG, POPULAR_MODPACKS, POPULAR_MODS
-from mclauncher.config import CONFIG
+from mclauncher.config import (
+    CONFIG, DEFAULT_CONFIG,
+    background_history as _bg_history,
+    push_background_history as _push_bg_history,
+)
 from mclauncher.downloader import DownloadManager
 from mclauncher.instances import Instance, InstanceError, list_instances, JAVA_AUTO
 from mclauncher.installer import Installer, InstallError
@@ -52,6 +56,63 @@ class TaskCancelled(Exception):
 
 
 _QT_INT_SAFE = 2_000_000_000
+
+
+def _clamp_int(value, lo: int, hi: int, fallback: int) -> int:
+    try:
+        return max(lo, min(hi, int(value)))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _clamp_opacity(value) -> int:
+    """侧栏/标题栏不透明度夹到 30–100：再低文字图标就压在壁纸上看不清了。"""
+    return _clamp_int(value, 30, 100, 100)
+
+
+_WINDOW_ASPECTS = ("4:3", "16:9", "free")
+
+
+def _window_aspect(value) -> str:
+    """主窗口比例档位：只认 4:3 / 16:9 / free，别的一律回出厂 4:3。"""
+    key = str(value or "").strip()
+    return key if key in _WINDOW_ASPECTS else "4:3"
+
+
+_NAV_SECTIONS = ("download", "more")
+
+
+def _nav_keys(raw) -> list[str]:
+    """侧栏键序列的类型清洗：去空、去重、保序。键名合法性由读它的那一端判。"""
+    seen: set[str] = set()
+    out = []
+    for item in raw if isinstance(raw, (list, tuple)) else ():
+        key = str(item).strip()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def _nav_members(raw) -> dict[str, list[str]]:
+    if not isinstance(raw, dict):
+        return {}
+    picked = {sec: _nav_keys(raw.get(sec)) for sec in _NAV_SECTIONS}
+    return picked if any(picked.values()) else {}
+
+
+def _nav_groups(raw) -> list[dict]:
+    """分组排法的分组表：[{title, keys}]。空标题的组丢掉。"""
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for group in raw:
+        if not isinstance(group, dict):
+            continue
+        title = str(group.get("title") or "").strip()
+        if title:
+            out.append({"title": title, "keys": _nav_keys(group.get("keys"))})
+    return out
 
 
 def _qt_progress(current, total):
@@ -181,6 +242,7 @@ class BackendAPI(QObject):
         # （reload + _sync_banner）。UI 线程同步扫，这是导航卡顿的大头之一。
         self._inst_cache: list[dict] | None = None
         self._inst_cache_at: float = 0.0
+        self._migration_report: dict | None = None
         self._ensure_default_instance()
         try:
             from mclauncher.source import warmup_async
@@ -206,14 +268,29 @@ class BackendAPI(QObject):
         self._inst_cache = None
 
     def _ensure_default_instance(self):
-        names = list_instances()
-        if names:
-            return
-        name = CONFIG.get("default_instance", "default") or "default"
+        """把旧的多实例结构并成单一游戏目录，再确保目录结构齐全。
+
+        迁移是幂等的：并完之后 `.minecraft` 自己带 `.instance.json`，
+        下次进来 `list_legacy_instances()` 为空，直接走 ensure 分支。
+        """
         try:
-            Instance(name).create()
+            from mclauncher import single_root
+            report = single_root.migrate()
+            if report.get("merged"):
+                self._migration_report = report
+        except Exception as exc:  # noqa: BLE001 迁移失败不该拦着启动器开机
+            log_mod = __import__("logging")
+            log_mod.getLogger(__name__).warning("游戏目录合并失败: %s", exc)
+        try:
+            Instance().create()
         except InstanceError:
             pass
+
+    def take_migration_report(self) -> dict:
+        """取一次启动时的合并结果（给 UI 提示用），取完就清掉。"""
+        report = getattr(self, "_migration_report", None)
+        self._migration_report = None
+        return report or {}
 
     # ------------------------------------------------------------------
     # 任务管理
@@ -338,6 +415,18 @@ class BackendAPI(QObject):
                 pass
 
     def call_async(self, fn, on_ok, on_err=None):
+        """后台跑 fn，成了回 on_ok，砸了回 on_err。
+
+        两个回调都套一层 `drop_if_gone`：结果回来时发起这次调用的页面可能
+        已经被关掉或重建掉了。回调若是闭包（`lambda rows: self._fill(rows)`
+        这种），Qt 眼里的接收者是 PySide 内部那个转发对象、不是页面，页面死了
+        连接也不会自动断，于是回调照跑、碰到死控件就抛 —— 而它从事件循环里
+        冒出来，没人接得住。真要在页面活着时才做的事，调用方仍该用
+        `app.ui_alive.guard` 显式挡一道；这里只保证「页面没了」不会变成一条
+        崩溃记录。
+        """
+        from .ui_alive import drop_if_gone
+
         worker = SilentWorker(fn, self)
         self._bg_threads.append(worker)
 
@@ -351,8 +440,8 @@ class BackendAPI(QObject):
             name = getattr(fn, "__name__", None) or repr(fn)
             utils.log.warning(tr("后台调用 %s 失败: %s"), name, message)
 
-        worker.ok.connect(on_ok, Qt.QueuedConnection)
-        worker.err.connect(on_err or _log_err, Qt.QueuedConnection)
+        worker.ok.connect(drop_if_gone(on_ok), Qt.QueuedConnection)
+        worker.err.connect(drop_if_gone(on_err or _log_err), Qt.QueuedConnection)
         worker.finished.connect(_cleanup)
         worker.finished.connect(worker.deleteLater)
         worker.start()
@@ -361,7 +450,7 @@ class BackendAPI(QObject):
     def shutdown(self, timeout_ms: int = 800):
         """关闭前收拢后台线程。
 
-        以前退出时谁也不等，QThread 还在跑就被销毁，Qt 会打
+        退出时必须等一等还在跑的 QThread，否则它们会在运行中被销毁，Qt 会打
         「QThread: Destroyed while thread is still running」。
 
         预算只给 800ms：关窗是用户动作，不能为了等一个可能几秒才返回的网络请求
@@ -425,8 +514,8 @@ class BackendAPI(QObject):
         )
 
     def _instance(self, name=None) -> Instance:
-        name = name or CONFIG.get("default_instance", "default")
-        inst = Instance(name)
+        """游戏目录句柄。单目录模式下传什么名字都落到同一个 `.minecraft`。"""
+        inst = Instance(name or None)
         if not inst.path.is_dir():
             inst.create()
         else:
@@ -615,16 +704,16 @@ class BackendAPI(QObject):
         return bool(open_path(path))
 
     def delete_modpack(self, instance: str, filename: str = "", purge_instance: bool = False):
-        """默认只清掉整合包标记，不再顺手把整个实例删掉。
+        """默认只清掉整合包标记，不顺手删整个实例。
 
-        整合包「已安装」列表里的那颗删除按钮以前直接 `inst.delete()`，
+        整合包「已安装」列表里的那颗删除按钮若直接 `inst.delete()`，
         用户以为在删一个整合包，实际连存档、模组、配置一起没了。
         """
         inst = self._instance(instance)
         meta = inst.meta() or {}
         pack = meta.get("modpack")
         if not isinstance(pack, dict) or not pack.get("name"):
-            raise InstanceError(tr("该实例没有已安装整合包"))
+            raise InstanceError(tr("游戏目录里没有已安装的整合包"))
         if purge_instance:
             inst.delete()
         else:
@@ -669,8 +758,8 @@ class BackendAPI(QObject):
 
     def set_game_dir(self, path: str):
         p = Path(path).expanduser()
-        # 先确认真能写：以前无论目录是否可用都照单全收，
-        # 首次运行向导那边又把异常吞了，用户完全看不出没设上。
+        # 先确认真能写再收：目录不可用却照单全收的话，
+        # 首次运行向导那边看不到异常，用户完全看不出没设上。
         target = p if p.is_absolute() else (utils.ROOT / path)
         try:
             target.mkdir(parents=True, exist_ok=True)
@@ -806,10 +895,8 @@ class BackendAPI(QObject):
         return self.start_task(tr("微软登录"), self._microsoft_login_impl)
 
     def uninstall_version(self, spec: str):
-        if " / " in spec:
-            inst_name, vid = spec.split(" / ", 1)
-        else:
-            inst_name, vid = CONFIG.get("default_instance", "default"), spec
+        # 老的「实例 / 版本」写法还留在快捷方式、崩溃报告和 CLI 里
+        inst_name, vid = spec.split(" / ", 1) if " / " in spec else ("", spec)
         Installer(self._instance(inst_name)).uninstall_version(vid.strip())
         self._emit_ui_changed()
 
@@ -875,22 +962,21 @@ class BackendAPI(QObject):
             return mods_mod.list_mod_entries_at(self._mods_folder(inst, version))
         return mods_mod.list_instance_mod_entries(inst)
 
-    def get_mods_targets(self, instance: str) -> list[dict]:
-        """Mod 安装目标列表：实例共享 mods + 开了版本隔离的版本各自目录。"""
+    def get_mods_targets(self, instance: str = "") -> list[dict]:
+        """Mod 安装目标：大锅饭共享池 + 每个开了独立模组的版本。"""
         from mclauncher import version_settings as vs
         inst = self._instance(instance)
-        rows = [{"label": tr("实例共享 mods 目录"), "value": ""}]
+        rows = [{"label": tr("大锅饭（所有版本共用）"), "value": ""}]
         for vid in inst.installed_ids():
-            iso = vs.load(inst, vid).get("isolation")
-            if iso in (vs.ISOLATION_MODS, vs.ISOLATION_ALL):
-                rows.append({"label": f"{vid} · {tr('独立 mods')}", "value": vid})
+            if vs.is_isolated(vs.load(inst, vid)):
+                rows.append({"label": f"{vid} · {tr('独立模组')}", "value": vid})
         return rows
 
-    def get_saves_targets(self, instance: str) -> list[dict]:
-        """世界安装目标：实例共享 saves + 开了存档隔离的版本各自目录。"""
+    def get_saves_targets(self, instance: str = "") -> list[dict]:
+        """世界安装目标：共享 saves + 开了存档隔离的版本各自目录。"""
         from mclauncher import version_settings as vs
         inst = self._instance(instance)
-        rows = [{"label": tr("实例共享 saves 目录"), "value": ""}]
+        rows = [{"label": tr("大锅饭（所有版本共用）"), "value": ""}]
         for vid in inst.installed_ids():
             iso = vs.load(inst, vid).get("isolation")
             if iso in (vs.ISOLATION_SAVES, vs.ISOLATION_ALL):
@@ -916,6 +1002,29 @@ class BackendAPI(QObject):
             return [label]
         return []
 
+    # ------------------------------------------------------------------
+    # 导出已安装内容（模组 / 光影 / 资源包 / 数据包 / 世界）
+    # ------------------------------------------------------------------
+    def default_export_dir(self) -> str:
+        from mclauncher import content_export
+        return str(content_export.default_export_dir())
+
+    def remember_export_dir(self, path: str) -> str:
+        from mclauncher import content_export
+        return content_export.remember_export_dir(path)
+
+    def export_content(self, kind: str, name: str, dest_dir: str = "",
+                       version: str = "", instance: str = "") -> str:
+        from mclauncher import content_export
+        return content_export.export_one(
+            self._instance(instance), kind, name, dest_dir, version)
+
+    def export_contents(self, kind: str, names, dest_dir: str = "",
+                        version: str = "", instance: str = "") -> dict:
+        from mclauncher import content_export
+        return content_export.export_many(
+            self._instance(instance), kind, names, dest_dir, version)
+
     def delete_shader(self, instance: str, filename: str):
         mods_mod.delete_content_file(self._instance(instance), "shaderpacks", filename)
         self._emit_ui_changed()
@@ -931,7 +1040,7 @@ class BackendAPI(QObject):
     def get_setting(self, key: str, default=None):
         # get_settings() 会重建整份字典（含两次模块 import 和几次 Path→str），
         # 而 main_window 里光是切一次主题就要连取 9 个键。按 CONFIG.revision 缓存，
-        # 配置一改缓存自动失效，取值语义和以前完全一致。
+        # 配置一改缓存自动失效，取值语义跟每次现算完全一致。
         rev = CONFIG.revision
         if self._settings_rev != rev or self._settings_cache is None:
             self._settings_cache = self.get_settings()
@@ -969,12 +1078,21 @@ class BackendAPI(QObject):
             "ui_motion": bool(CONFIG.get("ui_motion", True)),
             "ui_fly_duration_ms": int(CONFIG.get("ui_fly_duration_ms", 620)),
             "default_isolation": CONFIG.get("default_isolation") or "none",
+            "export_dir": CONFIG.get("export_dir") or "",
             "default_jvm_args": CONFIG.get("default_jvm_args") or "",
             "default_priority": CONFIG.get("default_priority") or "normal",
             "update_url": CONFIG.get("update_url") or "",
             "theme_color": CONFIG.get("theme_color") or "#2E9B6B",
             "ui_dark": bool(CONFIG.get("ui_dark", False)),
             "ui_background": CONFIG.get("ui_background") or "",
+            "ui_background_folder": CONFIG.get("ui_background_folder") or "",
+            "ui_background_shuffle": bool(CONFIG.get("ui_background_shuffle", False)),
+            "ui_background_interval": _clamp_int(
+                CONFIG.get("ui_background_interval", 10), 1, 1440, 10),
+            "ui_background_history": list(CONFIG.get("ui_background_history") or []),
+            "ui_sidebar_opacity": _clamp_opacity(CONFIG.get("ui_sidebar_opacity", 100)),
+            "ui_background_blur": _clamp_int(CONFIG.get("ui_background_blur", 0), 0, 40, 0),
+            "ui_background_dim": _clamp_int(CONFIG.get("ui_background_dim", 0), 0, 80, 0),
             "global_mods_dir": CONFIG.get("global_mods_dir") or "",
             "launcher_visibility": CONFIG.get("launcher_visibility") or "keep",
             "gc_preset": CONFIG.get("gc_preset") or "auto",
@@ -983,6 +1101,7 @@ class BackendAPI(QObject):
             "custom_homepage": CONFIG.get("custom_homepage") or "",
             "homepage_mode": CONFIG.get("homepage_mode") or "news",
             "window_mode": CONFIG.get("window_mode") or "window",
+            "ui_window_aspect": _window_aspect(CONFIG.get("ui_window_aspect")),
             "skip_assets": bool(CONFIG.get("skip_assets", False)),
             "allow_multi_instance": bool(CONFIG.get("allow_multi_instance", False)),
             "first_run": bool(CONFIG.get("first_run", True)),
@@ -996,6 +1115,11 @@ class BackendAPI(QObject):
             "ui_nav_order": list(CONFIG.get("ui_nav_order") or []),
             "ui_nav_pinned": list(CONFIG.get("ui_nav_pinned") or []),
             "ui_nav_hidden": list(CONFIG.get("ui_nav_hidden") or []),
+            "ui_nav_style": CONFIG.get("ui_nav_style") or "",
+            "ui_nav_defaults": CONFIG.get("ui_nav_defaults") or "",
+            "ui_nav_groups": _nav_groups(CONFIG.get("ui_nav_groups")),
+            "ui_section_members": _nav_members(CONFIG.get("ui_section_members")),
+            "ui_sidebar_width": int(CONFIG.get("ui_sidebar_width") or 0),
         }
 
     def save_settings(self, data: dict):
@@ -1014,6 +1138,17 @@ class BackendAPI(QObject):
                      else CONFIG.get("ai_permission_mode") or "standard")
         if perm_mode not in ("standard", "full"):
             perm_mode = "standard"
+
+        # 壁纸每换一次就把旧的那一组压进历史栈，「撤销上一张」才有东西可退。
+        # 必须赶在下面 CONFIG.update 之前算：那一步一落，旧值就找不回来了。
+        # 单图和文件夹动哪个都推一对，两个栈才始终等长。
+        bg_history, dir_history = _bg_history()
+        old_bg = str(CONFIG.get("ui_background") or "")
+        old_dir = str(CONFIG.get("ui_background_folder") or "")
+        new_bg = str(data.get("ui_background", old_bg) or "")
+        new_dir = str(data.get("ui_background_folder", old_dir) or "")
+        if (new_bg, new_dir) != (old_bg, old_dir):
+            bg_history, dir_history = _push_bg_history(old_bg, old_dir)
 
         CONFIG.update({
             "shared_libraries": bool(data.get("share_libraries", CONFIG.get("shared_libraries", False))),
@@ -1042,6 +1177,9 @@ class BackendAPI(QObject):
             "ui_fly_duration_ms": int(data.get("ui_fly_duration_ms")
                                       or CONFIG.get("ui_fly_duration_ms") or 620),
             "default_isolation": (data.get("default_isolation") or CONFIG.get("default_isolation") or "none"),
+            # 允许清空回默认（启动器目录下的 exports），所以按「键在不在」判断而不是真假
+            "export_dir": (str(data.get("export_dir") or "").strip() if "export_dir" in data
+                           else CONFIG.get("export_dir") or ""),
             "default_jvm_args": (data.get("default_jvm_args") if "default_jvm_args" in data
                                  else CONFIG.get("default_jvm_args") or ""),
             "default_priority": (data.get("default_priority") or CONFIG.get("default_priority") or "normal"),
@@ -1051,6 +1189,16 @@ class BackendAPI(QObject):
             "ui_dark": bool(data.get("ui_dark", CONFIG.get("ui_dark", False))),
             "ui_background": (data.get("ui_background") if "ui_background" in data
                               else CONFIG.get("ui_background") or ""),
+            "ui_background_folder": new_dir,
+            "ui_background_shuffle": bool(data.get(
+                "ui_background_shuffle", CONFIG.get("ui_background_shuffle", False))),
+            "ui_background_interval": _clamp_int(
+                _keep("ui_background_interval", default=10), 1, 1440, 10),
+            "ui_background_history": bg_history,
+            "ui_background_folder_history": dir_history,
+            "ui_sidebar_opacity": _clamp_opacity(_keep("ui_sidebar_opacity", default=100)),
+            "ui_background_blur": _clamp_int(_keep("ui_background_blur", default=0), 0, 40, 0),
+            "ui_background_dim": _clamp_int(_keep("ui_background_dim", default=0), 0, 80, 0),
             "global_mods_dir": (data.get("global_mods_dir") if "global_mods_dir" in data
                                 else CONFIG.get("global_mods_dir") or ""),
             "launcher_visibility": data.get("launcher_visibility") or CONFIG.get("launcher_visibility") or "keep",
@@ -1060,6 +1208,7 @@ class BackendAPI(QObject):
             "custom_homepage": data.get("custom_homepage") if "custom_homepage" in data else CONFIG.get("custom_homepage") or "",
             "homepage_mode": data.get("homepage_mode") or CONFIG.get("homepage_mode") or "news",
             "window_mode": data.get("window_mode") or CONFIG.get("window_mode") or "window",
+            "ui_window_aspect": _window_aspect(_keep("ui_window_aspect", default="4:3")),
             "skip_assets": bool(data.get("skip_assets", CONFIG.get("skip_assets", False))),
             "allow_multi_instance": bool(
                 data.get("allow_multi_instance", CONFIG.get("allow_multi_instance", False))),
@@ -1077,6 +1226,23 @@ class BackendAPI(QObject):
             CONFIG.set("feedback_heartbeat", bool(data.get("feedback_heartbeat")))
         if "feedback_consent" in data:
             CONFIG.set("feedback_consent", bool(data.get("feedback_consent")))
+        # 侧栏编排：空列表是合法状态（「一项都不隐藏」），按键在不在判，不看真假
+        for key in ("ui_nav_order", "ui_nav_pinned", "ui_nav_hidden"):
+            if key in data:
+                CONFIG.set(key, _nav_keys(data.get(key)))
+        if "ui_section_members" in data:
+            CONFIG.set("ui_section_members", _nav_members(data.get("ui_section_members")) or None)
+        if "ui_nav_groups" in data:
+            CONFIG.set("ui_nav_groups", _nav_groups(data.get("ui_nav_groups")) or None)
+        if "ui_nav_style" in data:
+            style = str(data.get("ui_nav_style") or "").strip()
+            CONFIG.set("ui_nav_style", style if style in ("compact", "grouped") else "grouped")
+        if "ui_nav_defaults" in data:
+            CONFIG.set("ui_nav_defaults", str(data.get("ui_nav_defaults") or ""))
+        if "ui_sidebar_width" in data:
+            # 越界的夹回去（140~320 是侧栏能用的范围），非数字当没设过
+            width = _clamp_int(data.get("ui_sidebar_width"), 140, 320, 0)
+            CONFIG.set("ui_sidebar_width", width or None)
         CONFIG.save()
         from mclauncher.source import invalidate_probe, warmup_async
         invalidate_probe()
@@ -1087,10 +1253,64 @@ class BackendAPI(QObject):
         # self 相关收尾必须容忍 self=None：save_settings 只依赖模块级 CONFIG，
         # 测试（test_pcl_quality）按这个契约不构造真 backend 直接以 None 调进来。
         if self is not None:
-            if "ui_dark" in data or "theme_color" in data or "ui_background" in data:
+            if any(k in data for k in ("ui_dark", "theme_color", "ui_background",
+                                       "ui_sidebar_opacity", "ui_background_blur",
+                                       "ui_background_dim", "ui_background_folder",
+                                       "ui_background_shuffle", "ui_background_interval")):
                 self.theme_changed.emit()
             self._settings_cache = None
             self._settings_rev = -1
+
+    # ---- 壁纸复原 ----
+    def background_history(self) -> list[str]:
+        """换下来的旧壁纸，最早在前、最新在后。"""
+        return _bg_history()[0]
+
+    def can_undo_background(self) -> bool:
+        return bool(_bg_history()[0])
+
+    def _current_background(self) -> dict:
+        return {"image": str(CONFIG.get("ui_background") or ""),
+                "folder": str(CONFIG.get("ui_background_folder") or "")}
+
+    def undo_background(self) -> dict:
+        """退回上一组壁纸设置，返回 {image, folder}。没历史就原样返回当前值。
+
+        单图和文件夹一起退：只退单图的话，文件夹还挂着轮播，界面上什么都不会变。
+        """
+        images, folders = _bg_history()
+        if not images:
+            return self._current_background()
+        previous = {"image": images.pop(), "folder": folders.pop()}
+        CONFIG.update({"ui_background_history": images,
+                       "ui_background_folder_history": folders,
+                       "ui_background": previous["image"],
+                       "ui_background_folder": previous["folder"]})
+        CONFIG.save()
+        self._after_background_change()
+        return previous
+
+    def reset_background(self) -> dict:
+        """回到出厂壁纸（纯色，连轮播文件夹一起清）。当前这组照样进历史栈。"""
+        default = {"image": str(DEFAULT_CONFIG.get("ui_background") or ""),
+                   "folder": str(DEFAULT_CONFIG.get("ui_background_folder") or "")}
+        current = self._current_background()
+        updates = {"ui_background": default["image"],
+                   "ui_background_folder": default["folder"]}
+        if current != default:
+            images, folders = _push_bg_history(current["image"], current["folder"])
+            updates["ui_background_history"] = images
+            updates["ui_background_folder_history"] = folders
+        CONFIG.update(updates)
+        CONFIG.save()
+        self._after_background_change()
+        return default
+
+    def _after_background_change(self):
+        """undo / reset 绕开了 save_settings，缓存失效和刷主题得自己补。"""
+        self._settings_cache = None
+        self._settings_rev = -1
+        self.theme_changed.emit()
 
     def test_ai_connection(self, settings: dict | None = None) -> str:
         """试连 AI。传 settings 就用它，让设置页能测「还没保存的值」而不必先落盘。"""
@@ -1436,27 +1656,28 @@ class BackendAPI(QObject):
         rows.sort(key=lambda r: r["date"], reverse=True)
         return rows
 
-    def get_installed_versions(self, instance: str, include_hidden: bool = False) -> list[str]:
+    def get_installed_versions(self, instance: str = "", include_hidden: bool = False) -> list[str]:
         from mclauncher import version_settings as vs
-        if instance:
-            ids = self._instance(instance).installed_ids()
-            if include_hidden or CONFIG.get("show_hidden_versions"):
-                return ids
-            inst = self._instance(instance)
-            return [vid for vid in ids if not vs.load(inst, vid).get("hidden")]
-        out = []
-        for name in list_instances():
-            for vid in Instance(name).installed_ids():
-                out.append(f"{name} / {vid}")
-        return out
+        inst = self._instance(instance)
+        ids = inst.installed_ids()
+        if include_hidden or CONFIG.get("show_hidden_versions"):
+            return ids
+        return [vid for vid in ids if not vs.load(inst, vid).get("hidden")]
+
+    def game_root_name(self) -> str:
+        """唯一游戏目录的名字。还需要「实例名」的旧接口一律拿它。"""
+        from mclauncher.instances import root_name
+        return root_name()
+
+    def game_root_path(self) -> str:
+        return str(self._instance().path)
 
     def get_instances(self) -> list[dict]:
-        """实例快照（带 2.5s TTL 缓存）。
+        """游戏目录快照（带 2.5s TTL 缓存）。
 
-        每个使用方（启动页 reload / banner、六个资源页的实例下拉框、
-        实例页）以前都是现场 iterdir + 逐实例读 meta/扫 versions，
-        同一轮 UI 刷新里会被叫五六次。数据变更走 _emit_ui_changed
-        立即失效，所以 TTL 只是把「没人改数据」时的重复扫描合并掉。
+        单目录模式下只有一行，保留列表形状是因为启动页 banner、
+        资源页、CLI 还按 `[{name, versions, …}]` 读它。数据变更走
+        _emit_ui_changed 立即失效，TTL 只合并「没人改数据」时的重复扫描。
         """
         now = time.monotonic()
         if self._inst_cache is not None and now - self._inst_cache_at < 2.5:
@@ -1471,18 +1692,98 @@ class BackendAPI(QObject):
             pack_name = pack.get("name") if pack else None
             mc = pack_name or meta.get("mc_version") or (ids[0] if ids else tr("未安装版本"))
             rows.append({
-                "name": name,
+                "name": inst.name,
                 "versions": len(ids),
                 "mc": str(mc),
                 "pack": pack_name or "",
                 "pack_version": (pack.get("version") if pack else "") or "",
                 "mc_version": (pack.get("mc_version") if pack else None) or meta.get("mc_version") or "",
                 "java": inst.java_pref(),
-                "java_label": self.instance_java_label(name),
+                "java_label": self.instance_java_label(inst.name),
             })
         self._inst_cache = rows
         self._inst_cache_at = now
         return rows
+
+    # ------------------------------------------------------------------
+    # 版本管理（对齐主流启动器：版本是一等单位）
+    # ------------------------------------------------------------------
+    LOADER_TAGS = (
+        ("neoforge", "NeoForge", "#D84B28"),
+        ("fabric", "Fabric", "#7C5CD6"),
+        ("quilt", "Quilt", "#C25BD6"),
+        ("forge", "Forge", "#E8862E"),
+        ("optifine", "OptiFine", "#2E9B6B"),
+        ("liteloader", "LiteLoader", "#4C8BF5"),
+    )
+
+    @classmethod
+    def loader_of(cls, version_id: str) -> tuple[str, str]:
+        low = str(version_id or "").lower()
+        for token, label, color in cls.LOADER_TAGS:
+            if token in low:
+                return label, color
+        return tr("原版"), "#8A9099"
+
+    def get_version_rows(self, include_hidden: bool = False) -> list[dict]:
+        """版本管理页的数据源：一个版本一行，自带隔离状态与模组数。"""
+        from mclauncher import version_settings as vs
+        inst = self._instance()
+        rows = []
+        for vid in inst.installed_ids():
+            settings = vs.load(inst, vid)
+            hidden = bool(settings.get("hidden"))
+            if hidden and not (include_hidden or CONFIG.get("show_hidden_versions")):
+                continue
+            isolated = vs.is_isolated(settings)
+            mods_dir = vs.mods_dir(inst, vid, settings)
+            label, color = self.loader_of(vid)
+            rows.append({
+                "id": vid,
+                "loader": label,
+                "loader_color": color,
+                "mc": self._version_mc_id(inst, vid),
+                "isolation": settings.get("isolation") or vs.ISOLATION_NONE,
+                "isolation_label": vs.ISOLATION_LABELS.get(
+                    settings.get("isolation") or vs.ISOLATION_NONE, ""),
+                "isolated": isolated,
+                "mods": self._count_mods(mods_dir),
+                "mods_dir": str(mods_dir),
+                "hidden": hidden,
+                "java": settings.get("java") or JAVA_AUTO,
+                "memory_mb": settings.get("memory_mb") or 0,
+            })
+        return rows
+
+    @staticmethod
+    def _count_mods(folder) -> int:
+        p = Path(folder)
+        if not p.is_dir():
+            return 0
+        return sum(1 for f in p.iterdir()
+                   if f.is_file() and f.name.lower().endswith(".jar"))
+
+    @staticmethod
+    def _version_mc_id(inst, version_id: str) -> str:
+        """版本 json 里的原版号。继承链上的 inheritsFrom 优先。"""
+        data = inst.version_json(version_id) or {}
+        return str(data.get("inheritsFrom") or data.get("id") or version_id)
+
+    def get_version_isolation(self, version: str) -> str:
+        from mclauncher import version_settings as vs
+        return vs.load(self._instance(), version).get("isolation") or vs.ISOLATION_NONE
+
+    def set_version_isolation(self, version: str, mode: str, seed: bool = False) -> dict:
+        """切「独立 / 大锅饭」。seed=True 会把共享池里的模组复制一份过去。"""
+        from mclauncher import version_settings as vs
+        out = vs.set_isolation(self._instance(), version, mode, seed=seed)
+        self._emit_ui_changed()
+        return out
+
+    def toggle_version_isolation(self, version: str, isolated: bool, seed: bool = False) -> dict:
+        from mclauncher import version_settings as vs
+        mode = vs.ISOLATED_DEFAULT if isolated else vs.ISOLATION_NONE
+        return self.set_version_isolation(version, mode, seed=seed)
 
     @staticmethod
     def _catalog_source(source: str) -> str:
@@ -1497,7 +1798,7 @@ class BackendAPI(QObject):
     def _gather_hits(fetchers) -> list[dict]:
         """依次取各来源结果。部分源失败保留其余结果；全部失败才抛出。
 
-        以前这里一律 `except: hits = []`，CF key 失效或断网跟「真的没搜到」
+        不能一律 `except: hits = []` 吞掉：那样 CF key 失效或断网跟「真的没搜到」
         在界面上长得一模一样，用户只会看到「没有找到相关模组」。
         """
         rows: list[dict] = []
@@ -1581,7 +1882,7 @@ class BackendAPI(QObject):
             self._pack_cache = rows
             return rows
         if not hits:
-            # 「全部」以前只回退到 Modrinth，CF 独占的整合包搜不出来。
+            # 「全部」要同时问两个源：只回退 Modrinth 的话 CF 独占的整合包搜不出来。
             fetchers = []
             if src in ("all", "modrinth"):
                 fetchers.append(("modrinth", lambda: modpack_mod.modrinth_search(
@@ -1634,7 +1935,7 @@ class BackendAPI(QObject):
         label = extra.get("category") or extra.get("type") or ""
         cats = category_facets(label)
         cf_cats = cf_category_tokens(label)
-        # 「全部」以前落进 else 分支只搜了 Modrinth，CF 独占的模组一律搜不到。
+        # 「全部」要同时问两个源：只搜 Modrinth 的话 CF 独占的模组一律搜不到。
         fetchers = []
         if src in ("all", "modrinth"):
             fetchers.append(("modrinth", lambda: mods_mod.search_mods(
@@ -1806,7 +2107,7 @@ class BackendAPI(QObject):
             on_progress=dm.on_progress,
             cancel=dm.cancel,
         )
-        log(f"安装到实例 {inst.name}")
+        log(f"安装到游戏目录 {inst.path}")
         from mclauncher.game_install import install_game
         vid = install_game(installer, version, loader, loader_version, extra)
         log(f"版本安装完成: {vid}")
@@ -1826,16 +2127,19 @@ class BackendAPI(QObject):
         path = extra.get("path") or name
         on_progress = dm.on_progress
         src_l = (source or "").lower()
+        # 整合包默认独立成一版：不开隔离的话这一包模组会倒进大锅饭，
+        # 所有没隔离的版本跟着一起吃。
+        isolate = bool(extra.get("isolate", True))
+        version_name = str(extra.get("version_name") or "").strip()
         log(tr("整合包安装引擎：按声明的 Forge/Fabric 版本直装（不依赖残缺的 Maven 列表）"))
 
-        if src_l.startswith(tr("本地")) or Path(str(path)).is_file():
+        if src_l.startswith(tr("本地")) or Path(str(path)).exists():
             p = Path(path)
-            log(f"从本地文件安装: {p}")
-            log(f"实例: {inst.name}  路径: {inst.path}")
-            if p.suffix.lower() == ".mrpack":
-                meta = modpack_mod.install_mrpack(dm, str(p), inst, on_progress=on_progress, cancel=dm.cancel)
-            else:
-                meta = modpack_mod.install_cf_zip(dm, str(p), inst, on_progress=on_progress, cancel=dm.cancel)
+            log(f"从本地{'目录' if p.is_dir() else '文件'}安装: {p}")
+            log(f"游戏目录: {inst.path}")
+            meta = modpack_mod.install_local_pack(dm, str(p), inst, on_progress=on_progress,
+                                                  cancel=dm.cancel, isolate=isolate,
+                                                  version_name=version_name)
         elif src_l.startswith("curse"):
             hit = extra if extra.get("id") or extra.get("slug") else self._lookup_pack(name, source)
             addon_id = hit.get("id")
@@ -1843,33 +2147,39 @@ class BackendAPI(QObject):
             if not addon_id and not slug:
                 raise RuntimeError(f"无法解析整合包: {name}")
             log(f"从 CurseForge 安装 {hit.get('name') or name} (id={addon_id} slug={slug})")
-            log(f"实例: {inst.name}  路径: {inst.path}")
+            log(f"游戏目录: {inst.path}")
             if str(addon_id) == str(CBC_CF_ID) or (slug or "") == CBC_CF_SLUG:
                 log(tr("目标包：机械动力：黄铜协奏曲（CBC），Minecraft 1.20.1 Forge。这不是 Create+ / CDC。"))
             elif str(addon_id) == str(CDC_CF_ID) or (slug or "") == CDC_CF_SLUG:
                 log(tr("目标包：机械动力：齿轮盛宴（CDC），Minecraft 1.20.1 Forge。"))
             existing = (inst.meta() or {}).get("modpack")
             if isinstance(existing, dict) and existing.get("name"):
-                log(f"注意：实例 {inst.name} 当前已是 {existing.get('name')} "
+                log(f"注意：游戏目录当前已是 {existing.get('name')} "
                     f"{existing.get('version') or ''} / {existing.get('mc_version') or ''}。"
-                    "覆盖安装会混入旧模组，建议先新建实例再装。")
+                    "覆盖安装会混入旧模组，装进去之后建议到「版本管理」把这个版本切成独立。")
             meta = modpack_mod.install_cf_modpack(
                 dm, addon_id, inst,
                 api_key=CONFIG.get("curseforge_api_key"),
                 on_progress=on_progress, cancel=dm.cancel, cf_slug=slug,
                 file_id=extra.get("file_id") or extra.get("version_id"),
+                isolate=isolate, version_name=version_name,
             )
         else:
             hit = extra if extra.get("slug") else self._lookup_pack(name, source)
             slug = hit.get("slug") or name
             log(f"从 Modrinth 安装 {hit.get('name') or slug} ({slug})")
-            log(f"实例: {inst.name}  路径: {inst.path}")
+            log(f"游戏目录: {inst.path}")
             meta = modpack_mod.install_mrpack_by_slug(
                 dm, slug, inst, on_progress=on_progress, cancel=dm.cancel,
-                version_id=extra.get("version_id"))
+                version_id=extra.get("version_id"),
+                isolate=isolate, version_name=version_name)
         if isinstance(meta, dict) and meta.get("instance"):
             CONFIG.set("default_instance", meta["instance"])
             CONFIG.save()
+        vid = (meta or {}).get("version_id")
+        if vid:
+            self._last_installed = {"instance": inst.name, "version": vid, "loader": tr("无")}
+            log(f"整合包版本: {vid}")
         log(f"整合包安装完成: {(meta or {}).get('name') or name}")
 
     def _install_mod_impl(self, progress, log, name, instance, extra=None):
@@ -1931,7 +2241,7 @@ class BackendAPI(QObject):
                     inst, (files or [name])[0], save_name, extra.get("version") or "")
                 log(f"已放入存档: {dest}")
             else:
-                log(tr("数据包已放到实例 datapacks 目录。可在存档管理里选世界安装进去。"))
+                log(tr("数据包已放到 datapacks 目录。可在存档管理里选世界安装进去。"))
 
     def _download_java_impl(self, progress, log, major):
         dm = self._dm(progress, log)
@@ -1992,8 +2302,8 @@ class BackendAPI(QObject):
             raise LaunchError(tr("启动预检未通过") + "\n\n" + msg)
 
         inst = self._instance(instance)
-        log(f"实例: {inst.name} | 版本: {version}")
-        log(f"实例 Java 设置: {inst.java_pref()}")
+        log(f"游戏目录: {inst.path} | 版本: {version}")
+        log(f"游戏目录 Java 设置: {inst.java_pref()}")
         CONFIG.set("default_instance", inst.name)
         CONFIG.save()
         from mclauncher import launch_flow, version_settings as vs

@@ -9,11 +9,10 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
-    BodyLabel, ComboBox, FluentIcon as FIF, InfoBar, MessageBox, PushButton,
+    ComboBox, FluentIcon as FIF, InfoBar, MessageBox, PushButton,
     StrongBodyLabel, TransparentPushButton,
 )
 
-from mclauncher.config import CONFIG
 from ..pcl_chrome import Theme
 from ..widgets import InputDialog, EmptyState
 from mclauncher.i18n import tr
@@ -50,11 +49,9 @@ class ServerPage(QWidget):
         self._title_lab.setStyleSheet(f"color: {Theme.text}; font-size: 18px;")
         tl.addWidget(self._title_lab)
         tl.addSpacing(16)
-        tl.addWidget(BodyLabel(tr("实例")))
+        # 只剩一个游戏目录：控件留着给旧调用方，不再摆上工具栏
         self.instance_box = ComboBox()
-        self.instance_box.setFixedWidth(160)
-        self.instance_box.currentTextChanged.connect(self._on_instance_changed)
-        tl.addWidget(self.instance_box)
+        self.instance_box.setVisible(False)
         tl.addStretch(1)
         add_btn = PushButton(tr("添加服务器"))
         add_btn.setIcon(FIF.ADD)
@@ -89,7 +86,7 @@ class ServerPage(QWidget):
             f"{Theme.line}; font-weight: 600; padding: 8px; }}"
         )
         self.empty = EmptyState(_GLOBE_ICON, tr("没有可用的服务器\n点击「添加服务器」开始添加"))
-        # 表格和空状态占同一格：以前空状态是单独一行且 stretch=0，
+        # 表格和空状态占同一格（栈）：空状态若单独占一行且 stretch=0，
         # 表格隐藏后它只能挤在页面底部一条，不居中。
         self._body = QStackedWidget()
         self._body.addWidget(self.table)
@@ -97,22 +94,14 @@ class ServerPage(QWidget):
         root.addWidget(self._body, 1)
 
     def _fill_instances(self, prefer: str = ""):
-        cur = self.instance_box.currentText()
         self.instance_box.blockSignals(True)
         self.instance_box.clear()
-        names = [i["name"] for i in self.backend.get_instances()]
-        self.instance_box.addItems(names)
-        pick = prefer or cur or CONFIG.get("default_instance") or (names[0] if names else "")
-        if pick in names:
-            self.instance_box.setCurrentText(pick)
+        self.instance_box.addItem(self.backend.game_root_name())
         self.instance_box.blockSignals(False)
-
-    def _on_instance_changed(self, name: str):
-        self.reload(name)
 
     def reload(self, instance: str = ""):
         self._fill_instances(instance)
-        self._instance = self.instance_box.currentText() or instance or ""
+        self._instance = self.backend.game_root_name()
         try:
             self._servers = self.backend.list_servers(self._instance)
         except Exception:
@@ -149,8 +138,8 @@ class ServerPage(QWidget):
             btn_w = QWidget()
             btn_l = QHBoxLayout(btn_w)
             btn_l.setContentsMargins(4, 2, 4, 2)
-            # 不再 setFixedWidth(40)：两个汉字加内边距根本放不下，会被省略号截成「编…」，
-            # 切英文后 Edit/Delete 更放不下。让按钮按自身 sizeHint 走，最后一列本来就 stretch。
+            # 按钮宽度不钉死：40px 放不下两个汉字加内边距，会被省略号截成「编…」，
+            # 英文 Edit/Delete 更放不下。按自身 sizeHint 走，最后一列本来就 stretch。
             edit_b = TransparentPushButton(tr("编辑"))
             edit_b.clicked.connect(lambda checked, idx=i: self._on_edit(idx))
             del_b = TransparentPushButton(tr("删除"))
@@ -160,15 +149,17 @@ class ServerPage(QWidget):
             self.table.setCellWidget(i, 4, btn_w)
 
     def _on_add(self):
-        dlg = InputDialog(tr("添加服务器"), tr("服务器名称"), placeholder=tr("可选"))
+        dlg = InputDialog(tr("添加服务器"), tr("服务器名称"), placeholder=tr("可选"), parent=self)
         if not dlg.exec():
             return
         name = dlg.value()
-        ip_dlg = InputDialog(tr("添加服务器"), tr("服务器地址"), placeholder=tr("example.com 或 IP"))
+        ip_dlg = InputDialog(tr("添加服务器"), tr("服务器地址"), placeholder=tr("example.com 或 IP"),
+                             parent=self)
         if not ip_dlg.exec():
             return
         ip = ip_dlg.value()
-        port_dlg = InputDialog(tr("添加服务器"), tr("端口"), text="25565", placeholder=tr("默认 25565"))
+        port_dlg = InputDialog(tr("添加服务器"), tr("端口"), text="25565", placeholder=tr("默认 25565"),
+                               parent=self)
         if not port_dlg.exec():
             return
         port_text = port_dlg.value()
@@ -182,11 +173,11 @@ class ServerPage(QWidget):
 
     def _on_edit(self, index: int):
         s = self._servers[index]
-        dlg = InputDialog(tr("编辑服务器"), tr("服务器名称"), text=s.get("name", ""))
+        dlg = InputDialog(tr("编辑服务器"), tr("服务器名称"), text=s.get("name", ""), parent=self)
         if not dlg.exec():
             return
         name = dlg.value()
-        ip_dlg = InputDialog(tr("编辑服务器"), tr("服务器地址"), text=s.get("ip", ""))
+        ip_dlg = InputDialog(tr("编辑服务器"), tr("服务器地址"), text=s.get("ip", ""), parent=self)
         if not ip_dlg.exec():
             return
         ip = ip_dlg.value()

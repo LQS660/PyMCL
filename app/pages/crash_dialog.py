@@ -138,7 +138,7 @@ class CrashDialog(QDialog):
             dest.write_text(tail, encoding="utf-8")
             open_path(dest)
         except OSError as exc:
-            # 以前这里 pass 掉了：磁盘满 / 只读目录时按钮点了毫无反应
+            # 写不出去（磁盘满 / 只读目录）必须告诉用户，否则按钮点了毫无反应
             InfoBar.error(tr("无法查看输出"), str(exc), parent=self,
                           position=InfoBarPosition.TOP, duration=4500)
 

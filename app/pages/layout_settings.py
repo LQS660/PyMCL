@@ -5,9 +5,9 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
-    BodyLabel, CaptionLabel, CheckBox, FluentIcon as FIF, InfoBar, InfoBarPosition,
-    MessageBoxBase, PushButton, SpinBox, StrongBodyLabel, SubtitleLabel,
-    ToolButton,
+    BodyLabel, CaptionLabel, CheckBox, ComboBox, FluentIcon as FIF, InfoBar,
+    InfoBarPosition, MessageBoxBase, PushButton, SpinBox, StrongBodyLabel,
+    SubtitleLabel, ToolButton,
 )
 
 from mclauncher.config import CONFIG
@@ -15,8 +15,8 @@ from mclauncher.i18n import tr
 
 from .. import layout_model
 from ..main_window import (
-    _NAV_SPECS, _TOP_KEYS, nav_items_from_config as nav_items,
-    pinned_from_config, sub_title,
+    NAV_STYLE_COMPACT, NAV_STYLE_GROUPED, NAV_STYLE_LABELS, _NAV_SPECS, _TOP_KEYS,
+    nav_items_from_config as nav_items, nav_style, pinned_from_config, sub_title,
 )
 
 
@@ -30,6 +30,21 @@ class SidebarEditorDialog(MessageBoxBase):
         hint = BodyLabel(tr("调整顶部导航的顺序与显示项，以及侧栏宽度。"), self)
         hint.setWordWrap(True)
         self.viewLayout.addWidget(hint)
+
+        style_row = QWidget(self)
+        sl = QHBoxLayout(style_row)
+        sl.setContentsMargins(0, 4, 0, 4)
+        sl.addWidget(BodyLabel(tr("侧栏排法"), self))
+        self.style_box = ComboBox(self)
+        self._style_keys = {tr(v): k for k, v in NAV_STYLE_LABELS.items()}
+        self.style_box.addItems(list(self._style_keys))
+        self.style_box.setCurrentText(tr(NAV_STYLE_LABELS[nav_style()]))
+        self.style_box.currentTextChanged.connect(self._on_style_changed)
+        sl.addWidget(self.style_box, 1)
+        self.viewLayout.addWidget(style_row)
+        self.style_hint = CaptionLabel("", self)
+        self.style_hint.setWordWrap(True)
+        self.viewLayout.addWidget(self.style_hint)
 
         order = [k for k in (CONFIG.get("ui_nav_order") or []) if k in _TOP_KEYS]
         for k in _TOP_KEYS:
@@ -48,8 +63,12 @@ class SidebarEditorDialog(MessageBoxBase):
         # 固定到侧栏的分区子页（拖拽固定的入口在这里排序/取消）
         from ..main_window import pinned_from_config
         self._pinned = pinned_from_config()
+        self._pinned_at_open = list(self._pinned)
+        self._grouped_rows = nav_style() == NAV_STYLE_GROUPED
         self.viewLayout.addWidget(StrongBodyLabel(tr("固定到侧栏的子页"), self))
-        pin_hint = BodyLabel(tr("把分区横条里的子页拖到侧栏即可固定；此处可调整顺序或取消固定。"), self)
+        pin_hint = BodyLabel(
+            tr("把分区横条里的子页拖到侧栏即可固定，从侧栏拖回「下载」/「更多」就放回去；"
+               "此处可调整顺序或取消固定。"), self)
         pin_hint.setWordWrap(True)
         self.viewLayout.addWidget(pin_hint)
         self._pin_host = QWidget(self)
@@ -72,12 +91,26 @@ class SidebarEditorDialog(MessageBoxBase):
         wl.addWidget(self.width_spin)
         self.viewLayout.addWidget(width_row)
 
+        self._on_style_changed()
         reset = PushButton(tr("恢复默认侧栏"), self)
         reset.clicked.connect(self._reset)
         self.viewLayout.addWidget(reset)
         self.yesButton.setText(tr("确定"))
         self.cancelButton.setText(tr("取消"))
         self.widget.setMinimumWidth(460)
+
+    def _selected_style(self) -> str:
+        return self._style_keys.get(self.style_box.currentText(), NAV_STYLE_COMPACT)
+
+    def _on_style_changed(self, *_a):
+        """分组排法的顺序由分组决定，但固定项照样可以在这里取消。"""
+        grouped = self._selected_style() == NAV_STYLE_GROUPED
+        self._rows_host.setEnabled(not grouped)
+        self.style_hint.setText(
+            tr("分组排法按「账户 / 游戏 / 通用」分组，下面那份一级项排序不生效"
+               "（顺序直接拖侧栏调整）；勾掉的项照样不显示。") if grouped else "")
+        self._grouped_rows = grouped
+        self._rebuild_pin_rows()
 
     def _rebuild_rows(self, hidden: set):
         while self._rows.count():
@@ -132,19 +165,22 @@ class SidebarEditorDialog(MessageBoxBase):
             hl = QHBoxLayout(row)
             hl.setContentsMargins(0, 0, 0, 0)
             hl.setSpacing(4)
-            up = ToolButton(FIF.UP, row)
-            down = ToolButton(FIF.DOWN, row)
-            up.setFixedSize(24, 24)
-            down.setFixedSize(24, 24)
-            up.setEnabled(idx > 0)
-            down.setEnabled(idx < len(self._pinned) - 1)
-            up.clicked.connect(lambda _=False, i=idx: self._move_pinned(i, -1))
-            down.clicked.connect(lambda _=False, i=idx: self._move_pinned(i, +1))
+            # 分组排法下这里排不了序：顺序归各个分组管，留两颗按不动的箭头
+            # 比留两颗按了没反应的强
+            if not self._grouped_rows:
+                up = ToolButton(FIF.UP, row)
+                down = ToolButton(FIF.DOWN, row)
+                up.setFixedSize(24, 24)
+                down.setFixedSize(24, 24)
+                up.setEnabled(idx > 0)
+                down.setEnabled(idx < len(self._pinned) - 1)
+                up.clicked.connect(lambda _=False, i=idx: self._move_pinned(i, -1))
+                down.clicked.connect(lambda _=False, i=idx: self._move_pinned(i, +1))
+                hl.addWidget(up)
+                hl.addWidget(down)
             name = BodyLabel(sub_title(key), row)
             rm = PushButton(tr("取消固定"), row)
             rm.clicked.connect(lambda _=False, k=key: self._unpin(k))
-            hl.addWidget(up)
-            hl.addWidget(down)
             hl.addWidget(name, 1)
             hl.addWidget(rm)
             lay.addWidget(row)
@@ -161,13 +197,66 @@ class SidebarEditorDialog(MessageBoxBase):
             self._rebuild_pin_rows()
 
     def _reset(self):
-        self._order = list(_TOP_KEYS)
-        self._rebuild_rows(set())
-        self._pinned = []
+        """恢复出厂侧栏：分组排法；切回精简时是 启动 / 游戏 / 版本管理，其余沉底或收起。"""
+        from ..main_window import (
+            _DEFAULT_NAV_HIDDEN, _DEFAULT_NAV_ORDER, _DEFAULT_NAV_PINNED, _DEFAULT_NAV_STYLE,
+        )
+        self.style_box.setCurrentText(tr(NAV_STYLE_LABELS[_DEFAULT_NAV_STYLE]))
+        self._order = [k for k in _DEFAULT_NAV_ORDER if k in _TOP_KEYS]
+        for k in _TOP_KEYS:
+            if k not in self._order:
+                self._order.append(k)
+        self._rebuild_rows(set(_DEFAULT_NAV_HIDDEN))
+        self._pinned = list(_DEFAULT_NAV_PINNED)
         self._rebuild_pin_rows()
         self.width_spin.setValue(188)
+        # accept() 平时要把用户拖出来的混排保住，那套合并逻辑会打乱出厂序列。
+        # 点过「恢复默认」就绕开它，原样写默认值。
+        self._force_defaults = True
 
     def accept(self):
+        style_changed = self._selected_style() != nav_style()
+        CONFIG.set("ui_nav_style", self._selected_style())
+        if self._selected_style() == NAV_STYLE_GROUPED:
+            from ..main_window import grouped_layout, save_grouped_layout
+            if getattr(self, "_force_defaults", False):
+                # 「恢复默认侧栏」：精简那一档的序列也一起写回出厂值，
+                # 不然切过去看到的还是他上次排的那套
+                from ..main_window import _DEFAULT_NAV_ORDER, _DEFAULT_NAV_PINNED
+                CONFIG.set("ui_nav_order", list(_DEFAULT_NAV_ORDER))
+                CONFIG.set("ui_nav_pinned", list(_DEFAULT_NAV_PINNED))
+                CONFIG.set("ui_nav_groups", None)
+            else:
+                dropped = set(self._pinned_at_open) - set(self._pinned)
+                if dropped:
+                    groups = grouped_layout()
+                    for _title, keys in groups:
+                        keys[:] = [k for k in keys if k not in dropped]
+                    save_grouped_layout(groups)
+            CONFIG.set("ui_nav_hidden", sorted(self._hidden_now()))
+            CONFIG.set("ui_sidebar_width", int(self.width_spin.value()))
+            CONFIG.save()
+            self.win._rebuild_sections()
+            self.win._rebuild_sidebar()
+            super().accept()
+            return
+        if style_changed:
+            # 从分组切回精简：分组那档把一堆子页当成固定项，切回来得重建横条
+            self.win._rebuild_sections()
+        if getattr(self, "_force_defaults", False):
+            from ..main_window import (
+                _DEFAULT_NAV_HIDDEN, _DEFAULT_NAV_ORDER, _DEFAULT_NAV_PINNED,
+            )
+            CONFIG.set("ui_nav_order", list(_DEFAULT_NAV_ORDER))
+            CONFIG.set("ui_nav_hidden", list(_DEFAULT_NAV_HIDDEN))
+            CONFIG.set("ui_nav_pinned", list(_DEFAULT_NAV_PINNED))
+            CONFIG.set("ui_nav_groups", None)
+            CONFIG.set("ui_sidebar_width", int(self.width_spin.value()))
+            CONFIG.save()
+            self.win._rebuild_sections()
+            self.win._rebuild_sidebar()
+            super().accept()
+            return
         hidden = self._hidden_now()
         visible = [k for k in self._order if k not in hidden]
         if not visible:
@@ -192,6 +281,10 @@ class SidebarEditorDialog(MessageBoxBase):
         CONFIG.set("ui_sidebar_width", int(self.width_spin.value()))
         CONFIG.set("ui_nav_pinned", list(self._pinned) or None)
         CONFIG.save()
+        # 取消固定的子页要重新长回分区横条上：只重建侧栏的话，它在侧栏
+        # 没了、横条也没补回来，这一页本次运行内就再也点不到了。
+        if set(self._pinned_at_open) != set(self._pinned):
+            self.win._rebuild_sections()
         self.win._rebuild_sidebar()
         super().accept()
 

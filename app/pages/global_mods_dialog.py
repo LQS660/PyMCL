@@ -41,9 +41,9 @@ class GlobalModsDialog(MessageBoxBase):
             bar.addWidget(QLabel(name), 1)
             sw = SwitchButton()
             sw.setChecked(bool(row.get("enabled")))
-            # `sw` 也必须用默认参数绑住。以前它是自由变量，循环结束后所有 lambda 拿到的
-            # 都是最后一个 SwitchButton：某个 mod 启禁失败时回滚的是列表最后那个开关，
-            # 用户看到的是「点 A 失败，B 自己弹回去了」。
+            # `sw` 也必须用默认参数绑住。当自由变量的话，循环结束后所有 lambda 拿到的
+            # 都是最后一个 SwitchButton：某个 mod 启禁失败时回滚的会是列表最后那个开关，
+            # 用户看到的就是「点 A 失败，B 自己弹回去了」。
             sw.checkedChanged.connect(lambda on, n=name, w=sw: self._toggle(n, on, w))
             wrap = QWidget()
             wrap.setLayout(bar)

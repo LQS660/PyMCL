@@ -2,7 +2,7 @@
 """下载分区：顶部分类横条 + 内容页。"""
 
 from PySide6.QtCore import (
-    QAbstractAnimation, QEasingCurve, QParallelAnimationGroup, QPoint,
+    QAbstractAnimation, QEasingCurve, QEvent, QParallelAnimationGroup, QPoint,
     QPropertyAnimation, QRect, Qt, QTimer, Signal,
 )
 from PySide6.QtWidgets import (
@@ -79,7 +79,8 @@ class SlideHStack(QStackedWidget):
         self._pending = widget
         self._grab_gen += 1
         gen = self._grab_gen
-        QTimer.singleShot(0, lambda: self._grab_new_and_animate(widget, direction, w, h, gen))
+        QTimer.singleShot(
+            0, self, lambda: self._grab_new_and_animate(widget, direction, w, h, gen))
 
     def _grab_new_and_animate(self, widget, direction, w, h, gen):
         if gen != self._grab_gen or self._pending is not widget:
@@ -136,6 +137,62 @@ class SlideHStack(QStackedWidget):
 NAV_MIME = "application/x-pymcl-nav"
 
 
+def nav_key_of(mime) -> str:
+    """拖拽里带的导航键；不是导航拖拽就返回空串。"""
+    if not mime.hasFormat(NAV_MIME):
+        return ""
+    return bytes(mime.data(NAV_MIME)).decode("utf-8", "ignore")
+
+
+def unpinnable_key_of(mime) -> str:
+    """这一拖是不是「把侧栏固定项拖回分区」；不是就返回空串。
+
+    横条按钮在自己栏里乱拖也带同一种 mime，那种不该亮落点提示——
+    真能放回来的只有当前固定在侧栏上的键。
+    """
+    key = nav_key_of(mime)
+    if not key:
+        return ""
+    from ..main_window import pinned_from_config
+    return key if key in pinned_from_config() else ""
+
+
+def section_of(widget):
+    """往上找承载这个子页的分区壳，找不到返回 None。"""
+    w = widget.parentWidget()
+    while w is not None and not isinstance(w, DownloadSection):
+        w = w.parentWidget()
+    return w
+
+
+def forward_nav_drag(widget, event) -> bool:
+    """子页替身后的分区壳接住导航拖拽。
+
+    Qt 的拖放不冒泡：自己也 setAcceptDrops 的子页（整合包页、模组页）
+    会把落在它上面的事件整个吃掉，分区壳再也收不到。这些页在自己的
+    dragEnter/drop 里调一下这个函数，把导航拖拽转交给壳。
+    """
+    key = unpinnable_key_of(event.mimeData())
+    if not key:
+        return False
+    sec = section_of(widget)
+    if sec is None:
+        return False
+    if event.type() == QEvent.Drop:
+        sec.take_nav_drop(key)
+    else:
+        sec.show_drop_veil(True)
+    event.acceptProposedAction()
+    return True
+
+
+def forward_nav_leave(widget):
+    """配合 forward_nav_drag：拖拽移出子页时把壳上的提示收掉。"""
+    sec = section_of(widget)
+    if sec is not None:
+        sec.show_drop_veil(False)
+
+
 class _DragButton(QPushButton):
     """分类按钮 + 拖拽源：拖到侧栏即"固定为一级导航项"。"""
 
@@ -178,7 +235,7 @@ class _DragButton(QPushButton):
 
 class DownloadCatBar(QFrame):
     currentChanged = Signal(object)
-    unpinRequested = Signal(str)   # 拖回分类条：取消固定
+    unpinRequested = Signal(str, int)   # 拖回分类条：(key, 插入位序，-1=末尾)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -298,14 +355,80 @@ class DownloadCatBar(QFrame):
         self._scroll.ensureWidgetVisible(btn, 24, 0)
 
     def dragEnterEvent(self, e):
-        if e.mimeData().hasFormat(NAV_MIME):
+        if unpinnable_key_of(e.mimeData()):
+            self._show_drop_line(e.position().toPoint())
             e.acceptProposedAction()
 
+    def dragMoveEvent(self, e):
+        if unpinnable_key_of(e.mimeData()):
+            self._show_drop_line(e.position().toPoint())
+            e.acceptProposedAction()
+
+    def dragLeaveEvent(self, e):
+        self._hide_drop_line()
+        super().dragLeaveEvent(e)
+
     def dropEvent(self, e):
-        key = bytes(e.mimeData().data(NAV_MIME)).decode("utf-8", "ignore")
-        if key:
-            self.unpinRequested.emit(key)
+        self._hide_drop_line()
+        # 判据跟 dragEnter / dragMove 同一个：那两处只认「当前固定在侧栏上的
+        # 键」，这里却放行任意导航键，松手后上游又因为「不在 pinned 里」静默
+        # 返回——用户看到的就是光标说能放、放下去什么也没发生。
+        key = unpinnable_key_of(e.mimeData())
+        if not key:
+            e.ignore()
+            return
+        self.unpinRequested.emit(key, self.insert_index_at(e.position().toPoint()))
         e.acceptProposedAction()
+
+    # ---- 落点计算与提示线（对齐侧栏那条绿线的手感）----
+    def ordered_buttons(self) -> list:
+        """横条上按显示顺序排好的按钮（跟分区成员列表一一对应）。"""
+        out = []
+        for i in range(self._layout.count()):
+            w = self._layout.itemAt(i).widget()
+            if isinstance(w, QPushButton):
+                out.append(w)
+        return out
+
+    def insert_index_at(self, pos) -> int:
+        """pos 处的插入位序；落在按钮区之外返回 -1（= 追加到末尾）。"""
+        for i, btn in enumerate(self.ordered_buttons()):
+            left = self._host.mapTo(self, btn.geometry().topLeft()).x()
+            w = btn.width()
+            if pos.x() < left + w // 2:
+                return i
+            if pos.x() < left + w:
+                return i + 1
+        return -1
+
+    def _drop_line(self) -> QFrame:
+        if getattr(self, "_dline", None) is None:
+            self._dline = QFrame(self)
+            self._dline.setObjectName("catDropLine")
+            self._dline.setFixedWidth(2)
+            self._dline.setStyleSheet(
+                f"#catDropLine {{ background: {Theme.green}; border: none; }}")
+            self._dline.hide()
+        return self._dline
+
+    def _show_drop_line(self, pos):
+        btns = self.ordered_buttons()
+        idx = self.insert_index_at(pos)
+        line = self._drop_line()
+        if not btns:
+            x = 16
+        elif idx < 0 or idx >= len(btns):
+            last = btns[-1].geometry()
+            x = self._host.mapTo(self, last.topLeft()).x() + last.width()
+        else:
+            x = self._host.mapTo(self, btns[idx].geometry().topLeft()).x()
+        line.setGeometry(max(0, x - 1), 6, 2, max(8, self.height() - 16))
+        line.raise_()
+        line.show()
+
+    def _hide_drop_line(self):
+        if getattr(self, "_dline", None) is not None:
+            self._dline.hide()
 
     def _indicator_rect(self, btn) -> QRect:
         r = btn.geometry()
@@ -365,6 +488,68 @@ class DownloadSection(QWidget):
         root.setSpacing(0)
         root.addWidget(self.cat)
         root.addWidget(self.stack, 1)
+
+        # 整个分区页都收「把固定项拖回来」，不只顶上那条 48px 的横条：
+        # 只认横条的话用户十有八九松手在内容区，看到的是禁止光标。
+        self.setAcceptDrops(True)
+        self._drop_veil = None
+
+    # ---- 把侧栏固定项拖回本分区 ----
+    def dragEnterEvent(self, e):
+        if unpinnable_key_of(e.mimeData()):
+            self.show_drop_veil(True)
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):
+        if unpinnable_key_of(e.mimeData()):
+            e.acceptProposedAction()
+
+    def dragLeaveEvent(self, e):
+        self.show_drop_veil(False)
+        super().dragLeaveEvent(e)
+
+    def dropEvent(self, e):
+        key = unpinnable_key_of(e.mimeData())
+        if key:
+            self.take_nav_drop(key)
+            e.acceptProposedAction()
+
+    def take_nav_drop(self, key: str):
+        """收下一个拖回来的导航键：落到横条末尾。"""
+        self.show_drop_veil(False)
+        self.cat.unpinRequested.emit(key, -1)
+
+    def show_drop_veil(self, on: bool):
+        """拖拽悬停时铺一层「松手放回这一栏」的提示，让落点看得见。"""
+        if not on:
+            if self._drop_veil is not None:
+                self._drop_veil.hide()
+            return
+        veil = self._drop_veil
+        if veil is None:
+            veil = QLabel(self)
+            veil.setAlignment(Qt.AlignCenter)
+            veil.setAttribute(Qt.WA_TransparentForMouseEvents)
+            self._drop_veil = veil
+        veil.setText(self._drop_veil_text())
+        bg = "rgba(0, 0, 0, 140)" if Theme.dark else "rgba(255, 255, 255, 190)"
+        veil.setStyleSheet(
+            f"QLabel {{ color: {Theme.title}; font-size: 16px; font-weight: 600;"
+            f" border: 2px dashed {Theme.green}; border-radius: 12px;"
+            f" background-color: {bg}; }}"
+        )
+        veil.setGeometry(self.rect().adjusted(12, 12, -12, -12))
+        veil.show()
+        veil.raise_()
+
+    def _drop_veil_text(self) -> str:
+        from mclauncher.i18n import tr
+        return tr("松手放回「下载」")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._drop_veil is not None and self._drop_veil.isVisible():
+            self._drop_veil.setGeometry(self.rect().adjusted(12, 12, -12, -12))
 
     def add_page(self, page, title: str = ""):
         if page is None or page in self._by_widget:
@@ -437,4 +622,8 @@ class DownloadSection(QWidget):
 
 
 class MoreSection(DownloadSection):
-    """侧栏「更多」：杂项页（实例/模组/账号/联机/服务器/时长/反馈/设置）共用横条切换壳。"""
+    """侧栏「更多」：杂项页（版本管理/模组/账号/联机/服务器/时长/反馈/设置）共用横条切换壳。"""
+
+    def _drop_veil_text(self) -> str:
+        from mclauncher.i18n import tr
+        return tr("松手放回「更多」")

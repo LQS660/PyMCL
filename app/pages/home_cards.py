@@ -9,15 +9,13 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFormLayout, QGridLayout, QHBoxLayout, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, CheckBox, ComboBox, FluentIcon as FIF, LineEdit,
-    MessageBoxBase, PlainTextEdit, PrimaryPushButton, ProgressBar, PushButton,
+    MessageBoxBase, PlainTextEdit, PushButton,
     Slider, SpinBox, StrongBodyLabel, SubtitleLabel, TransparentPushButton,
-    setFont,
 )
 
 from mclauncher.config import CONFIG
@@ -59,7 +57,7 @@ _QUICK_LABELS: dict[str, str] = {
     "shader": "光影包",
     "world": "世界",
     "java": "Java",
-    "instance": "实例",
+    "instance": "版本管理",
     "mods": "模组",
     "account": "账号",
     "multiplayer": "联机",
@@ -86,6 +84,13 @@ def quick_icon(key: str):
 # 单例卡片正文（页面级逻辑，控件引用挂到 LaunchPage 上）
 # ======================================================================
 class BannerBody(QWidget):
+    """横幅卡片：只剩渐变 Hero 本身。
+
+    启动/停止按钮、进度条、状态行都挪到了启动页常驻左下角的启动坞
+    （LaunchPage._build_launch_dock）——默认布局是空画布，这张卡片随时
+    可能不在场，开游戏这件事不能挂在它身上。
+    """
+
     key = "banner"
 
     def __init__(self, page, card, item):
@@ -97,28 +102,8 @@ class BannerBody(QWidget):
         root.setSpacing(8)
 
         page.banner = BannerWidget(self)
-        page.launch_btn = PrimaryPushButton(FIF.PLAY, tr("启动游戏"))
-        page.launch_btn.setFixedSize(170, 46)
-        setFont(page.launch_btn, 15, QFont.DemiBold)
-        page.stop_btn = PushButton(FIF.CLOSE, tr("停止"))
-        page.stop_btn.setFixedSize(170, 30)
-        page.stop_btn.setEnabled(False)
-        page.banner.right_area.addStretch(1)
-        page.banner.right_area.addWidget(page.launch_btn, 0, Qt.AlignRight)
-        page.banner.right_area.addWidget(page.stop_btn, 0, Qt.AlignRight)
-
-        from ..motion import SmoothProgressBar
-        page.progress = SmoothProgressBar(self)
-        page.progress.setRange(0, 100)
-        page.progress.setValue(0)
-        page.status_label = CaptionLabel(tr("就绪"))
-
         root.addWidget(page.banner, 1)
-        root.addWidget(page.progress)
-        root.addWidget(page.status_label)
-        # 卡片空间不足时允许横幅收缩（180 → 120），给进度条和状态行
-        # 留出自然高度——否则二者被布局压成 4px/0px，压扁的进度条
-        # 叠在渐变上就是一条"黑线"。
+        # 卡片空间不足时允许横幅收缩（180 → 120）
         page.banner.setMinimumHeight(120)
 
     def attach(self, card, item):
@@ -141,7 +126,10 @@ class ConfigBody(QWidget):
         cfg.setLabelAlignment(Qt.AlignLeft)
         cfg.addRow(StrongBodyLabel(tr("启动配置")))
 
+        # 只有一个游戏目录，选择框不再上表单；控件本身留着，启动链、
+        # 崩溃后重启、安装完自动启动都还从它读「装到哪儿」。
         page.instance_box = ComboBox()
+        page.instance_box.setVisible(False)
         page.version_box = ComboBox()
         page.account_box = ComboBox()
         page.java_box = ComboBox()
@@ -173,11 +161,10 @@ class ConfigBody(QWidget):
         page.width_spin.valueChanged.connect(page._persist_launch_defaults)
         page.height_spin.valueChanged.connect(page._persist_launch_defaults)
 
-        cfg.addRow(form_label(tr("实例")), page.instance_box)
         cfg.addRow(form_label(tr("版本")), page.version_box)
         cfg.addRow(form_label(tr("账号")), page.account_box)
         cfg.addRow(form_label(tr("用户名")), page.username_edit)
-        cfg.addRow(form_label(tr("Java（本实例）")), page.java_box)
+        cfg.addRow(form_label("Java"), page.java_box)
         cfg.addRow(form_label(tr("内存")), mem_row)
         cfg.addRow(form_label(tr("分辨率")), res_row)
         page.server_edit = LineEdit()
@@ -441,7 +428,7 @@ def build_registry(page) -> dict[str, CardSpec]:
             on_removed=_keep),
         "config": CardSpec(
             "config", lambda: tr("启动配置"), FIF.SETTING,
-            lambda: tr("启动配置 — 实例/版本/账号/内存等表单"),
+            lambda: tr("启动配置 — 版本/账号/内存等表单"),
             single_maker(ConfigBody), single=True, chrome=False,
             on_removed=_keep),
         "log": CardSpec(
@@ -466,7 +453,7 @@ def build_registry(page) -> dict[str, CardSpec]:
             on_removed=_drop),
         "playtime": CardSpec(
             "playtime", lambda: tr("游戏时长"), FIF.HISTORY,
-            lambda: tr("游戏时长 — 总量与各实例排行"),
+            lambda: tr("游戏时长 — 总量与各版本排行"),
             lambda card, item: PlaytimeBody(page, card, item),
             on_removed=_drop),
         "tasks": CardSpec(

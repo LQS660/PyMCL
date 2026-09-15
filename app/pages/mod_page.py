@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """模组管理页：查看已安装模组、启用/禁用、删除、导入、检查更新。
 
-侧边栏一级入口。目录选择与安装目标一致：实例共享 mods + 开了版本隔离的版本。
+侧边栏一级入口。目录选择与安装目标一致：大锅饭共享 mods + 开了独立模组的版本。
 """
 
 from pathlib import Path
@@ -17,10 +17,9 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 
-from mclauncher.config import CONFIG
 from mclauncher.i18n import tr
-from ..pcl_chrome import Theme, ghost_btn_qss, row_qss
-from ..widgets import EmptyState, IconTile, Pill
+from ..pcl_chrome import Theme, ghost_btn_qss, prestyle_page, row_qss
+from ..widgets import EmptyState, IconTile, Pill, choose_export_dir, report_export
 from .catalog_page import PclCard
 
 
@@ -74,6 +73,11 @@ class _ModRow(QFrame):
         self.switch.checkedChanged.connect(lambda on, n=name: page._toggle(n, on, self))
         lay.addWidget(self.switch)
 
+        out = TransparentToolButton(getattr(FIF, "SHARE", FIF.DOWNLOAD))
+        out.setToolTip(tr("导出到本地（默认启动器目录下的 exports）"))
+        out.clicked.connect(lambda _, n=name: page._export_one(n))
+        lay.addWidget(out)
+
         btn = TransparentToolButton(FIF.DELETE)
         btn.setToolTip(tr("删除"))
         btn.clicked.connect(lambda _, n=name: page._delete(n))
@@ -111,29 +115,37 @@ class ModManagerPage(QWidget):
         head.addWidget(self.count_pill)
         cv.addLayout(head)
 
+        # 筛选和动作分两行：挤在一行要 970px 宽（两个定宽输入框 + 四颗带字按钮），
+        # 会把整个主窗口的最小宽度顶到 1160——出厂 960 宽的窗口一进这页就会被撑大。
         bar = QHBoxLayout()
         bar.setSpacing(10)
-        self.instance_box = ComboBox()
-        self.instance_box.setFixedWidth(130)
         self.target_box = ComboBox()
-        self.target_box.setFixedWidth(190)
+        self.target_box.setFixedWidth(240)
         self.search = LineEdit()
         self.search.setPlaceholderText(tr("按文件名筛选…"))
         self.search.setFixedWidth(200)
-        bar.addWidget(self.instance_box)
         bar.addWidget(self.target_box)
         bar.addWidget(self.search)
         bar.addStretch(1)
+        cv.addLayout(bar)
+        acts = QHBoxLayout()
+        acts.setSpacing(10)
+        acts.addStretch(1)
         self.folder_btn = TransparentPushButton(FIF.FOLDER, tr("打开 mods 文件夹"))
         self.import_btn = TransparentPushButton(FIF.ADD, tr("导入 jar"))
+        self.export_btn = TransparentPushButton(
+            getattr(FIF, "SHARE", FIF.DOWNLOAD), tr("导出…"))
+        self.export_btn.setToolTip(
+            tr("把当前列出的模组导出到本地，默认启动器目录下的 exports"))
         self.update_btn = TransparentPushButton(FIF.SYNC, tr("检查更新"))
-        for b in (self.folder_btn, self.import_btn, self.update_btn):
+        for b in (self.folder_btn, self.import_btn, self.export_btn, self.update_btn):
             b.setFixedHeight(32)
-            bar.addWidget(b)
-        cv.addLayout(bar)
+            acts.addWidget(b)
+        cv.addLayout(acts)
 
         tip = CaptionLabel(
-            tr("提示：在版本设置里开启「隔离 Mod」后，各版本会拥有独立 mods 目录，可在此切换查看。"))
+            tr("「大锅饭」是所有共用版本合吃的那一份；在版本管理页把某个版本切成"
+               "「独立」后，它会在这里单独列出来，改它不影响别人。"))
         tip.setStyleSheet(f"color: {Theme.muted}; font-size: 11px; background: transparent;")
         tip.setWordWrap(True)
         cv.addWidget(tip)
@@ -152,45 +164,33 @@ class ModManagerPage(QWidget):
         scroll.setWidget(host)
         lv.addWidget(scroll)
         root.addWidget(list_card, 1)
+        prestyle_page(self, scroll)
 
         self.search.textChanged.connect(self._refill)
-        self.instance_box.currentTextChanged.connect(lambda _t: self._reload_targets())
         self.target_box.currentTextChanged.connect(lambda _t: self.reload_list())
         self.folder_btn.clicked.connect(self._open_folder)
         self.import_btn.clicked.connect(self._import_local)
+        self.export_btn.clicked.connect(self._export_listed)
         self.update_btn.clicked.connect(self._check_updates)
         self.setAcceptDrops(True)
 
-        self._reload_instances()
         self._reload_targets()
         self.reload_list()
 
     # ------------------------------------------------------------------
     def _current_instance(self) -> str:
-        return self.instance_box.currentText() or CONFIG.get("default_instance", "default") or "default"
+        return self.backend.game_root_name()
 
     def _current_version(self) -> str:
         rows = getattr(self, "_target_rows", None) or []
         idx = self.target_box.currentIndex()
         return str(rows[idx].get("value") or "") if 0 <= idx < len(rows) else ""
 
-    def _reload_instances(self):
-        cur = self.instance_box.currentText()
-        names = [i["name"] for i in self.backend.get_instances()]
-        self.instance_box.blockSignals(True)
-        self.instance_box.clear()
-        self.instance_box.addItems(names)
-        if cur in names:
-            self.instance_box.setCurrentText(cur)
-        elif CONFIG.get("default_instance") in names:
-            self.instance_box.setCurrentText(CONFIG.get("default_instance"))
-        self.instance_box.blockSignals(False)
-
     def _reload_targets(self):
         try:
             rows = self.backend.get_mods_targets(self._current_instance()) or []
         except Exception:
-            rows = [{"label": tr("实例共享 mods 目录"), "value": ""}]
+            rows = [{"label": tr("大锅饭（所有版本共用）"), "value": ""}]
         self._target_rows = rows
         cur_idx = self.target_box.currentIndex()
         self.target_box.blockSignals(True)
@@ -204,7 +204,6 @@ class ModManagerPage(QWidget):
 
     # ------------------------------------------------------------------
     def reload(self):
-        self._reload_instances()
         self._reload_targets()
 
     def reload_list(self):
@@ -225,9 +224,10 @@ class ModManagerPage(QWidget):
         off = total - on
         size = sum(int(r.get("bytes") or 0) for r in self._entries)
         self.count_pill.setText(f"{on}/{total}")
+        ver_label = self._current_version()
+        where = ver_label or tr("大锅饭")
         self.subtitle.setText(
-            f"{tr('启用')} {on} · {tr('禁用')} {off} · {_fmt_size(size)} · "
-            f"{self._current_instance()}{(' / ' + ver_label) if (ver_label := self._current_version()) else ''}")
+            f"{tr('启用')} {on} · {tr('禁用')} {off} · {_fmt_size(size)} · {where}")
 
     def _refill(self, *_):
         text = (self.search.text() or "").strip().lower()
@@ -287,6 +287,41 @@ class ModManagerPage(QWidget):
             InfoBar.error(tr("打开失败"), str(e), parent=self,
                           position=InfoBarPosition.TOP, duration=4000)
 
+    # ------------------------------------------------------------------
+    def _export_one(self, filename: str):
+        folder = choose_export_dir(self.backend, self)
+        if not folder:
+            return
+        try:
+            path = self.backend.export_content(
+                "mod", filename, folder, self._current_version())
+        except Exception as e:  # noqa: BLE001
+            InfoBar.error(tr("导出失败"), str(e), parent=self,
+                          position=InfoBarPosition.TOP, duration=5000)
+            return
+        report_export(None, self, single_path=path)
+
+    def _export_listed(self):
+        """导出当前列出的这些（受搜索框过滤），一个都没有就别弹选择框。"""
+        text = (self.search.text() or "").strip().lower()
+        names = [r.get("filename") for r in self._entries
+                 if r.get("filename") and (not text or text in r["filename"].lower())]
+        if not names:
+            InfoBar.warning(tr("没有可导出的模组"), tr("当前列表是空的"), parent=self,
+                            position=InfoBarPosition.TOP, duration=3000)
+            return
+        folder = choose_export_dir(self.backend, self)
+        if not folder:
+            return
+        try:
+            result = self.backend.export_contents(
+                "mod", names, folder, self._current_version())
+        except Exception as e:  # noqa: BLE001
+            InfoBar.error(tr("导出失败"), str(e), parent=self,
+                          position=InfoBarPosition.TOP, duration=5000)
+            return
+        report_export(result, self)
+
     def _install_jars(self, paths):
         inst = self._current_instance()
         ver = self._current_version()
@@ -318,8 +353,27 @@ class ModManagerPage(QWidget):
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
+            return
+        # 本页压在分区壳上会把导航拖拽整个吃掉，替壳转交一下
+        from .download_hub import forward_nav_drag
+        forward_nav_drag(self, event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            return
+        from .download_hub import forward_nav_drag
+        forward_nav_drag(self, event)
+
+    def dragLeaveEvent(self, event):
+        from .download_hub import forward_nav_leave
+        forward_nav_leave(self)
+        super().dragLeaveEvent(event)
 
     def dropEvent(self, event):
+        from .download_hub import forward_nav_drag
+        if forward_nav_drag(self, event):
+            return
         paths = [u.toLocalFile() for u in event.mimeData().urls()
                  if u.toLocalFile() and u.toLocalFile().lower().endswith(".jar")]
         if paths:

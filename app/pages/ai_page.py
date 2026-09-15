@@ -25,7 +25,7 @@ from mclauncher.ai.agent import AgentCancelled, run_agent
 from mclauncher.ai.client import AIClientError, HttpCancel
 from mclauncher.ai import store as chat_store
 from mclauncher.ai.defaults import DEFAULT_MODEL
-from ..pcl_chrome import Theme
+from ..pcl_chrome import Theme, prestyle_page
 from mclauncher.i18n import tr
 
 _STOP = {tr("已停止"), tr("已取消")}
@@ -450,7 +450,7 @@ class PermissionDialog(MessageBoxBase):
 
         self.viewLayout.addSpacing(4)
         tip = CaptionLabel(tr(
-            "关掉「变更前确认」后写操作全部直接执行；「完全访问」仍会在删除实例、"
+            "关掉「变更前确认」后写操作全部直接执行；「完全访问」仍会在删除版本、"
             "删除模组、改配置前询问。"))
         tip.setWordWrap(True)
         self.viewLayout.addWidget(tip)
@@ -593,6 +593,7 @@ class AiPage(QWidget):
         self.scroll.setWidget(host)
         self._host = host
         main.addWidget(self.scroll, 1)
+        prestyle_page(self, self.scroll)
 
         self._input_box = QFrame()
         row = QHBoxLayout(self._input_box)
@@ -1018,7 +1019,7 @@ class AiPage(QWidget):
         self._scroll_bottom()
         if self._queue:
             nxt = self._queue.pop(0)
-            QTimer.singleShot(30, lambda: self._send(nxt, echo=False))
+            QTimer.singleShot(30, self, lambda: self._send(nxt, echo=False))
 
     def _on_done(self, text: str):
         self._finish(text or self._stream, True)

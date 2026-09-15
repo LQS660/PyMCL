@@ -36,12 +36,17 @@ from . import motion
 GRID_CHOICES = [0, 4, 8, 16, 24]
 
 # 新增卡片时各类型的默认几何（画布比例）
+# 第二栏（y）起自 0.32：横幅在默认版式里占到 0.30，而矮窗口下它还会被自己
+# 的最小高（165px）顶得更高——留在 0.26 的话，手动加回来的卡会叠进横幅下沿
+# 20~30px。0.32 在 1180x600~760 四档下都落在横幅底边之下。
 _ADD_DEFAULT: dict[str, tuple[float, float, float, float]] = {
     "banner": (0.0, 0.0, 1.0, 0.24),
-    "config": (0.0, 0.26, 0.34, 0.7),
-    "log": (0.36, 0.26, 0.4, 0.7),
-    "news": (0.78, 0.26, 0.22, 0.7),
-    "quick": (0.32, 0.3, 0.34, 0.3),
+    "config": (0.0, 0.32, 0.34, 0.66),
+    "log": (0.36, 0.32, 0.4, 0.66),
+    # 新闻这一栏矮一截（0.66→0.52）：它是右下角唯一会跟启动坞抢地方的卡，
+    # 坞就浮在那个角上。停在坞上沿之前收住，加回来的新闻卡才不被压着。
+    "news": (0.78, 0.32, 0.22, 0.52),
+    "quick": (0.32, 0.32, 0.34, 0.3),
     "notes": (0.32, 0.34, 0.28, 0.26),
     "playtime": (0.32, 0.36, 0.32, 0.22),
     "tasks": (0.32, 0.36, 0.32, 0.22),
@@ -730,7 +735,7 @@ class DashboardCanvas(QWidget):
         else:
             motion.fade(self.toolbar, 1.0, 0.0, ms=140, on_done=self.toolbar.hide)
         motion.tween(self._set_grid_op, 0.0 if on else 1.0,
-                     1.0 if on else 0.0, ms=220)
+                     1.0 if on else 0.0, ms=220, context=self)
         self.update()
 
     def _open_palette(self):
@@ -785,13 +790,30 @@ class DashboardCanvas(QWidget):
         w = min(w, cw - 16)
         h = min(h, ch - 16)
         rects = [QRect(c.x(), c.y(), c.width(), c.height()) for c in self.cards]
+
+        def free(r: QRect, pad: int = 8) -> bool:
+            return not any(r.intersects(o.adjusted(-pad, -pad, pad, pad)) for o in rects)
+
+        # 先试这类卡片自己的位置：空画布上一张张加回来，正好拼成经典版式。
+        # 从左上角扫起会让第二张压在第一张身上——它要的高度往往只在自己那一栏
+        # 才放得下。
+        # 这一步不留 8px 余量，反而往里缩 2px：几种卡片的默认位置本来就是贴着
+        # 拼的，比例换像素时 int() 和 round() 差那一格就会「重叠 1px」，留余量
+        # 更是每一张都判成不空，最后全挤到左上角摞着。
+        px = max(0, min(int(fx * cw), max(0, cw - w)))
+        py = max(0, min(int(fy * ch), max(0, ch - h)))
+        own = QRect(px, py, w, h)
+        if free(own.adjusted(2, 2, -2, -2), pad=0):
+            return px, py, w, h
         step = 24
         for yy in range(8, max(9, ch - h - 8), step):
             for xx in range(8, max(9, cw - w - 8), step):
                 cand = QRect(xx, yy, w, h)
-                if not any(cand.intersects(r.adjusted(-8, -8, 8, 8)) for r in rects):
+                if free(cand):
                     return xx, yy, w, h
-        return 8, 8, w, h
+        # 满画布上哪儿都不空：落回这类卡片自己的槽位，压也压在它该在的地方，
+        # 别扔到左上角盖住横幅（那一摞谁也看不清，还得手动拖开）。
+        return px, py, w, h
 
     def fit_to_window(self):
         """把可见卡片的联合包围盒等比放大到铺满画布（留边距）。"""

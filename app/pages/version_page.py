@@ -4,12 +4,13 @@
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
-    Action, BodyLabel, CaptionLabel, ComboBox, FluentIcon as FIF, InfoBar, InfoBarPosition,
+    Action, CaptionLabel, FluentIcon as FIF, InfoBar, InfoBarPosition,
     MessageBox, Pivot, PushButton, CheckBox, RoundMenu, ScrollArea, SearchLineEdit,
     SimpleCardWidget, StrongBodyLabel, SubtitleLabel, TransparentToolButton,
 )
 
 from mclauncher.config import CONFIG
+from ..pcl_chrome import prestyle_page
 from ..widgets import EmptyState, Pill, grid_columns
 from mclauncher.i18n import tr
 
@@ -79,8 +80,6 @@ class VersionPage(QWidget):
         self.pivot.addItem("snapshot", tr("快照"))
         self.pivot.addItem("old_alpha", tr("远古"))
         self.pivot.setCurrentItem("all")
-        self.instance_box = ComboBox()
-        self.instance_box.setFixedWidth(140)
         self.launch_after = CheckBox(tr("完成后启动"))
         self.launch_after.setChecked(True)
         self.hidden_box = CheckBox(tr("显示隐藏"))
@@ -88,8 +87,6 @@ class VersionPage(QWidget):
         bar.addWidget(self.search)
         bar.addWidget(self.pivot)
         bar.addStretch(1)
-        bar.addWidget(BodyLabel(tr("实例")))
-        bar.addWidget(self.instance_box)
         bar.addWidget(self.hidden_box)
         bar.addWidget(self.launch_after)
         root.addLayout(bar)
@@ -102,6 +99,7 @@ class VersionPage(QWidget):
         self.grid.setSpacing(12)
         self.scroll.setWidget(self.grid_host)
         root.addWidget(self.scroll, 3)
+        prestyle_page(self, self.scroll)
 
         installed_card = SimpleCardWidget(self)
         ic_layout = QVBoxLayout(installed_card)
@@ -126,22 +124,14 @@ class VersionPage(QWidget):
         self.pivot.currentItemChanged.connect(self._on_filter_changed)
         self.uninstall_btn.clicked.connect(self._uninstall_selected)
         self.repair_btn.clicked.connect(self._repair_selected)
-        self.instance_box.currentTextChanged.connect(self._reload_installed)
         self.hidden_box.toggled.connect(self._toggle_hidden)
 
         self.reload()
 
+    def _root(self) -> str:
+        return self.backend.game_root_name()
+
     def reload(self):
-        cur = self.instance_box.currentText()
-        self.instance_box.blockSignals(True)
-        self.instance_box.clear()
-        names = [i["name"] for i in self.backend.get_instances()]
-        self.instance_box.addItems(names)
-        if cur in names:
-            self.instance_box.setCurrentText(cur)
-        elif CONFIG.get("default_instance") in names:
-            self.instance_box.setCurrentText(CONFIG.get("default_instance"))
-        self.instance_box.blockSignals(False)
         self._all_versions = self.backend.get_version_list()
         self._refill()
         self._reload_installed()
@@ -178,14 +168,6 @@ class VersionPage(QWidget):
             self._cols = 1
 
     def reload_installed_only(self):
-        cur = self.instance_box.currentText()
-        names = [i["name"] for i in self.backend.get_instances()]
-        self.instance_box.blockSignals(True)
-        self.instance_box.clear()
-        self.instance_box.addItems(names)
-        if cur in names:
-            self.instance_box.setCurrentText(cur)
-        self.instance_box.blockSignals(False)
         self._reload_installed()
 
     def _on_filter_changed(self, *_a):
@@ -237,7 +219,7 @@ class VersionPage(QWidget):
                         sub.widget().deleteLater()
 
         self._installed_checks = []
-        instance = self.instance_box.currentText() or "default"
+        instance = self._root()
         for v in self.backend.get_installed_versions(instance, include_hidden=self._show_hidden):
             row = QHBoxLayout()
             cb = CheckBox(v)
@@ -263,7 +245,7 @@ class VersionPage(QWidget):
             row.addWidget(setup)
             row.addWidget(more)
             self.installed_area.addLayout(row)
-            self._installed_checks.append((cb, f"{instance} / {v}"))
+            self._installed_checks.append((cb, v))
 
     def _more(self):
         self._limit += 80
@@ -277,7 +259,7 @@ class VersionPage(QWidget):
         self._reload_installed()
 
     def _install(self, info: dict, source=None):
-        instance = self.instance_box.currentText() or "default"
+        instance = self._root()
         from .install_wizard import InstallWizardDialog
         dlg = InstallWizardDialog(self.backend, info["version"], instance, self)
         if not dlg.exec():
@@ -387,8 +369,7 @@ class VersionPage(QWidget):
             MessageBox(tr("未选择"), tr("请先勾选要修复的版本"), self).exec()
             return
         for spec in selected:
-            inst, vid = spec.split(" / ", 1) if " / " in spec else (
-                self.instance_box.currentText() or "default", spec)
+            inst, vid = spec.split(" / ", 1) if " / " in spec else (self._root(), spec)
             self.backend.repair_version(inst, vid)
         InfoBar.success(tr("已开始修复"), f"{len(selected)} 个版本", parent=self,
                         position=InfoBarPosition.TOP, duration=2500)

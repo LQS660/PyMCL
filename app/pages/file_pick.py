@@ -56,32 +56,26 @@ class FilePickDialog(MessageBoxBase):
         host.setLayout(filt)
         self.viewLayout.addWidget(host)
 
-        # 装进哪个实例 / 哪个版本（版本隔离时是各自的 mods / saves 目录）
+        # 装进大锅饭，还是装进某个开了独立模组的版本
         self.target_box = None
         self.target_inst_box = None
         if kind in ("mod", "world"):
             target = QHBoxLayout()
             target.addWidget(BodyLabel(tr("安装到")))
             self.target_inst_box = ComboBox()
-            self.target_inst_box.setFixedWidth(140)
-            for i in (backend.get_instances() or []):
-                self.target_inst_box.addItem(i.get("name") or "?")
-            cur_inst = self.item.get("instance") or ""
-            if cur_inst:
-                self.target_inst_box.setCurrentText(cur_inst)
+            self.target_inst_box.addItem(backend.game_root_name())
+            self.target_inst_box.setVisible(False)
             self.target_box = ComboBox()
-            self.target_box.setFixedWidth(200)
+            self.target_box.setFixedWidth(260)
             self._reload_targets()
-            target.addWidget(self.target_inst_box)
             target.addWidget(self.target_box)
             target.addStretch(1)
-            tip = BodyLabel(tr("开启版本隔离的版本会出现在这里"))
+            tip = BodyLabel(tr("切成「独立」的版本会单独列在这里"))
             tip.setStyleSheet("color: rgba(128,128,128,0.9); font-size: 11px;")
             target.addWidget(tip)
             thost = QWidget(self)
             thost.setLayout(target)
             self.viewLayout.addWidget(thost)
-            self.target_inst_box.currentTextChanged.connect(lambda _t: self._reload_targets())
 
         scroll = ScrollArea(self)
         scroll.setWidgetResizable(True)
@@ -129,15 +123,14 @@ class FilePickDialog(MessageBoxBase):
             getter = getattr(self.backend, "get_saves_targets", None)
             if callable(getter):
                 return getter(inst) or []
-            return [{"label": tr("实例共享 saves 目录"), "value": ""}]
+            return [{"label": tr("大锅饭（所有版本共用）"), "value": ""}]
         return self.backend.get_mods_targets(inst) or []
 
     def _reload_targets(self):
         if self.target_box is None or self.target_inst_box is None:
             return
         inst = self.target_inst_box.currentText() or ""
-        default_label = (tr("实例共享 saves 目录") if self.kind == "world"
-                         else tr("实例共享 mods 目录"))
+        default_label = tr("大锅饭（所有版本共用）")
         try:
             rows = self._targets_for(inst)
         except Exception:
@@ -187,8 +180,8 @@ class FilePickDialog(MessageBoxBase):
     def _matched(self):
         gv = self.gv.currentText()
         # 「全部」这个哨兵值要拿**原文**比，小写版只用来跟 loaders 匹配。
-        # 以前统一 .lower() 后再和 tr("全部") 比：中文下 .lower() 恰好是恒等所以看不出问题，
-        # 一旦切英文就是 "all" != "All"，加载器筛选被当成真实筛选条件，列表直接空掉。
+        # 不能先 .lower() 再和 tr("全部") 比：中文下 .lower() 恰好是恒等看不出问题，
+        # 英文界面下就是 "all" != "All"，加载器筛选会被当成真实筛选条件，列表直接空掉。
         loader_text = self.loader.currentText()
         loader = loader_text.lower()
         all_label = tr("全部")

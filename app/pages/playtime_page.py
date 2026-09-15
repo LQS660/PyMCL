@@ -10,7 +10,7 @@ from qfluentwidgets import (
     FluentIcon as FIF, InfoBar, PushButton, ScrollArea, StrongBodyLabel,
 )
 
-from ..pcl_chrome import Theme
+from ..pcl_chrome import Theme, prestyle_page
 from ..widgets import EmptyState, Pill
 from mclauncher.i18n import tr
 
@@ -56,11 +56,12 @@ class PlaytimePage(QWidget):
         self._lay.setSpacing(16)
         scroll.setWidget(self._content)
         self._scroll = scroll
+        prestyle_page(self, scroll)
 
         self.empty = EmptyState(_CLOCK_ICON, tr("还没有游玩记录\n启动游戏后会自动记录"))
         self.empty.hide()
-        # 内容区和空状态占同一格：以前空状态是单独一行且 stretch=0，
-        # 隐藏内容后滚动区还占着全部高度，空状态被压成底部一条。
+        # 内容区和空状态占同一格（栈）：空状态若单独占一行且 stretch=0，
+        # 隐藏内容后滚动区仍占着全部高度，空状态会被压成底部一条。
         self._body = QStackedWidget()
         self._body.addWidget(scroll)
         self._body.addWidget(self.empty)

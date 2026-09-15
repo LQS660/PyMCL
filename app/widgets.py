@@ -3,15 +3,39 @@
 
 import math
 import os
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QRectF, QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QLinearGradient, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import (
-    BodyLabel, CaptionLabel, ComboBox, LineEdit, MessageBoxBase, StrongBodyLabel, SubtitleLabel,
-    isDarkTheme,
+    BodyLabel, CaptionLabel, ComboBox, LineEdit, MessageBoxBase, PushButton,
+    StrongBodyLabel, SubtitleLabel, isDarkTheme,
 )
 from mclauncher.i18n import tr
+
+
+def dialog_parent(parent):
+    """MessageBoxBase 要照着 parent 的尺寸铺遮罩，parent 为 None 会直接崩在
+    `parent.width()`。调用方漏传时退回当前活动窗口，再不行取任一顶层窗口。
+    """
+    if parent is not None:
+        return parent
+    from PySide6.QtWidgets import QApplication
+    win = QApplication.activeWindow()
+    if win is not None:
+        return win
+    # 用 windowType() 而不是 flags & Qt.Popup：Popup 里本来就带着 Qt.Window 那一位，
+    # 拿它按位与，任何普通窗口都会被判成弹出层，整张名单一个都留不下。
+    tops = [w for w in QApplication.topLevelWidgets()
+            if w.isWindow() and w.windowType() not in (Qt.Popup, Qt.ToolTip)]
+    visible = [w for w in tops if w.isVisible()]
+    pool = visible or tops
+    if not pool:
+        return None
+    # 顶层名单里混着没给 parent 的零散控件（隐藏的 ComboBox 之类），挑最大的那个，
+    # 免得遮罩照着一个几十像素的控件铺开。
+    return max(pool, key=lambda w: w.width() * w.height())
 
 
 class InputDialog(MessageBoxBase):
@@ -19,7 +43,7 @@ class InputDialog(MessageBoxBase):
 
     def __init__(self, title: str, label: str = "", text: str = "",
                  placeholder: str = "", parent=None):
-        super().__init__(parent)
+        super().__init__(dialog_parent(parent))
         self.viewLayout.addWidget(SubtitleLabel(title, self))
         if label:
             self.viewLayout.addWidget(BodyLabel(label, self))
@@ -46,7 +70,7 @@ def prompt_feedback_consent(parent) -> bool:
         tr("第一次打开需要你亲自选择。\n\n"
         "同意后才会向开发者上传：\n"
         "· 你提交的反馈内容\n"
-        "· 本机配置（CPU / 内存 / 显卡 / Java / 实例）\n\n"
+        "· 本机配置（CPU / 内存 / 显卡 / Java / 已装版本）\n\n"
         "暂不同意则不会上传，以后可在设置里更改。"),
         parent,
     )
@@ -61,12 +85,60 @@ def prompt_feedback_consent(parent) -> bool:
     return ok
 
 
+def choose_export_dir(backend, parent, title=None) -> str:
+    """选导出位置：从启动器的 exports/（或上次选过的地方）开，选完记住。
+
+    取消返回空串，调用方据此不动手。
+    """
+    from PySide6.QtWidgets import QFileDialog
+    start = ""
+    try:
+        start = backend.default_export_dir()
+    except Exception:  # noqa: BLE001
+        start = ""
+    picked = QFileDialog.getExistingDirectory(
+        parent, title or tr("选择导出位置"), start)
+    if not picked:
+        return ""
+    try:
+        backend.remember_export_dir(picked)
+    except Exception:  # noqa: BLE001
+        pass
+    return picked
+
+
+def report_export(result, parent, single_path: str = ""):
+    """把导出结果说清楚：成了几个、落在哪、哪些没成。"""
+    from qfluentwidgets import InfoBar, InfoBarPosition
+    from mclauncher.crash import open_path
+
+    if single_path:
+        result = {"dir": str(Path(single_path).parent), "exported": [single_path],
+                  "failed": []}
+    result = result or {}
+    done = result.get("exported") or []
+    failed = result.get("failed") or []
+    folder = result.get("dir") or ""
+    if done:
+        detail = Path(done[0]).name if len(done) == 1 else f"{len(done)} 个文件"
+        bar = InfoBar.success(
+            tr("已导出"), f"{detail} → {folder}", parent=parent,
+            position=InfoBarPosition.TOP, duration=6000)
+        btn = PushButton(tr("打开文件夹"))
+        btn.clicked.connect(lambda: open_path(folder))
+        bar.addWidget(btn)
+    if failed:
+        lines = "；".join(f'{f.get("name")}: {f.get("error")}' for f in failed[:4])
+        InfoBar.error(tr("有 %d 个没导出成功") % len(failed), lines, parent=parent,
+                      position=InfoBarPosition.TOP, duration=8000)
+
+
 class ComboDialog(MessageBoxBase):
     """Fluent 风格的下拉选择对话框。"""
 
     def __init__(self, title: str, label: str = "", items=None, current: str = "",
                  parent=None):
-        super().__init__(parent)
+        super().__init__(dialog_parent(parent))
         self.viewLayout.addWidget(SubtitleLabel(title, self))
         if label:
             hint = BodyLabel(label, self)
@@ -89,7 +161,7 @@ class DeviceCodeDialog(MessageBoxBase):
     """微软设备代码登录提示。"""
 
     def __init__(self, parent=None):
-        super().__init__(parent)
+        super().__init__(dialog_parent(parent))
         self.viewLayout.addWidget(SubtitleLabel(tr("微软账号登录"), self))
         self.hint = BodyLabel(tr("正在获取登录代码…"), self)
         self.hint.setWordWrap(True)
@@ -222,15 +294,41 @@ class Pill(QLabel):
 
 
 class _ThumbHub(QObject):
-    """缩略图线程池 → UI 线程的回传通道。worker 线程 emit，槽在主线程执行。"""
+    """缩略图线程池 → UI 线程的回传通道。worker 线程 emit，槽在主线程执行。
+
+    整个进程只有 hub 自己这一条连接，磁贴一律不连信号。磁贴自己连的话，
+    「谁来断」就没有安全的时机：`destroyed` 发出来时 C++ 那半边已经没了，
+    此刻再拿 self 去 disconnect，PySide 转换接收者失败抛的是 SystemError
+    （内层那个 `Internal C++ object already deleted` 的 RuntimeError 被包了
+    一层），`except RuntimeError` 接不住，于是每块磁贴销毁都往错误日志里
+    丢一条，连接也一条都没断成。
+    """
 
     loaded = Signal(str, str)  # url, 本地路径（失败为空串）
+
+    def __init__(self):
+        super().__init__()
+        self.loaded.connect(self._dispatch)
+
+    def _dispatch(self, url: str, path: str):
+        """一次下载对应一批在等它的磁贴：挨个贴上去，中途没了的跳过。"""
+        waiting = _THUMB_WAITERS.pop(url, ())
+        if not path:
+            return
+        for tile in waiting:
+            try:
+                tile.apply_thumb(path)
+            except RuntimeError:
+                pass  # 磁贴所在的那一行早被列表重建掉了
 
 
 _THUMB_HUB = None
 _THUMB_POOL = None
 _THUMB_PIXCACHE: dict[str, QPixmap] = {}
 _THUMB_PIXCACHE_CAP = 240
+# url → 正在等这张图的磁贴。键在 == 这个 url 有任务在飞，_dispatch 收工时整条弹掉，
+# 所以它只跟「在飞的任务数」一样大，不会随搜索次数越攒越多。
+_THUMB_WAITERS: dict[str, list] = {}
 
 
 def _thumb_hub() -> _ThumbHub:
@@ -281,8 +379,8 @@ class ThumbnailTile(QWidget):
 
     加载顺序：内存像素缓存 → 本地缓存文件（同步，纯磁盘）→ 线程池
     异步下载后回主线程贴图。绝不在 UI 线程发起网络请求——搜索结果
-    一页二三十行，以前每行构造时同步 `ensure_thumb`（超时 20s），
-    首次搜索整页假死就是这么来的。
+    一页二三十行，每行构造时若同步 `ensure_thumb`（超时 20s），
+    首次搜索整页就会假死。
     """
 
     def __init__(self, text: str, thumb_url: str, size: int = 52, parent=None):
@@ -318,35 +416,27 @@ class ThumbnailTile(QWidget):
             self._loaded = True
             return
         try:
-            from mclauncher.thumbnails import thumb_path
+            from mclauncher.thumbnails import recently_failed, thumb_path
             local = thumb_path(self._thumb_url)
         except Exception:
             local = ""
+            recently_failed = None
         if local and os.path.isfile(local) and self._set_pixmap_from(local):
             return
-        hub = _thumb_hub()
-        hub.loaded.connect(self._on_thumb_loaded)
-        # 连接以本控件为接收者，行删除（C++ 销毁）后自动断；但 Python
-        # 包装器和 _pixmap 会被 bound method 拽住，这里显式断干净，
-        # 不然每搜一次页就攒一批 52px pixmap 释放不掉。
-        self.destroyed.connect(lambda *_: self._disconnect_thumb_hub())
+        if recently_failed is not None and recently_failed(self._thumb_url):
+            return  # 刚下过没下成：冷却期内不排队，留字母底色，别占线程池
+        _thumb_hub()  # 建好那条唯一的回传连接
+        waiting = _THUMB_WAITERS.get(self._thumb_url)
+        if waiting is not None:
+            waiting.append(self)  # 同一个 url 已经在下了，搭个便车
+            return
+        _THUMB_WAITERS[self._thumb_url] = [self]
         _thumb_pool().start(_ThumbJob(self._thumb_url))
 
-    def _disconnect_thumb_hub(self):
-        try:
-            _thumb_hub().loaded.disconnect(self._on_thumb_loaded)
-        except (TypeError, RuntimeError):
-            pass
-
-    def _on_thumb_loaded(self, url: str, path: str):
-        if url != self._thumb_url or not path:
-            return
-        try:
-            if self._loaded:
-                return
+    def apply_thumb(self, path: str):
+        """下载完成后由 _ThumbHub 回调。已经有图了就不再覆盖。"""
+        if not self._loaded:
             self._set_pixmap_from(path)
-        except RuntimeError:
-            pass  # C++ 对象已随所在行一起销毁
 
     def paintEvent(self, event):
         painter = QPainter(self)

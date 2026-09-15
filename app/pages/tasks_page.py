@@ -9,6 +9,7 @@ from qfluentwidgets import (
     SimpleCardWidget, StrongBodyLabel, SubtitleLabel, TransparentToolButton,
 )
 
+from ..pcl_chrome import prestyle_page
 from ..widgets import EmptyState, IconTile
 from mclauncher.i18n import tr
 
@@ -296,6 +297,7 @@ class TasksPage(QWidget):
         self.list_layout.setSpacing(10)
         scroll.setWidget(host)
         root.addWidget(scroll, 1)
+        prestyle_page(self, scroll)
 
         self.empty = EmptyState(FIF.DOWNLOAD, tr("暂无任务 —— 去下载板块里的版本 / 整合包 / 模组 / 光影 / 资源包 / Java 发起"))
         self.list_layout.addWidget(self.empty)

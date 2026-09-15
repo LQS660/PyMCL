@@ -1,17 +1,158 @@
 # -*- coding: utf-8 -*-
-"""账号页：微软 / 离线 / 皮肤站，带皮肤预览。"""
+"""账号页：微软 / 离线 / 皮肤站，带皮肤预览与离线自定义皮肤。"""
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, ComboBox, FluentIcon as FIF, InfoBar, InfoBarPosition,
-    LineEdit, PasswordLineEdit, PrimaryPushButton, PushButton, SimpleCardWidget,
-    StrongBodyLabel, SubtitleLabel, TransparentPushButton,
+    LineEdit, MessageBoxBase, PasswordLineEdit, PrimaryPushButton, PushButton, ScrollArea,
+    SimpleCardWidget, StrongBodyLabel, SubtitleLabel, TransparentPushButton,
 )
 
+from ..skin_render import front_view
 from ..widgets import DeviceCodeDialog, IconTile, Pill, ThumbnailTile
-from ..pcl_chrome import Theme
+from ..pcl_chrome import Theme, prestyle_page
 from mclauncher.i18n import tr
+
+# 皮肤预览框（正面小人 16x32，整数倍放大才不糊）
+SKIN_BOX = (140, 260)
+
+
+def skin_pixmap(png: bytes, slim: bool, box=SKIN_BOX) -> QPixmap:
+    """本地皮肤 PNG → 预览图；读不出来返回空 QPixmap。"""
+    img = front_view(png, slim)
+    if img.isNull():
+        return QPixmap()
+    return QPixmap.fromImage(img).scaled(
+        box[0], box[1], Qt.KeepAspectRatio, Qt.FastTransformation)
+
+
+class OfflineSkinDialog(MessageBoxBase):
+    """给离线账号换一张自定义皮肤，或清回游戏默认。
+
+    真正让它显示出来的是启动时拉起的本地 Yggdrasil 服务
+    （mclauncher/skinserver.py）——1.19.3 起内置默认皮肤有九种，
+    靠挑 UUID 凑 Steve/Alex 的老办法已经不成立了。
+    """
+
+    PREVIEW = (110, 200)
+
+    def __init__(self, backend, name: str, parent=None):
+        super().__init__(parent)
+        self.backend = backend
+        self.name = name
+        self._picked = ""       # 这一轮新挑的文件
+        self._clear = False
+        current = backend.get_account_skin(name)
+        self._current_file = current.get("skin_file") or ""
+
+        self.viewLayout.addWidget(SubtitleLabel(tr("「{0}」的皮肤").format(name), self))
+        hint = BodyLabel(
+            tr("64x64 或 64x32 的 PNG。只对离线账号有效，进游戏后由启动器自带的"
+               "本地皮肤服务发给游戏，不需要联网。"), self)
+        hint.setWordWrap(True)
+        self.viewLayout.addWidget(hint)
+
+        self.preview = BodyLabel(tr("还没设皮肤"), self)
+        self.preview.setFixedSize(*self.PREVIEW)
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setStyleSheet(f"background: {Theme.hover}; border-radius: 8px;")
+        self.viewLayout.addWidget(self.preview, 0, Qt.AlignHCenter)
+
+        self.file_label = CaptionLabel(self._current_file or tr("游戏默认皮肤"), self)
+        self.file_label.setAlignment(Qt.AlignCenter)
+        self.viewLayout.addWidget(self.file_label)
+
+        row = QHBoxLayout()
+        pick = PrimaryPushButton(tr("选择 PNG"))
+        pick.clicked.connect(self._pick)
+        self.clear_btn = PushButton(tr("清除，用游戏默认"))
+        self.clear_btn.clicked.connect(self._mark_clear)
+        self.clear_btn.setEnabled(bool(self._current_file))
+        row.addWidget(pick, 1)
+        row.addWidget(self.clear_btn, 1)
+        host = QWidget(self)
+        host.setLayout(row)
+        self.viewLayout.addWidget(host)
+
+        self._models = {tr("宽臂（Steve）"): "classic", tr("细臂（Alex）"): "slim"}
+        self.model_box = ComboBox(self)
+        self.model_box.addItems(list(self._models))
+        if current.get("skin_model") == "slim":
+            self.model_box.setCurrentIndex(1)
+        self.model_box.currentTextChanged.connect(lambda *_: self._refresh_preview())
+        self.viewLayout.addWidget(BodyLabel(tr("手臂模型"), self))
+        self.viewLayout.addWidget(self.model_box)
+
+        self.yesButton.setText(tr("保存"))
+        self.cancelButton.setText(tr("取消"))
+        self.widget.setMinimumWidth(420)
+        self._refresh_preview()
+
+    def model(self) -> str:
+        return self._models.get(self.model_box.currentText(), "classic")
+
+    def _pick(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, tr("选择皮肤 PNG"), "", tr("PNG 图片 (*.png)"))
+        if path:
+            self.preset(path)
+
+    def preset(self, path: str):
+        """替用户先挑好一张（皮肤是拖进窗口来的），开框就能看到预览。"""
+        self._picked = path
+        self._clear = False
+        self.clear_btn.setEnabled(True)
+        self.file_label.setText(path)
+        self._refresh_preview()
+
+    def _mark_clear(self):
+        self._picked = ""
+        self._clear = True
+        self.clear_btn.setEnabled(False)
+        self.file_label.setText(tr("保存后清除，恢复游戏默认皮肤"))
+        self.preview.setPixmap(QPixmap())
+        self.preview.setText(tr("游戏默认皮肤"))
+
+    def _source_png(self) -> bytes:
+        """预览要用的那份 PNG：优先这一轮挑的，其次账号已经绑着的。"""
+        if self._picked:
+            try:
+                with open(self._picked, "rb") as fh:
+                    return fh.read()
+            except OSError:
+                return b""
+        import base64
+        raw = (self.backend.get_account_skin(self.name).get("data_url") or "")
+        raw = raw.split(",", 1)[-1]
+        return base64.b64decode(raw) if raw else b""
+
+    def _refresh_preview(self):
+        if self._clear:
+            return
+        png = self._source_png()
+        pix = skin_pixmap(png, self.model() == "slim", self.PREVIEW) if png else QPixmap()
+        if pix.isNull():
+            self.preview.setPixmap(QPixmap())
+            self.preview.setText(tr("这张图读不出来") if png else tr("还没设皮肤"))
+            return
+        self.preview.setText("")
+        self.preview.setPixmap(pix)
+
+    def apply(self) -> str:
+        """落盘。返回给用户看的一句话；空串 = 什么都没改。"""
+        if self._clear:
+            self.backend.set_account_skin(self.name)
+            return tr("已清除，回到游戏默认皮肤")
+        path = self._picked
+        if not path and self._current_file:
+            # 只改了手臂模型：把现有那张原样再交一遍（import_skin 认得同一个文件）
+            from mclauncher.skin import skins_dir
+            path = str(skins_dir() / self._current_file)
+        if not path:
+            return ""
+        self.backend.set_account_skin(self.name, path=path, model=self.model())
+        return tr("下次启动游戏时生效")
 
 
 class AccountPage(QWidget):
@@ -24,18 +165,31 @@ class AccountPage(QWidget):
         self._pix_token = 0
         self._auth_busy = False
 
-        root = QVBoxLayout(self)
+        # 整页放进滚动区：五张卡竖着摞起来最小高 850+，直接铺在页面上会把
+        # 主窗口最小高度顶到 950（QStackedWidget 取所有子页最小值之最大），
+        # 960x720 的出厂窗口一点进这页就会被撑大。其它长页都是这么做的。
+        scroll = ScrollArea(self)
+        scroll.setWidgetResizable(True)
+        host = QWidget()
+        root = QVBoxLayout(host)
         root.setContentsMargins(28, 20, 28, 20)
         root.setSpacing(14)
+        scroll.setWidget(host)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
+        prestyle_page(self, scroll)
         root.addWidget(SubtitleLabel(tr("账号")))
-        root.addWidget(CaptionLabel(tr("微软正版、离线、Little Skin、统一通行证 / 自建 Yggdrasil")))
+        intro = CaptionLabel(tr("微软正版、离线、Little Skin、统一通行证 / 自建 Yggdrasil"))
+        intro.setWordWrap(True)
+        root.addWidget(intro)
 
         top = QHBoxLayout()
         skin_card = SimpleCardWidget(self)
         sl = QVBoxLayout(skin_card)
         sl.setContentsMargins(16, 14, 16, 14)
         self.skin = BodyLabel(tr("皮肤"))
-        self.skin.setFixedSize(140, 260)
+        self.skin.setFixedSize(*SKIN_BOX)
         self.skin.setAlignment(Qt.AlignCenter)
         self.skin.setStyleSheet(f"background: {Theme.hover}; border-radius: 8px;")
         sl.addWidget(self.skin, 0, Qt.AlignHCenter)
@@ -181,17 +335,60 @@ class AccountPage(QWidget):
             bar.addWidget(Pill(kind, color))
             if row.get("active"):
                 bar.addWidget(Pill(tr("当前"), "#4C8BF5"))
+            if row["type"] == "offline" and row.get("skin_file"):
+                bar.addWidget(Pill(tr("自定义皮肤"), "#2E9B6B"))
             use_btn = TransparentPushButton(tr("使用"))
             use_btn.clicked.connect(lambda _, n=row["name"]: self._use(n))
             del_btn = TransparentPushButton(FIF.DELETE, tr("删除"))
             del_btn.clicked.connect(lambda _, n=row["name"]: self._delete(n))
             bar.addStretch(1)
+            if row["type"] == "offline":
+                # 自定义皮肤只对离线账号有效：正版和皮肤站的皮肤在各自网站上改
+                skin_btn = TransparentPushButton(tr("皮肤"))
+                skin_btn.clicked.connect(lambda _, n=row["name"]: self._edit_skin(n))
+                bar.addWidget(skin_btn)
             bar.addWidget(use_btn)
             bar.addWidget(del_btn)
             self.list_box.addWidget(card)
         active = next((r for r in rows if r.get("active")), None) or (rows[0] if rows else None)
         self.skin_name.setText(active["name"] if active else "Steve")
+        # 绑了本地皮肤的离线账号：预览走本地那张，mc-heads 不可能知道它
+        if active and active.get("skin_file") and self._show_local_skin(active["name"]):
+            return
         self._load_skin(active["body"] if active else "")
+
+    def _show_local_skin(self, name: str) -> bool:
+        """把账号绑定的本地皮肤画进预览框，返回有没有画成。"""
+        import base64
+        try:
+            info = self.backend.get_account_skin(name)
+        except Exception:  # noqa: BLE001
+            return False
+        raw = (info.get("data_url") or "").split(",", 1)[-1]
+        if not raw:
+            return False
+        pix = skin_pixmap(base64.b64decode(raw), info.get("skin_model") == "slim")
+        if pix.isNull():
+            return False
+        # 网络头像那条路是异步的，晚回来的一张会盖掉这张本地图；换个令牌作废它
+        self._pix_token += 1
+        self.skin.setPixmap(pix)
+        return True
+
+    def _edit_skin(self, name: str):
+        dlg = OfflineSkinDialog(self.backend, name, self.window())
+        if not dlg.exec():
+            return
+        try:
+            message = dlg.apply()
+        except Exception as exc:  # noqa: BLE001
+            InfoBar.error(tr("皮肤没能保存"), str(exc), parent=self,
+                          position=InfoBarPosition.TOP, duration=5000)
+            return
+        if message:
+            InfoBar.success(tr("皮肤已更新"), message, parent=self,
+                            position=InfoBarPosition.TOP, duration=3000)
+        self.reload()
 
     def restyle(self):
         self.skin.setStyleSheet(f"background: {Theme.hover}; border-radius: 8px;")

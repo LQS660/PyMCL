@@ -71,7 +71,7 @@ class JavaPage(QWidget):
         head = QHBoxLayout()
         title_box = QVBoxLayout()
         title_box.addWidget(SubtitleLabel("Java"))
-        title_box.addWidget(CaptionLabel(tr("Minecraft 所需 Java 会在启动时自动匹配下载；也可在实例页为每个实例单独指定")))
+        title_box.addWidget(CaptionLabel(tr("Minecraft 所需 Java 会在启动时自动匹配下载；也可在版本管理页为单个版本指定")))
         head.addLayout(title_box, 1)
         self.refresh_btn = TransparentPushButton(FIF.SYNC, tr("重新检测"))
         head.addWidget(self.refresh_btn, 0)

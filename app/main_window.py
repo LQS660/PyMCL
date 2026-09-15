@@ -11,11 +11,12 @@ import time
 
 from qfluentwidgets import FluentIcon as FIF, InfoBar, InfoBarPosition, setTheme, setThemeColor, Theme as FluentTheme
 from qfluentwidgets.window.fluent_window import FluentWindowBase
-from PySide6.QtCore import Qt, QEasingCurve, QPoint, QPropertyAnimation, QTimer
+from PySide6.QtCore import Qt, QEasingCurve, QEvent, QPoint, QPropertyAnimation, QTimer
 from PySide6.QtWidgets import QApplication, QLabel
 
 from mclauncher import APP_DISPLAY_NAME, APP_VERSION
 from .backend import BackendAPI
+from .background import BackgroundLayer, WallpaperPlaylist
 from .fly_anim import fly_to
 from .pcl_chrome import (
     Theme, fade_stack_to, paint_theme_surfaces, ensure_theme_surfaces,
@@ -39,7 +40,8 @@ _TOP_KEYS = ("launch", "download", "ai", "more", "tasks")
 _SUB_TITLES = {
     "version": "原版游戏", "mod": "Mod", "modpack": "整合包", "datapack": "数据包",
     "resource": "资源包", "shader": "光影包", "world": "世界", "java": "Java",
-    "instance": "实例", "mods": "模组", "account": "账号", "multiplayer": "联机",
+    # instance 这个 key 只剩历史含义（已保存的侧栏布局按它认页面），现在开的是版本管理
+    "instance": "版本管理", "mods": "模组", "account": "账号", "multiplayer": "联机",
     "servers": "服务器", "playtime": "时长", "feedback": "反馈", "settings": "设置",
 }
 _SUB_FACTORIES = {
@@ -93,19 +95,210 @@ def _default_section_for(key: str) -> str:
     return "more"
 
 
+# 拖进窗口的整合包落到哪一页：版本管理（key 沿用历史的 instance）
+_MODPACK_LANDING_KEY = "instance"
+
 # 侧栏一级项的图标与标题（供自定义排序/显隐重建用）
 _NAV_SPECS = {
     "launch": (FIF.PLAY, "启动"),
-    "download": (FIF.DOWNLOAD, "下载"),
+    "download": (FIF.DOWNLOAD, "游戏"),
     "ai": (getattr(FIF, "CHAT", None) or FIF.HELP, "AI 助手"),
     "more": (getattr(FIF, "MORE", None) or FIF.MENU, "更多"),
     "tasks": (FIF.CLOUD_DOWNLOAD, "下载任务"),
 }
 
+# 出厂侧栏：排法见 _DEFAULT_NAV_STYLE；下面这三个键是「精简」那一档的序列，
+# 切回精简时还按它们排。改这里要同时把 _NAV_DEFAULTS_VERSION 加一，老用户才会
+# 收到新默认——但只在他没动过侧栏时，动过就以他排的为准。
+_NAV_DEFAULTS_VERSION = "2026.09-ai-visible"
+_DEFAULT_NAV_ORDER = ("launch", "download", "instance", "ai", "more", "settings", "tasks")
+_DEFAULT_NAV_PINNED = ("instance", "settings")
+_DEFAULT_NAV_HIDDEN = ()
+# 历史上的出厂三件套，见 _nav_untouched
+_LEGACY_NAV_FACTORIES = (
+    # 2026.09-grouped：AI 出厂藏着，精简序列里也没有它
+    {"ui_nav_order": ("launch", "download", "instance", "more", "settings", "tasks"),
+     "ui_nav_pinned": ("instance", "settings"),
+     "ui_nav_hidden": ("ai",)},
+)
+# 这些键排在分隔线以下，靠侧栏底部。精简档的招牌是线上正好三项
+# （启动 / 游戏 / 版本管理），AI 跟「更多」那一撮一起沉底
+_BOTTOM_KEYS = ("ai", "more", "settings", "tasks")
+
+# 侧栏两种排法。compact = 三个主入口 + 沉底那一撮；grouped = HMCL 那样按
+# 账户 / 游戏 / 通用 分组，组标题只是文字，不可点。
+NAV_STYLE_COMPACT = "compact"
+NAV_STYLE_GROUPED = "grouped"
+NAV_STYLE_LABELS = {
+    NAV_STYLE_COMPACT: "精简（启动 / 游戏 / 版本管理）",
+    NAV_STYLE_GROUPED: "分组（账户 / 游戏 / 通用）",
+}
+_GROUPED_NAV = (
+    ("账户", ("account",)),
+    ("游戏", ("launch", "instance", "download")),
+    ("通用", ("settings", "multiplayer", "ai", "more", "tasks")),
+)
+# 组里另用的名字：「游戏」组底下再写一项「游戏」会读成套娃
+_GROUPED_LABELS = {"download": "下载", "multiplayer": "多人联机"}
+# 出厂分组里当成「已固定」的子页：它们进侧栏，就不该再长在分区横条上。
+# 用户拖动之后以 grouped_layout() 为准，这一份只是没自定义过时的底稿。
+_GROUPED_PINNED = tuple(
+    k for _title, keys in _GROUPED_NAV for k in keys if k in _ALL_SUB_KEYS)
+# 出厂排法
+_DEFAULT_NAV_STYLE = NAV_STYLE_GROUPED
+
+
+def nav_style() -> str:
+    from mclauncher.config import CONFIG
+    style = str(CONFIG.get("ui_nav_style") or _DEFAULT_NAV_STYLE)
+    return style if style in NAV_STYLE_LABELS else _DEFAULT_NAV_STYLE
+
+
+def grouped_layout() -> list[tuple[str, list[str]]]:
+    """分组排法的分组与成员：用户拖过就以 ui_nav_groups 为准，没动过用出厂的。
+
+    这份表以前是写死的常量，于是「把子页拖到侧栏」在分组档下全程静默失败：
+    拖拽照收、配置照写、侧栏照重建，重建时却按常量重新生成一遍，刚写进去的
+    东西一点不剩。做成数据之后，固定 / 取消固定 / 重排都落在同一份表上。
+
+    一级键缺席要补回来：存进去的表被手改坏、或某个键是新加的，漏掉它就等于
+    这一页在界面上彻底没了入口。
+    """
+    from mclauncher.config import CONFIG
+    raw = CONFIG.get("ui_nav_groups")
+    groups: list[tuple[str, list[str]]] = []
+    seen: set[str] = set()
+    if isinstance(raw, list):
+        for grp in raw:
+            if not isinstance(grp, dict):
+                continue
+            title = str(grp.get("title") or "").strip()
+            if not title:
+                continue
+            keys = [k for k in (grp.get("keys") or [])
+                    if isinstance(k, str)
+                    and (k in _TOP_KEYS or k in _ALL_SUB_KEYS)
+                    and not (k in seen or seen.add(k))]
+            groups.append((title, keys))
+    if not any(keys for _t, keys in groups):
+        return [(title, list(keys)) for title, keys in _GROUPED_NAV]
+    missing = [k for k in _TOP_KEYS if k not in seen]
+    if missing:
+        groups[-1][1].extend(missing)
+    return groups
+
+
+def save_grouped_layout(groups) -> None:
+    from mclauncher.config import CONFIG
+    CONFIG.set("ui_nav_groups",
+               [{"title": title, "keys": list(keys)} for title, keys in groups])
+    CONFIG.save()
+
+
+def move_within_groups(groups, key: str, target: str, before: bool) -> bool:
+    """把 key 挪到 target 的前/后（可跨组）。目标不在表里就原样不动。
+
+    先确认目标存在再摘 key：反过来写的话，目标找不到时 key 已经被摘掉了，
+    一次失败的拖拽就能让这一项从侧栏上消失。
+    """
+    if key == target or not any(target in keys for _t, keys in groups):
+        return False
+    for _title, keys in groups:
+        if key in keys:
+            keys.remove(key)
+    for _title, keys in groups:
+        if target in keys:
+            keys.insert(keys.index(target) + (0 if before else 1), key)
+            return True
+    return False
+
+
+def grouped_nav_items() -> list:
+    """HMCL 式分组侧栏。隐藏项照 ui_nav_hidden 走，整组空了连标题一起不出。"""
+    from mclauncher.config import CONFIG
+    hidden = set(CONFIG.get("ui_nav_hidden") or [])
+    items = []
+    for title, keys in grouped_layout():
+        visible = [k for k in keys if k not in hidden]
+        if not visible:
+            continue
+        items.append(("header", tr(title)))
+        for key in visible:
+            if key in _TOP_KEYS:
+                fif, label = _NAV_SPECS[key]
+                items.append(("item", key, fif,
+                              tr(_GROUPED_LABELS.get(key, label)), False, False))
+            else:
+                spec = _pinned_nav_spec(key)
+                if key in _GROUPED_LABELS:
+                    spec = (*spec[:3], tr(_GROUPED_LABELS[key]), *spec[4:])
+                items.append(spec)
+    return items
+
+
+def _nav_factory() -> dict:
+    return {
+        "ui_nav_order": _DEFAULT_NAV_ORDER,
+        "ui_nav_pinned": _DEFAULT_NAV_PINNED,
+        "ui_nav_hidden": _DEFAULT_NAV_HIDDEN,
+    }
+
+
+def _nav_untouched() -> bool:
+    """侧栏还是**某一版**出厂那一套（没排过、没藏过、没另外固定过）。
+
+    只跟当前这一版比是不够的：上一版的出厂值同样是用户没动过的样子，
+    认不出来就会被当成自定义，新默认永远发不到他手上。
+    """
+    from mclauncher.config import CONFIG
+    stored = {k: list(CONFIG.get(k) or []) for k in _nav_factory()}
+    return any(
+        all(not stored[key] or stored[key] == list(value)
+            for key, value in factory.items())
+        for factory in (_nav_factory(), *_LEGACY_NAV_FACTORIES))
+
+
+def ensure_default_nav() -> bool:
+    """侧栏还是一张白纸时，写进出厂布局。返回是否真的写了。
+
+    判据是「三个键全空」，不是版本号标记：标记和三个键分两次落盘，中间
+    被别的进程写一次 config.json，就会留下「标记已记、布局没写」的夹生态，
+    此后每次开机都以为写过了，用户永远拿不到新默认。空就写，写完自然不空，
+    天然幂等，也不用担心两边抢着写。
+
+    换出厂布局（_NAV_DEFAULTS_VERSION 变了）时，还照着上一版出厂样子用的
+    老用户整套跟着换一次——这三个键每份 config.json 里都写着字面值，不认版本号
+    的话他们永远停在旧默认上（AI 那一项就是这么在侧栏里消失了一整版）。
+    自己排过侧栏的不动。
+    """
+    from mclauncher.config import CONFIG
+    if (CONFIG.get("ui_nav_order") or CONFIG.get("ui_nav_pinned")
+            or CONFIG.get("ui_nav_hidden")):
+        if CONFIG.get("ui_nav_defaults") != _NAV_DEFAULTS_VERSION:
+            if _nav_untouched():
+                CONFIG.update({k: list(v) for k, v in _nav_factory().items()})
+                CONFIG.set("ui_nav_style", _DEFAULT_NAV_STYLE)
+                CONFIG.set("ui_nav_groups", None)
+            CONFIG.set("ui_nav_defaults", _NAV_DEFAULTS_VERSION)
+            CONFIG.save()
+        return False
+    CONFIG.update({k: list(v) for k, v in _nav_factory().items()})
+    CONFIG.update({
+        "ui_nav_style": _DEFAULT_NAV_STYLE,
+        "ui_nav_defaults": _NAV_DEFAULTS_VERSION,
+    })
+    CONFIG.save()
+    return True
+
 
 def pinned_from_config() -> list[str]:
     """固定到顶级侧栏的分区子页 key（拖拽固定，非法键过滤）。"""
     from mclauncher.config import CONFIG
+    if nav_style() == NAV_STYLE_GROUPED:
+        # 分组排法的固定项就是各组里的子页成员，ui_nav_pinned 在这一档不参与
+        hidden = set(CONFIG.get("ui_nav_hidden") or [])
+        return [k for _title, keys in grouped_layout() for k in keys
+                if k in _ALL_SUB_KEYS and k not in hidden]
     raw = CONFIG.get("ui_nav_pinned") or []
     seen, picked = set(), []
     for k in raw:
@@ -128,6 +321,8 @@ def nav_items_from_config() -> list:
     「下载任务」前 / 末尾），一级键缺失自动补到末尾。
     """
     from mclauncher.config import CONFIG
+    if nav_style() == NAV_STYLE_GROUPED:
+        return grouped_nav_items()
     raw = list(CONFIG.get("ui_nav_order") or [])
     pinned = pinned_from_config()
     hidden = set(CONFIG.get("ui_nav_hidden") or [])
@@ -150,8 +345,12 @@ def nav_items_from_config() -> list:
             order.extend(late)
     items = []
     visible = [k for k in order if not (k in _TOP_KEYS and k in hidden)]
+    # 分隔线插在第一个「底部键」之前，它和它后面的都被推到侧栏最下方
+    split_at = next((i for i, k in enumerate(visible) if k in _BOTTOM_KEYS), -1)
+    if split_at <= 0:
+        split_at = -1
     for i, key in enumerate(visible):
-        if key == "tasks" and i == len(visible) - 1 and len(visible) > 1:
+        if i == split_at:
             items.append(("stretch",))
         if key in _TOP_KEYS:
             fif, title = _NAV_SPECS[key]
@@ -161,6 +360,117 @@ def nav_items_from_config() -> list:
     return items
 
 
+# ---------------------------------------------------------------- 窗口宽高比
+# 壁纸铺在整窗底下、按整窗保比例裁切。窗口比例锁在图片 / 视频常见的档位上，
+# 用户挑一张同比例的壁纸就能一点不裁完整显示，拖窗口也不会变成裁头裁脚；
+# 档位可在设置里手动改。free = 不锁，随便拖。
+WINDOW_ASPECTS: dict[str, float | None] = {"4:3": 4 / 3, "16:9": 16 / 9, "free": None}
+WINDOW_ASPECT_LABELS = {"4:3": "标准 4:3", "16:9": "宽屏 16:9", "free": "自由拖动"}
+_DEFAULT_WINDOW_ASPECT = "4:3"
+# 各档的出厂尺寸（逻辑像素）。侧栏 188 + 下载页横条 628 = 宽至少 ~820；
+# 启动页两张卡在这几个尺寸下互不重叠。16:9 不能再矮：横幅有 165 的最小高，
+# 画布高 = 窗高 - 64，要 0.315 x 画布高 >= 167 才不压到启动配置卡。
+_ASPECT_DEFAULT_SIZE = {"4:3": (960, 720), "16:9": (1072, 603), "free": (1040, 650)}
+# 拖边/拖角时 Windows 发 WM_SIZING 的 wParam
+_WMSZ_LEFT, _WMSZ_RIGHT, _WMSZ_TOP, _WMSZ_TOPLEFT = 1, 2, 3, 4
+_WMSZ_TOPRIGHT, _WMSZ_BOTTOM, _WMSZ_BOTTOMLEFT, _WMSZ_BOTTOMRIGHT = 5, 6, 7, 8
+_WM_SIZING, _WM_ENTERSIZEMOVE, _WM_EXITSIZEMOVE = 0x0214, 0x0231, 0x0232
+
+
+def window_aspect_key() -> str:
+    """配置里的比例档位；非法值回出厂 4:3。"""
+    from mclauncher.config import CONFIG
+    key = str(CONFIG.get("ui_window_aspect") or _DEFAULT_WINDOW_ASPECT)
+    return key if key in WINDOW_ASPECTS else _DEFAULT_WINDOW_ASPECT
+
+
+def window_aspect_ratio() -> float | None:
+    """当前锁定的宽/高；None = 自由拖动。"""
+    return WINDOW_ASPECTS[window_aspect_key()]
+
+
+def fit_aspect(width: int, height: int, ratio: float | None, *,
+               max_w: int | None = None, max_h: int | None = None,
+               min_w: int = 0, min_h: int = 0, drive: str = "width") -> tuple[int, int]:
+    """把 (width, height) 收成比例 ratio，并塞进 [min, max] 的盒子里。
+
+    drive="width" 以宽定高（拖左右边），"height" 以高定宽（拖上下边）。
+    盒子装不下就整体缩到装得下的最大同比矩形；比最小值还小就整体放大。
+    ratio 为 None 只做夹取，不动比例。
+    """
+    w, h = int(width), int(height)
+    if ratio is None or ratio <= 0:
+        if max_w:
+            w = min(w, int(max_w))
+        if max_h:
+            h = min(h, int(max_h))
+        return max(w, int(min_w)), max(h, int(min_h))
+    if drive == "height":
+        w = round(h * ratio)
+    else:
+        h = round(w / ratio)
+    # 上限：盒子里能放下的最大同比矩形
+    if max_w and w > max_w:
+        w = int(max_w)
+        h = round(w / ratio)
+    if max_h and h > max_h:
+        h = int(max_h)
+        w = round(h * ratio)
+    # 下限：两边都不能小于最小值，按更紧的那一边放大
+    if w < min_w or h < min_h:
+        w = max(int(min_w), round(int(min_h) * ratio))
+        h = round(w / ratio)
+        if h < min_h:
+            h = int(min_h)
+            w = round(h * ratio)
+    return int(w), int(h)
+
+
+def constrain_sizing_rect(edge: int, left: int, top: int, right: int, bottom: int,
+                          ratio: float, min_w: int = 0, min_h: int = 0) -> tuple[int, int, int, int]:
+    """WM_SIZING：用户正拖着 edge 这条边/角，把提议的矩形改成保比例的。
+
+    拖左右边 → 宽定高，动底边；拖上下边 → 高定宽，动右边；拖角 → 宽定高，
+    动的是用户没抓着的那一条水平边，手感上跟着鼠标走的那条边始终贴着光标。
+    纯整数运算，不依赖 Qt，方便单测。
+    """
+    w, h = right - left, bottom - top
+    if edge in (_WMSZ_TOP, _WMSZ_BOTTOM):
+        w, h = fit_aspect(w, h, ratio, min_w=min_w, min_h=min_h, drive="height")
+    else:
+        w, h = fit_aspect(w, h, ratio, min_w=min_w, min_h=min_h, drive="width")
+    if edge in (_WMSZ_LEFT, _WMSZ_TOPLEFT, _WMSZ_BOTTOMLEFT):
+        left = right - w
+    else:
+        right = left + w
+    if edge in (_WMSZ_TOP, _WMSZ_TOPLEFT, _WMSZ_TOPRIGHT):
+        top = bottom - h
+    else:
+        bottom = top + h
+    return left, top, right, bottom
+
+
+def default_window_size() -> tuple[int, int]:
+    """首次启动的窗口大小。
+
+    按比例档位取出厂尺寸（4:3 → 960x720，16:9 → 1072x603，自由 → 1040x650），
+    大约占桌面六成，旁边还摆得下别的窗口——在 1080p、以及开了 125%/150% 缩放的
+    笔记本上，再大就占掉大半个桌面。用户拖过的尺寸由 Qt 自己记着，这里只管第一次。
+
+    小屏再按可用桌面收一道：可用区域的 90% 封顶，任务栏、副屏都算进去；
+    封顶时仍保比例。
+    """
+    key = window_aspect_key()
+    width, height = _ASPECT_DEFAULT_SIZE[key]
+    ratio = WINDOW_ASPECTS[key]
+    max_w = max_h = None
+    screen = QApplication.primaryScreen()
+    if screen is not None:
+        avail = screen.availableGeometry()
+        max_w, max_h = int(avail.width() * 0.9), int(avail.height() * 0.9)
+    return fit_aspect(width, height, ratio, max_w=max_w, max_h=max_h)
+
+
 def sidebar_width_from_config() -> int:
     from mclauncher.config import CONFIG
     try:
@@ -168,6 +478,69 @@ def sidebar_width_from_config() -> int:
     except (TypeError, ValueError):
         w = 0
     return w if 140 <= w <= 320 else SIDE_W
+
+
+def section_title(sec_key: str) -> str:
+    """分区在侧栏上那颗按钮的名字。提示语要跟用户看见的字一致。"""
+    spec = _NAV_SPECS.get(sec_key)
+    return tr(spec[1]) if spec else sec_key
+
+
+def visible_sections() -> list[str]:
+    """侧栏上真点得进去的分区。被隐藏的分区等于不存在。"""
+    keys = {s[1] for s in nav_items_from_config() if s[0] == "item"}
+    return [sec for sec in ("download", "more") if sec in keys]
+
+
+def unpin_nav_config(key: str, back_section: str | None = None,
+                     index: int = -1) -> str | None:
+    """取消固定并把子页写回某个分区，返回它**真正**落到的分区（None = 没做）。
+
+    落点只能是侧栏上点得进去的分区：放回一个被隐藏的分区，这一页在界面上
+    就彻底消失了——侧栏没有它，也没有任何落点能把它拖回来。老代码既不查
+    这一条，也不查成员表，直接拿默认归属去写提示，于是「放回了『更多』」
+    这句话经常在说谎。
+
+    落点是算出来的、不是猜的，提示语用返回值渲染，两边不会再各说各的。
+    """
+    from mclauncher.config import CONFIG
+    pinned = pinned_from_config()
+    if key not in pinned:
+        return None
+    pinned.remove(key)
+    if nav_style() == NAV_STYLE_GROUPED:
+        groups = grouped_layout()
+        for _title, keys in groups:
+            if key in keys:
+                keys.remove(key)
+        save_grouped_layout(groups)
+    else:
+        CONFIG.set("ui_nav_pinned", pinned or None)
+    # 固定项不属于任何分区，成员表必须在改完 pinned 之后再读
+    members = section_members_from_config()
+    dest = back_section if back_section in ("download", "more") else None
+    if dest is None:
+        # 没指定就回它现在的归属（用户在「自定义分区」里挪过的以那份为准）
+        dest = next((sec for sec in ("download", "more") if key in members[sec]),
+                    _default_section_for(key))
+    visible = visible_sections()
+    if dest not in visible:
+        if visible:
+            dest = visible[0]
+            index = -1  # 换了个家，原来那个落点位序没有意义
+        else:
+            # 两个分区都藏了，再挑也没得挑：把落点这个分区放出来，
+            # 否则这一页落地即失踪
+            hidden = [k for k in (CONFIG.get("ui_nav_hidden") or []) if k != dest]
+            CONFIG.set("ui_nav_hidden", hidden or None)
+    for sec in ("download", "more"):
+        if key in members[sec]:
+            members[sec].remove(key)
+    bucket = members[dest]
+    bucket.insert(index if 0 <= index <= len(bucket) else len(bucket), key)
+    CONFIG.set("ui_section_members", members)
+    CONFIG.save()
+    return dest
 
 
 class MainWindow(FluentWindowBase):
@@ -181,6 +554,7 @@ class MainWindow(FluentWindowBase):
         self._nav_cover = None
         self._nav_fade = None
         self._dock_anim = None
+        self._drop_hint = None
         self._fly_jobs = []
         self._launch_after = {}
         self._clip_seen = None
@@ -189,13 +563,27 @@ class MainWindow(FluentWindowBase):
         self._built = {}          # 子页 key -> 已构造页面（懒加载缓存）
         self._by_obj = {}         # id(page) -> key（反向查找，避免比较时触发构造）
         self._data_dirty = False  # ui_changed 置位：下次导航/刷新必须真刷数据
+        self._in_user_sizing = False   # WM_ENTERSIZEMOVE ~ WM_EXITSIZEMOVE 之间
+        self._aspect_snapping = False  # _snap_aspect 自己 resize 时的重入护栏
         super().__init__()
         self.setWindowTitle(f"{APP_DISPLAY_NAME} v{APP_VERSION}")
+        self.setAcceptDrops(True)
         self.setMicaEffectEnabled(False)
         self.setCustomBackgroundColor("#FFFFFF", "#1B1B1B")
         setThemeColor("#2E9B6B", save=False)
 
+        # 壁纸层要比侧栏、内容区都早建：Qt 按创建顺序叠子控件，先建的在下面，
+        # 之后 lower() 再钉一次，保证任何后加的控件都压在它上头。
+        self._bg_layer = BackgroundLayer(self)
+        self._bg_layer.hide()
+        self._wall_playlist = WallpaperPlaylist()
+        self._wall_timer = QTimer(self)
+        self._wall_timer.timeout.connect(self.next_wallpaper)
+
         self.backend = BackendAPI(self)
+        # 侧栏出厂默认要在建分区壳之前落定：哪些子页被固定，决定它们
+        # 是长在侧栏上还是长在分区横条上，建完再改就得整个重建。
+        ensure_default_nav()
         self.apply_theme()
 
         # ---- 分区壳（便宜，先建；子页进分区时才构造）----
@@ -232,6 +620,7 @@ class MainWindow(FluentWindowBase):
         self.side.reorderRequested.connect(self._on_sidebar_reorder)
         self.side.editLayoutRequested.connect(
             lambda: self.launch_page.canvas.set_edit_mode(True))
+        self._hint_pinned_buttons()
 
         self.hBoxLayout.setContentsMargins(0, TITLE_H, 0, 0)
         self.hBoxLayout.addWidget(self.side)
@@ -257,11 +646,11 @@ class MainWindow(FluentWindowBase):
         self.backend.game_started.connect(self._on_game_started)
         self.backend.game_exited.connect(self._on_game_exited)
         self.stackedWidget.currentChanged.connect(lambda *_: self._place_download_dock())
-        self.resize(1180, 760)
+        self.resize(*default_window_size())
         # 上面 apply_theme() 时 _pages 还是空的，ScrollArea 表面没刷到。
         # 页面全部就位后再刷一遍，深色启动才不会白字压浅底。
         self.apply_theme()
-        QTimer.singleShot(400, self._boot_extras)
+        QTimer.singleShot(400, self, self._boot_extras)
 
     # ------------------------------------------------------------------
     # 懒加载基建
@@ -300,7 +689,19 @@ class MainWindow(FluentWindowBase):
                     spec[0].add_page(page, "" if key in pinned else spec[1])
 
     def _rebuild_sections(self):
-        """应用分区内容自定义后重建两个分区壳（已构造子页随迁）。"""
+        """应用分区内容自定义后重建两个分区壳（已构造子页随迁）。
+
+        整段关掉刷新再一次性放开：中间要拆两个旧壳、装两个新壳、把已构造的
+        子页一个个搬过去，每一步都让 Qt 重排重绘一遍纯属白烧——用户看到的
+        只有最后那一帧。
+        """
+        self.setUpdatesEnabled(False)
+        try:
+            self._rebuild_sections_impl()
+        finally:
+            self.setUpdatesEnabled(True)
+
+    def _rebuild_sections_impl(self):
         cur_key = self._visible_key()
         old = {"download": self.download_section, "more": self.more_section}
         # 记录当前停留在哪个壳上，重建后回到同一视图
@@ -309,6 +710,12 @@ class MainWindow(FluentWindowBase):
 
         self.download_section = DownloadSection(self.backend, self)
         self.more_section = MoreSection(self.backend, self)
+        # 壳还是空的这一刻就刷表面：容器上每次 setStyleSheet 都会把整棵子树
+        # 重新 polish，等 _bind_sections 把已构造的子页（设置页几百个控件）
+        # 搬进来再刷，同一句话贵几十倍（100ms 量级）。
+        # 子页自带表面且守卫键没变，搬过来后 ensure_ 直接跳过。
+        ensure_theme_surfaces(self.download_section)
+        ensure_theme_surfaces(self.more_section)
         for k, w in old.items():
             self._by_obj.pop(id(w), None)
         for sec_key, w in (("download", self.download_section),
@@ -324,8 +731,7 @@ class MainWindow(FluentWindowBase):
         self.stackedWidget.addWidget(self.more_section)
         self._pages["download"] = self.download_section
         self._pages["more"] = self.more_section
-        # 新壳要完整刷一次主题（注册页时清签名，apply_theme 不会短路跳过）
-        self._theme_sig = None
+        self._style_new_shells()
 
         # 回到原来的视图：原来在分区里就回到那个分区的同一个子页
         target = None
@@ -337,7 +743,6 @@ class MainWindow(FluentWindowBase):
                 self.stackedWidget.setCurrentWidget(shell)
                 shell.show_page(target)
                 self.side.set_current(cur_section_key, emit=False)
-                self.apply_theme()
                 return
         fallback = (self.download_section if cur_section_key == "download"
                     else self.more_section if cur_section_key == "more"
@@ -345,7 +750,29 @@ class MainWindow(FluentWindowBase):
         if fallback is not None:
             fallback.ensure_first()
             self.stackedWidget.setCurrentWidget(fallback)
-        self.apply_theme()
+
+    def _style_new_shells(self):
+        """只把刚建好的两个分区壳刷上主题，别整套重来。
+
+        这里不能走「清掉 _theme_sig + apply_theme()」：apply_theme 是给
+        「主题真的变了」准备的，它要走一遍 qfluentwidgets 的 setTheme /
+        setThemeColor（内部重算所有注册控件的样式表）、重刷每一个已构造页面
+        的表面、再跑一次背景，一下就是 300ms 量级。而重建分区壳时主题、配色、
+        壁纸一个都没动，真正需要上色的只有两个新壳和它们的横条。
+
+        随迁过来的子页是同一批控件对象，样式本来就在身上；ensure_ 的守卫键
+        没变，这里点到它们也是直接跳过，花不了什么。
+        """
+        for sec_key in ("download", "more"):
+            shell = getattr(self, f"{sec_key}_section", None)
+            if shell is None:
+                continue
+            cat = getattr(shell, "cat", None)
+            if cat is not None and hasattr(cat, "restyle"):
+                cat.restyle()
+            ensure_theme_surfaces(shell)
+            for page in shell.pages():
+                ensure_theme_surfaces(page)
 
     def _create_task_badge(self):
         """把任务角标挂到当前侧栏的「下载任务」按钮上（侧栏重建后重挂）。"""
@@ -369,7 +796,7 @@ class MainWindow(FluentWindowBase):
         for sec_key, shell in (("download", self.download_section),
                                ("more", self.more_section)):
             shell.cat.unpinRequested.connect(
-                lambda k, s=sec_key: self._unpin_nav(k, s))
+                lambda k, i, s=sec_key: self._unpin_nav(k, s, i))
 
     def _on_side_width(self, width: int):
         from mclauncher.config import CONFIG
@@ -402,6 +829,15 @@ class MainWindow(FluentWindowBase):
         if key in _ALL_SUB_KEYS and target in ("download", "more"):
             self._unpin_nav(key, target)
             return
+        if nav_style() == NAV_STYLE_GROUPED:
+            # 分组档的顺序存在组里，写 ui_nav_order 不会有任何效果
+            groups = grouped_layout()
+            if not any(key in keys for _t, keys in groups):
+                return
+            if move_within_groups(groups, key, target, before):
+                save_grouped_layout(groups)
+                self._rebuild_sidebar()
+            return
         seq = self._sidebar_sequence()
         if key not in seq or target not in seq or key == target:
             return
@@ -417,6 +853,9 @@ class MainWindow(FluentWindowBase):
             return
         if key in pinned_from_config():
             return
+        if nav_style() == NAV_STYLE_GROUPED:
+            self._pin_nav_grouped(key, target, before)
+            return
         if target:
             seq = self._sidebar_sequence()
             if target in seq:
@@ -428,6 +867,19 @@ class MainWindow(FluentWindowBase):
                 self._rebuild_sidebar()
                 return
         self._pin_nav(key)
+
+    def _pin_nav_grouped(self, key: str, target: str | None, before: bool):
+        """分组排法下固定：并进落点所在的那一组；没落点就插在「更多」前面。"""
+        if not self._take_from_section(key):
+            return
+        groups = grouped_layout()
+        on_target = bool(target) and any(target in keys for _t, keys in groups)
+        anchor = target if on_target else "more"
+        if not move_within_groups(groups, key, anchor, before if on_target else True):
+            groups[-1][1].append(key)
+        save_grouped_layout(groups)
+        self._rebuild_sections()
+        self._rebuild_sidebar()
 
     def _take_from_section(self, key: str) -> bool:
         """移动语义：固定前把 key 从分区成员里拿走；分区只剩它时拒绝。"""
@@ -456,6 +908,9 @@ class MainWindow(FluentWindowBase):
         pinned = pinned_from_config()
         if key in pinned:
             return
+        if nav_style() == NAV_STYLE_GROUPED:
+            self._pin_nav_grouped(key, None, True)
+            return
         if not self._take_from_section(key):
             return
         pinned.append(key)
@@ -471,24 +926,17 @@ class MainWindow(FluentWindowBase):
         self._rebuild_sections()
         self._rebuild_sidebar()
 
-    def _unpin_nav(self, key: str, back_section: str | None = None):
-        """取消固定；拖回某个分区横条时放回那个分区，否则回默认分区。"""
-        from mclauncher.config import CONFIG
-        pinned = pinned_from_config()
-        if key not in pinned:
+    def _unpin_nav(self, key: str, back_section: str | None = None, index: int = -1):
+        """取消固定；拖回某个分区时放回那个分区（index 是横条上的落点）。"""
+        landed = unpin_nav_config(key, back_section, index)
+        if landed is None:
             return
-        pinned.remove(key)
-        CONFIG.set("ui_nav_pinned", pinned or None)
-        if back_section in ("download", "more"):
-            members = section_members_from_config()
-            for sec in ("download", "more"):
-                if key in members[sec]:
-                    members[sec].remove(key)
-            members[back_section].append(key)
-            CONFIG.set("ui_section_members", members)
-        CONFIG.save()
         self._rebuild_sections()
         self._rebuild_sidebar()
+        InfoBar.success(
+            tr("已取消固定"),
+            tr("「{0}」放回了「{1}」").format(sub_title(key), section_title(landed)),
+            parent=self, position=InfoBarPosition.TOP, duration=2500)
 
     def _rebuild_sidebar(self):
         """应用侧栏自定义（排序/显隐/宽度）后重建侧栏，保留当前选中项。"""
@@ -518,6 +966,7 @@ class MainWindow(FluentWindowBase):
             lambda: self.launch_page.canvas.set_edit_mode(True))
         self.hBoxLayout.insertWidget(0, self.side)
         self._create_task_badge()
+        self._hint_pinned_buttons()
         # 恢复选中态；原来的键被隐藏时回落到第一个可见项
         keys = [s[1] for s in self._side_items if s[0] == "item"]
         want = current if current in keys else (keys[0] if keys else None)
@@ -529,11 +978,18 @@ class MainWindow(FluentWindowBase):
         except Exception:
             pass
 
+    def _hint_pinned_buttons(self):
+        """固定项挂个提示：不然「怎么放回去」全靠猜。"""
+        for key in pinned_from_config():
+            btn = self.side.button(key)
+            if btn is not None:
+                btn.setToolTip(tr("拖回「下载」/「更多」即可放回原分区"))
+
     def _register_page(self, page, key: str):
         self._by_obj[id(page)] = key
         # 新页面入列后，apply_theme 的签名短路必须失效：
         # 否则启动时「页面建好后的第二次 apply_theme」会被同签名跳过，
-        # 首屏页面表面没刷（深色启动白字压浅底的老 bug 就回来了）。
+        # 首屏页面表面没刷，深色启动就是白字压浅底。
         self._theme_sig = None
 
     def _finish_page_build(self, page):
@@ -554,7 +1010,8 @@ class MainWindow(FluentWindowBase):
         if page is not None:
             return page
         section, title, factory = self._sub_specs[key]
-        page = factory()
+        # 直接建在分区栈底下：add_page 只入布局、不再换父重新 polish 整页
+        page = factory(getattr(section, "stack", None))
         self._built[key] = page
         self._register_page(page, key)
         # 固定到侧栏的子页只进分区栈展示，不建横条按钮（移动语义）
@@ -568,7 +1025,7 @@ class MainWindow(FluentWindowBase):
         if page is not None:
             return page
         if key == "ai":
-            page = self._make_ai_page()
+            page = self._make_ai_page(self.stackedWidget)
         else:
             return None
         self._pages[key] = page
@@ -578,73 +1035,76 @@ class MainWindow(FluentWindowBase):
         return page
 
     # ---- 子页工厂（import 放在工厂里：未访问的页面连模块都不加载）----
-    def _make_version_page(self):
+    # parent 传「它最终要进的那个栈」：页面若先挂在主窗、再被 addWidget 搬进
+    # 栈，Qt 会因为换了祖先把整棵页面树重新 polish 一遍（设置页 ~90ms）。
+    # 一开始就建在栈底下，addWidget 只是入布局、不换父，这一遍就省了。
+    def _make_version_page(self, parent=None):
         from .pages.version_page import VersionPage
-        return VersionPage(self.backend, self)
+        return VersionPage(self.backend, parent or self)
 
-    def _make_mod_page(self):
+    def _make_mod_page(self, parent=None):
         from .pages.catalog_page import ModPage
-        return ModPage(self.backend, self)
+        return ModPage(self.backend, parent or self)
 
-    def _make_modpack_page(self):
+    def _make_modpack_page(self, parent=None):
         from .pages.catalog_page import ModpackPage
-        return ModpackPage(self.backend, self)
+        return ModpackPage(self.backend, parent or self)
 
-    def _make_datapack_page(self):
+    def _make_datapack_page(self, parent=None):
         from .pages.catalog_page import DatapackPage
-        return DatapackPage(self.backend, self)
+        return DatapackPage(self.backend, parent or self)
 
-    def _make_resource_page(self):
+    def _make_resource_page(self, parent=None):
         from .pages.catalog_page import ResourcePackPage
-        return ResourcePackPage(self.backend, self)
+        return ResourcePackPage(self.backend, parent or self)
 
-    def _make_shader_page(self):
+    def _make_shader_page(self, parent=None):
         from .pages.catalog_page import ShaderPage
-        return ShaderPage(self.backend, self)
+        return ShaderPage(self.backend, parent or self)
 
-    def _make_world_page(self):
+    def _make_world_page(self, parent=None):
         from .pages.catalog_page import WorldPage
-        return WorldPage(self.backend, self)
+        return WorldPage(self.backend, parent or self)
 
-    def _make_java_page(self):
+    def _make_java_page(self, parent=None):
         from .pages.java_page import JavaPage
-        return JavaPage(self.backend, self)
+        return JavaPage(self.backend, parent or self)
 
-    def _make_instance_page(self):
-        from .pages.instance_page import InstancePage
-        return InstancePage(self.backend, self)
+    def _make_instance_page(self, parent=None):
+        from .pages.version_manage_page import VersionManagePage
+        return VersionManagePage(self.backend, parent or self)
 
-    def _make_mods_page(self):
+    def _make_mods_page(self, parent=None):
         from .pages.mod_page import ModManagerPage
-        return ModManagerPage(self.backend, self)
+        return ModManagerPage(self.backend, parent or self)
 
-    def _make_account_page(self):
+    def _make_account_page(self, parent=None):
         from .pages.account_page import AccountPage
-        return AccountPage(self.backend, self)
+        return AccountPage(self.backend, parent or self)
 
-    def _make_multiplayer_page(self):
+    def _make_multiplayer_page(self, parent=None):
         from .pages.multiplayer_page import MultiplayerPage
-        return MultiplayerPage(self.backend, self)
+        return MultiplayerPage(self.backend, parent or self)
 
-    def _make_servers_page(self):
+    def _make_servers_page(self, parent=None):
         from .pages.servers_page import ServerPage
-        return ServerPage(self.backend, self)
+        return ServerPage(self.backend, parent or self)
 
-    def _make_playtime_page(self):
+    def _make_playtime_page(self, parent=None):
         from .pages.playtime_page import PlaytimePage
-        return PlaytimePage(self.backend, self)
+        return PlaytimePage(self.backend, parent or self)
 
-    def _make_feedback_page(self):
+    def _make_feedback_page(self, parent=None):
         from .pages.feedback_page import FeedbackPage
-        return FeedbackPage(self.backend, self)
+        return FeedbackPage(self.backend, parent or self)
 
-    def _make_settings_page(self):
+    def _make_settings_page(self, parent=None):
         from .pages.settings_page import SettingsPage
-        return SettingsPage(self.backend, self)
+        return SettingsPage(self.backend, parent or self)
 
-    def _make_ai_page(self):
+    def _make_ai_page(self, parent=None):
         from .pages.ai_page import AiPage
-        return AiPage(self.backend, self)
+        return AiPage(self.backend, parent or self)
 
     # ---- 懒加载属性：只在确实要用时才构造 ----
     @property
@@ -719,13 +1179,21 @@ class MainWindow(FluentWindowBase):
         color = self.backend.get_setting("theme_color", "#2E9B6B") or "#2E9B6B"
         dark = bool(self.backend.get_setting("ui_dark", False))
         image = str(self.backend.get_setting("ui_background", "") or "").strip()
-        # 签名短路：主题相关三键没变就直接返回。设置保存、探针、双保险
+        # get_settings 那头已经夹过范围，这里拿到的一定是合法值
+        opacity = int(self.backend.get_setting("ui_sidebar_opacity", 100) or 100)
+        blur = int(self.backend.get_setting("ui_background_blur", 0) or 0)
+        dim = int(self.backend.get_setting("ui_background_dim", 0) or 0)
+        rotate = (str(self.backend.get_setting("ui_background_folder", "") or ""),
+                  bool(self.backend.get_setting("ui_background_shuffle", False)),
+                  int(self.backend.get_setting("ui_background_interval", 10) or 10))
+        # 签名短路：主题相关几个键没变就直接返回。设置保存、探针、双保险
         # 路径都会重复触发 apply_theme，全量跑一次要重刷所有已构造页面。
         # 新页面注册时会清掉签名（见 _register_page），不会漏刷首屏。
-        sig = (dark, str(color), image)
+        sig = (dark, str(color), image, opacity, blur, dim, rotate)
         if getattr(self, "_theme_sig", None) == sig:
             return
         self._theme_sig = sig
+        Theme.sidebar_opacity = opacity
         self.setUpdatesEnabled(False)
         try:
             self._apply_theme_impl(color, dark)
@@ -739,9 +1207,9 @@ class MainWindow(FluentWindowBase):
         # 主题翻转卡 3 秒多的元凶——页面建得越多越惨。
         setThemeColor(color, save=False, lazy=True)
         setTheme(FluentTheme.DARK if dark else FluentTheme.LIGHT, save=False, lazy=True)
-        # 必须固定传「浅色槽 / 深色槽」两套值。以前写 Theme.bg 当浅色槽，
+        # 必须固定传「浅色槽 / 深色槽」两套值。若拿 Theme.bg 当浅色槽，
         # 一切深色 Theme.bg 已是 #1B1B1B，会把浅色槽也污染成深色，切回浅色时
-        # Fluent 背景动画/缓存还会短暂甚至一直停在脏值上。
+        # Fluent 背景动画/缓存会短暂甚至一直停在脏值上。
         self.setCustomBackgroundColor("#FFFFFF", "#1B1B1B")
         if hasattr(self, "_updateBackgroundColor"):
             try:
@@ -789,7 +1257,7 @@ class MainWindow(FluentWindowBase):
                     # 一次，首帧先出壳。singleShot(0) 在 exec() 后才触发，
                     # 那时 show() 已发生。
                     self._deferred_boot_reload = True
-                    QTimer.singleShot(0, self._boot_reload)
+                    QTimer.singleShot(0, self, self._boot_reload)
         self.update()
 
     def _boot_reload(self):
@@ -839,32 +1307,80 @@ class MainWindow(FluentWindowBase):
                 except Exception:
                     pass
 
+    def _wallpaper_source(self) -> str:
+        """这一刻该显示哪张壁纸：文件夹轮播优先，没有才用单张设置。"""
+        folder = str(self.backend.get_setting("ui_background_folder", "") or "").strip()
+        shuffle = bool(self.backend.get_setting("ui_background_shuffle", False))
+        rotating = self._wall_playlist.set_folder(folder, shuffle)
+        minutes = int(self.backend.get_setting("ui_background_interval", 10) or 10)
+        if rotating:
+            self._wall_timer.start(max(1, minutes) * 60_000)
+            return self._wall_playlist.current()
+        self._wall_timer.stop()
+        return str(self.backend.get_setting("ui_background", "") or "").strip()
+
+    def next_wallpaper(self):
+        """轮播到下一张。只换图源，不走 apply_theme——那会把所有页面重刷一遍。"""
+        nxt = self._wall_playlist.advance()
+        if not nxt:
+            # 文件夹被删空/移走了：回落到单张设置，这一步要整套重刷
+            self._theme_sig = None
+            self.apply_theme()
+            return
+        self._bg_layer.set_source(nxt)
+        self._sync_background_playback()
+
     def _apply_background(self):
-        """把设置里的背景图刷到内容区。
+        """把当前壁纸（静态图 / mp4 / 文件夹轮播）交给底层画布。
 
-        路径是直接拼进 QSS 的，两个坑必须挡住：
-        文件被用户删掉后 Qt 只会静默画成空白，界面看起来像坏了；
-        路径里带单引号（`D:/我的'图/bg.png`）会提前闭合 url('...')，整张样式表连带失效。
+        文件被用户删掉、改名后要静默回落纯色：靠 QSS border-image 指着一个
+        不存在的文件只会画成一片空白，界面看起来像坏了。
 
-        只给 stacked 设 border-image 还不够：页面作为子控件铺着不透明 Theme.bg，
-        永远盖在父背景之上。所以这里同时裁决 Theme.background_active，
-        paint_theme_surfaces 按它把页面表面刷透明，图才真正透得出来。
+        画布铺满整窗还不够：页面作为子控件铺着不透明 Theme.bg，永远盖在下层
+        兄弟之上。所以这里同时裁决 Theme.background_active，
+        paint_theme_surfaces 按它把页面表面刷透明，壁纸才真正透得出来。
         """
-        image = str(self.backend.get_setting("ui_background", "") or "").strip()
-        bg = Theme.bg
+        image = self._wallpaper_source()
         active = bool(image) and os.path.isfile(image)
         Theme.background_active = active
-        if not active:
-            # 无背景图时也要显式铺 Theme.bg，否则 stacked 透明，下面页又是浅色默认底
-            self.stackedWidget.setStyleSheet(
-                f"QStackedWidget {{ background-color: {bg}; border: none; }}"
-            )
+        layer = getattr(self, "_bg_layer", None)
+        if layer is not None:
+            layer.set_source(image if active else "")
+            layer.set_effects(
+                int(self.backend.get_setting("ui_background_blur", 0) or 0),
+                int(self.backend.get_setting("ui_background_dim", 0) or 0),
+                Theme.bg)
+            if active:
+                layer.setGeometry(self.rect())
+                layer.lower()
+                layer.show()
+                self._sync_background_playback()
+            else:
+                layer.hide()
+        # stacked 的透明**不能**靠自己 setStyleSheet 抢：qfluentwidgets 的
+        # DirtyStyleSheetWatcher 会在下一次绘制时把整份 Fluent 样式表刷回来，
+        # 其中 `StackedWidget { background-color: rgba(255,255,255,0.5) }` 会给
+        # 壁纸蒙一层 50% 白。它自己留了 `StackedWidget[isTransparent=true]`
+        # 这条出口，翻这个属性才是刷回来也不丢的做法。
+        stack = self.stackedWidget
+        if bool(stack.property("isTransparent")) != active:
+            stack.setProperty("isTransparent", active)
+            stack.setStyle(QApplication.style())
+        if active:
+            # 自带的样式表必须清掉，否则控件自身那条规则压过属性选择器
+            stack.setStyleSheet("")
+        else:
+            # 纯色时显式铺 Theme.bg：否则 stacked 透明，下面页又是浅色默认底
+            stack.setStyleSheet(
+                f"QStackedWidget {{ background-color: {Theme.bg}; border: none; }}")
+
+    def _sync_background_playback(self):
+        """只有窗口真的摆在用户眼前才播动态壁纸：失焦、最小化、隐藏一律暂停。"""
+        layer = getattr(self, "_bg_layer", None)
+        if layer is None:
             return
-        path = image.replace("\\", "/").replace("'", "%27")
-        self.stackedWidget.setStyleSheet(
-            f"QStackedWidget {{ background-color: {bg};"
-            f" border-image: url('{path}') 0 0 0 0 stretch stretch; }}"
-        )
+        layer.set_playing(
+            self.isVisible() and not self.isMinimized() and self.isActiveWindow())
 
     def _boot_extras(self):
         if self.backend.get_setting("first_run", True):
@@ -1105,14 +1621,259 @@ class MainWindow(FluentWindowBase):
         anim.start()
         return anim
 
+    # ------------------------------------------------------------------
+    # 拖进窗口的整合包
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _dropped_paths(mime) -> list[str]:
+        if not mime.hasUrls():
+            return []
+        return [p for p in (u.toLocalFile() for u in mime.urls() if u.isLocalFile()) if p]
+
+    def _unpin_drag_key(self, mime) -> str:
+        """落在窗口其它地方的「把固定项拖回去」；不是这种拖拽就返回空串。
+
+        分区页自己已经收了这种拖拽，这里兜的是启动页 / AI / 下载任务这些
+        非分区页面——松手在哪都能放回去，比只认那条 48px 横条好找得多。
+        """
+        from .pages.download_hub import unpinnable_key_of
+        return unpinnable_key_of(mime)
+
+    def dragEnterEvent(self, event):
+        # 整合包页自己也收拖放，落在它上面的事件不会冒到这里来
+        if self._unpin_drag_key(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        if not self._dropped_paths(event.mimeData()):
+            return
+        self._show_drop_hint()
+        event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        if (self._unpin_drag_key(event.mimeData())
+                or self._dropped_paths(event.mimeData())):
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        self._hide_drop_hint()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        self._hide_drop_hint()
+        key = self._unpin_drag_key(event.mimeData())
+        if key:
+            event.acceptProposedAction()
+            # 重建侧栏会删掉拖拽源那个按钮，等这一帧的拖放收完再动
+            QTimer.singleShot(0, self, lambda k=key: self._unpin_nav(k))
+            return
+        paths = self._dropped_paths(event.mimeData())
+        if not paths:
+            return
+        event.acceptProposedAction()
+        # 延后一拍再动手：拖放这一帧里开模态窗会把拖源那边卡住
+        QTimer.singleShot(0, self, lambda p=list(paths): self.take_dropped_files(p))
+
+    def take_dropped_files(self, paths: list[str]):
+        """认一认这些文件是什么，再决定放哪儿（整合包 / 模组 / 壁纸 / 皮肤…）。"""
+        from .pages.file_drop import handle_dropped_files
+        handle_dropped_files(self, paths)
+
+    def _show_drop_hint(self):
+        hint = self._drop_hint
+        if hint is None:
+            hint = QLabel(self)
+            hint.setAlignment(Qt.AlignCenter)
+            hint.setAttribute(Qt.WA_TransparentForMouseEvents)
+            self._drop_hint = hint
+        hint.setText(tr("松手放进来 · 整合包、模组、资源包、存档、壁纸、皮肤都认"))
+        veil = "rgba(0, 0, 0, 150)" if Theme.dark else "rgba(255, 255, 255, 200)"
+        hint.setStyleSheet(
+            f"QLabel {{ color: {Theme.title}; font-size: 16px; font-weight: 600;"
+            f" border: 2px dashed {Theme.green}; border-radius: 12px;"
+            f" background-color: {veil}; }}"
+        )
+        hint.setGeometry(self.stackedWidget.geometry().adjusted(14, 14, -14, -14))
+        hint.show()
+        hint.raise_()
+
+    def _hide_drop_hint(self):
+        if self._drop_hint is not None:
+            self._drop_hint.hide()
+
+    def import_modpack_file(self, path: str):
+        """认包 → 确认 → 跳版本管理建新版本。整合包页的拖放与导入按钮也走这条。"""
+        from .pages.modpack_drop import ModpackDropDialog, probe
+        info = probe(path)
+        if info is None:
+            InfoBar.warning(
+                tr("这不是整合包"),
+                f'{os.path.basename(str(path).rstrip("/\\")) or path} — '
+                + tr("支持 Modrinth .mrpack、CurseForge .zip、直接压缩的 .minecraft 目录，"
+                     "以及它们解开后的文件夹"),
+                parent=self, position=InfoBarPosition.TOP_RIGHT, duration=5000)
+            return
+        dlg = ModpackDropDialog(info, self)
+        if not dlg.exec():
+            return
+        self.switchTo(_MODPACK_LANDING_KEY)
+        self.backend.install_modpack(info["path"], tr("本地"), extra={
+            "instance": "", "path": info["path"], "source": tr("本地"),
+            "version_name": dlg.version_name(), "isolate": dlg.isolate(),
+        })
+        InfoBar.success(
+            tr("开始导入整合包"), tr("装完会多出一个新版本，进度看「下载任务」"),
+            parent=self, position=InfoBarPosition.TOP_RIGHT, duration=3000)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        layer = getattr(self, "_bg_layer", None)
+        if layer is not None and not layer.isHidden():
+            layer.setGeometry(self.rect())
+        # 比例锁着、又不是用户正拖着边（那条路 WM_SIZING 已经保住了）：
+        # 贴边 / Win+方向键这类系统改的尺寸，下一拍吸回去。
+        if (self._aspect_lock_active() and not self._in_user_sizing
+                and not self._aspect_snapping and self._aspect_off_by() > 2):
+            QTimer.singleShot(0, self, self._snap_aspect)
         if getattr(self, "side", None) is None:
             return
         self._place_download_dock(animate=False)
         self._place_task_badge()
 
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.ActivationChange, QEvent.WindowStateChange):
+            self._sync_background_playback()
+        if (event.type() == QEvent.WindowStateChange
+                and self.isMaximized() and self._aspect_lock_active()):
+            # 比例锁着就没有「铺满屏幕」这回事：最大化 = 屏幕里放得下的最大同比矩形
+            QTimer.singleShot(0, self, self._unmaximize_to_aspect)
+
+    # ------------------------------------------------------------------
+    # 窗口宽高比
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _aspect_lock_active() -> bool:
+        """比例锁只在真 Windows 窗口上生效：它靠 WM_SIZING / 贴边 / 最大化这些
+        系统路径；离屏平台（探针、冒烟、pytest）没有用户拖拽，而且那里的
+        「屏幕」只有 800x600，吸一下就把用例量的任意尺寸窗口缩没了。"""
+        return (window_aspect_ratio() is not None
+                and QApplication.platformName().lower() == "windows")
+
+    def nativeEvent(self, eventType, message):
+        """拖边 / 拖角时把 Windows 提议的矩形改成保比例的（WM_SIZING），
+        这样拖的过程中就是同比的，不是松手才跳一下。"""
+        ratio = window_aspect_ratio()
+        if ratio is not None:
+            from ctypes import wintypes
+            msg = wintypes.MSG.from_address(int(message))
+            if msg.hWnd:
+                if msg.message == _WM_ENTERSIZEMOVE:
+                    self._in_user_sizing = True
+                elif msg.message == _WM_EXITSIZEMOVE:
+                    self._in_user_sizing = False
+                    QTimer.singleShot(0, self, self._snap_aspect)
+                elif msg.message == _WM_SIZING and msg.lParam:
+                    rect = wintypes.RECT.from_address(msg.lParam)
+                    dpr = self.devicePixelRatioF() or 1.0
+                    min_w = int(self.minimumWidth() * dpr)
+                    min_h = int(self.minimumHeight() * dpr)
+                    l, t, r, b = constrain_sizing_rect(
+                        int(msg.wParam), rect.left, rect.top, rect.right, rect.bottom,
+                        ratio, min_w, min_h)
+                    rect.left, rect.top, rect.right, rect.bottom = l, t, r, b
+                    return True, 1
+        return super().nativeEvent(eventType, message)
+
+    def _aspect_off_by(self) -> int:
+        """当前尺寸偏离锁定比例多少个像素（按高算）。"""
+        ratio = window_aspect_ratio()
+        if ratio is None:
+            return 0
+        return abs(self.height() - round(self.width() / ratio))
+
+    def _aspect_box(self) -> tuple[int | None, int | None]:
+        """所在屏幕可用区域，作为同比矩形的上限。"""
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return None, None
+        avail = screen.availableGeometry()
+        return avail.width(), avail.height()
+
+    def _snap_aspect(self):
+        """把窗口吸到锁定比例上（以宽定高，装不下就整体缩）。"""
+        ratio = window_aspect_ratio()
+        if not self._aspect_lock_active() or self.isMaximized() or self.isMinimized() or self.isFullScreen():
+            return
+        if self._in_user_sizing or self._aspect_snapping:
+            return
+        max_w, max_h = self._aspect_box()
+        w, h = fit_aspect(self.width(), self.height(), ratio, max_w=max_w, max_h=max_h,
+                          min_w=self.minimumWidth(), min_h=self.minimumHeight())
+        if (w, h) == (self.width(), self.height()):
+            return
+        self._aspect_snapping = True
+        try:
+            self.resize(w, h)
+        finally:
+            self._aspect_snapping = False
+
+    def _unmaximize_to_aspect(self):
+        """最大化时退回普通态，取屏幕里放得下的最大同比矩形并居中。"""
+        ratio = window_aspect_ratio()
+        if not self._aspect_lock_active() or not self.isMaximized():
+            return
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            self.showNormal()
+            return
+        avail = screen.availableGeometry()
+        w, h = fit_aspect(avail.width(), avail.height(), ratio,
+                          max_w=avail.width(), max_h=avail.height(),
+                          min_w=self.minimumWidth(), min_h=self.minimumHeight())
+        x = avail.x() + (avail.width() - w) // 2
+        y = avail.y() + (avail.height() - h) // 2
+        self._aspect_snapping = True
+        try:
+            # 无边框窗口下 Qt 的 showNormal() 只改了自己的状态，系统那边
+            # （GetWindowPlacement）还记着「最大化」，接着又发一次 WM_SIZE 把
+            # 我们拉回去。直接走 Win32：先 SW_RESTORE 再 SetWindowPos 落到目标
+            # 矩形（物理像素），Qt 顺着 WM_WINDOWPOSCHANGED 自己同步。
+            import ctypes
+            hwnd = int(self.winId())
+            dpr = self.devicePixelRatioF() or 1.0
+            user32 = ctypes.windll.user32
+            user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+            user32.SetWindowPos(hwnd, None, int(x * dpr), int(y * dpr),
+                                int(w * dpr), int(h * dpr), 0x0004 | 0x0010)  # NOZORDER | NOACTIVATE
+            self.resize(w, h)
+            self.move(x, y)
+        finally:
+            self._aspect_snapping = False
+
+    def apply_window_aspect(self):
+        """设置里切了比例档位：锁死的档位立刻把窗口吸过去；自由档不动。"""
+        if window_aspect_ratio() is None:
+            return
+        if self.isMaximized():
+            self._unmaximize_to_aspect()
+        else:
+            self._snap_aspect()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_background_playback()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._sync_background_playback()
+
     def closeEvent(self, event):
+        layer = getattr(self, "_bg_layer", None)
+        if layer is not None:
+            try:
+                layer.stop()
+            except Exception:
+                pass
         try:
             self.backend.terracotta_shutdown()
         except Exception:
@@ -1151,14 +1912,9 @@ class MainWindow(FluentWindowBase):
 
     def _launch_installed(self, instance: str, version: str, loader: str = tr("无")):
         last = getattr(self.backend, "_last_installed", None) or {}
-        vid = version
-        if last.get("instance") == instance and last.get("version"):
-            vid = last["version"]
+        vid = last.get("version") or version
         self.switchTo(self.launch_page)
         self.launch_page.reload()
-        if instance:
-            self.launch_page.instance_box.setCurrentText(instance)
-            self.launch_page.reload()
         box = self.launch_page.version_box
         ids = [box.itemText(i) for i in range(box.count())]
         pick = vid if vid in ids else next(
@@ -1179,7 +1935,8 @@ class MainWindow(FluentWindowBase):
             InfoBar.success(tr("安装完成"), tr("正在启动游戏…"), parent=self,
                             position=InfoBarPosition.TOP_RIGHT, duration=2500)
             QTimer.singleShot(
-                380, lambda i=instance, v=version, l=loader: self._launch_installed(i, v, l))
+                380, self,
+                lambda i=instance, v=version, l=loader: self._launch_installed(i, v, l))
             return
         if str(title).startswith(tr("启动游戏")) or str(title).startswith(tr("微软登录")):
             return

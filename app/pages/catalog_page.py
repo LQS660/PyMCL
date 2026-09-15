@@ -11,7 +11,7 @@ from qfluentwidgets import (
     ScrollArea, TransparentPushButton, TransparentToolButton,
 )
 
-from ..pcl_chrome import Theme, chip_qss, ghost_btn_qss, row_qss, _icon
+from ..pcl_chrome import Theme, chip_qss, ghost_btn_qss, prestyle_page, row_qss, _icon
 from ..widgets import EmptyState, IconTile, InputDialog, ThumbnailTile
 from mclauncher.i18n import tr
 
@@ -366,7 +366,7 @@ class PclCatalogPage(QWidget):
         self.update_btn = TransparentPushButton(FIF.SYNC, tr("检查更新"))
         self.installed_ver_box = ComboBox()
         self.installed_ver_box.setFixedWidth(160)
-        self.installed_ver_box.addItem(tr("实例目录"))
+        self.installed_ver_box.addItem(tr("大锅饭（共用目录）"))
         self.installed_ver_box.setVisible(False)
         self.fav_btn = TransparentPushButton(_HEART, tr("收藏"))
         mode_row.addWidget(self.mode_search)
@@ -386,6 +386,7 @@ class PclCatalogPage(QWidget):
         scroll.setWidget(host)
         rc.addWidget(scroll)
         root.addWidget(result_card, 1)
+        prestyle_page(self, scroll)
 
         self.name_edit.returnPressed.connect(self._search)
         self.search_btn.clicked.connect(self._search)
@@ -415,20 +416,15 @@ class PclCatalogPage(QWidget):
         return lab
 
     def _current_instance(self) -> str:
-        return self.instance_box.currentText() or CONFIG.get("default_instance", "default") or "default"
+        return self.backend.game_root_name()
 
     def _reload_instances(self):
-        cur = self.instance_box.currentText()
-        getter = getattr(self.backend, "get_instances", None)
-        names = [i["name"] for i in getter()] if callable(getter) else ["default"]
+        """只剩一个游戏目录，下拉框留着但不再让用户选。"""
         self.instance_box.blockSignals(True)
         self.instance_box.clear()
-        self.instance_box.addItems(names)
-        if cur in names:
-            self.instance_box.setCurrentText(cur)
-        elif CONFIG.get("default_instance") in names:
-            self.instance_box.setCurrentText(CONFIG.get("default_instance"))
+        self.instance_box.addItem(self._current_instance())
         self.instance_box.blockSignals(False)
+        self.instance_box.setVisible(False)
 
     def _source(self) -> str:
         text = self.source_box.currentText()
@@ -536,7 +532,7 @@ class PclCatalogPage(QWidget):
         if not self.spec.get("versioned"):
             return ""
         text = self.installed_ver_box.currentText()
-        if not text or text == tr("实例目录"):
+        if not text or text == tr("大锅饭（共用目录）"):
             return ""
         return text
 
@@ -549,9 +545,9 @@ class PclCatalogPage(QWidget):
         cur = self.installed_ver_box.currentText()
         self.installed_ver_box.blockSignals(True)
         self.installed_ver_box.clear()
-        self.installed_ver_box.addItem(tr("实例目录"))
+        self.installed_ver_box.addItem(tr("大锅饭（共用目录）"))
         self.installed_ver_box.addItems(ids)
-        if cur and cur in [tr("实例目录"), *ids]:
+        if cur and cur in [tr("大锅饭（共用目录）"), *ids]:
             self.installed_ver_box.setCurrentText(cur)
         self.installed_ver_box.blockSignals(False)
 
@@ -613,10 +609,42 @@ class PclCatalogPage(QWidget):
             sw.setChecked(bool(row.get("enabled")))
             sw.checkedChanged.connect(lambda on, n=name: self._toggle(n, on))
             lay.addWidget(sw)
+        if self._export_kind():
+            out = TransparentToolButton(getattr(FIF, "SHARE", FIF.DOWNLOAD))
+            out.setToolTip(tr("导出到本地（默认启动器目录下的 exports）"))
+            out.clicked.connect(lambda _, n=name: self._export_installed(n))
+            lay.addWidget(out)
         btn = TransparentToolButton(FIF.DELETE)
         btn.clicked.connect(lambda _, n=name: self._delete_installed(n))
         lay.addWidget(btn)
         return host
+
+    def _export_kind(self) -> str:
+        """本页的内容在 content_export 里叫什么。整合包没法单文件导出。"""
+        return {
+            "get_installed_mods": "mod",
+            "get_installed_shaders": "shader",
+            "get_installed_resourcepacks": "resourcepack",
+            "get_installed_datapacks": "datapack",
+            "list_saves": "world",
+        }.get(self.spec.get("list_installed") or "", "")
+
+    def _export_installed(self, name: str):
+        kind = self._export_kind()
+        if not kind:
+            return
+        from ..widgets import choose_export_dir, report_export
+        folder = choose_export_dir(self.backend, self)
+        if not folder:
+            return
+        version = self._installed_version() if self.spec.get("versioned") else ""
+        try:
+            path = self.backend.export_content(kind, name, folder, version)
+        except Exception as e:  # noqa: BLE001
+            InfoBar.error(tr("导出失败"), str(e), parent=self,
+                          position=InfoBarPosition.TOP, duration=5000)
+            return
+        report_export(None, self, single_path=path)
 
     def _toggle(self, filename, enabled):
         inst = self._current_instance()
@@ -642,27 +670,20 @@ class PclCatalogPage(QWidget):
             "get_installed_modpacks": "delete_modpack",
             "list_saves": "delete_save",
         }.get(kind)
-        # 以前只有整合包会二次确认，mod / 光影 / 资源包 / 数据包 / **世界存档** 全是点一下就没。
-        # 世界存档那条尤其要命：删掉的是玩家自己的游戏进度，重下不回来。
+        # 所有类型（mod / 光影 / 资源包 / 数据包 / 世界存档）删除前都要二次确认，
+        # 不只是整合包。世界存档尤其要命：删掉的是玩家自己的游戏进度，重下不回来。
         from qfluentwidgets import MessageBox
         purge_instance = False
         if fn == "delete_modpack":
-            # 默认不再连整个实例一起删：先让用户选，默认是无损的那一项。
-            from ..widgets import ComboDialog
-            keep = tr("只移除整合包标记（保留实例与全部文件）")
-            wipe = tr("删除整个实例及其文件（不可恢复）")
-            picker = ComboDialog(tr("删除整合包"), f"实例「{inst}」", [keep, wipe], keep, self)
-            if not picker.exec():
-                return
-            purge_instance = picker.value() == wipe
-            box = None
-            if purge_instance:
-                box = MessageBox(
-                    tr("删除整合包实例"),
-                    f"将删除整个实例「{inst}」及其文件，不可恢复。",
-                    self,
-                )
-                box.yesButton.setText(tr("删除实例"))
+            # 不提供「连整个实例一起删」：单游戏目录下那等于删掉全部版本，
+            # 后端会直接拒绝，界面上给这个选项只会点出一个报错框。
+            box = MessageBox(
+                tr("移除整合包标记"),
+                tr("只清掉「已安装整合包」这条记录，游戏目录里的模组与存档一个不动。\n"
+                   "要腾空间的话，到「版本管理」里逐个卸载版本。"),
+                self,
+            )
+            box.yesButton.setText(tr("移除标记"))
         elif fn == "delete_save":
             box = MessageBox(
                 tr("删除世界存档"),
@@ -817,12 +838,46 @@ class PclCatalogPage(QWidget):
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
+            return
+        # 本页压在分区壳上会把导航拖拽整个吃掉，替壳转交一下
+        from .download_hub import forward_nav_drag
+        forward_nav_drag(self, event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            return
+        from .download_hub import forward_nav_drag
+        forward_nav_drag(self, event)
+
+    def dragLeaveEvent(self, event):
+        from .download_hub import forward_nav_leave
+        forward_nav_leave(self)
+        super().dragLeaveEvent(event)
 
     def dropEvent(self, event):
-        for url in event.mimeData().urls():
-            path = url.toLocalFile()
-            if path:
-                self._do_install({"name": path, "path": path}, self.local_btn)
+        from .download_hub import forward_nav_drag
+        if forward_nav_drag(self, event):
+            return
+        paths = [p for p in (u.toLocalFile() for u in event.mimeData().urls()) if p]
+        if self._route_modpack_import(paths):
+            return
+        for path in paths:
+            self._do_install({"name": path, "path": path}, self.local_btn)
+
+    def _route_modpack_import(self, paths) -> bool:
+        """整合包一律交给主窗口那一套：认包、弹确认、跳版本管理建新版本。
+
+        不然同一个「导入一个整合包」的动作，在这一页和拖进窗口别处行为不一样。
+        """
+        if not paths or self.spec.get("install") != "install_modpack":
+            return False
+        handler = getattr(self.window(), "import_modpack_file", None)
+        if not callable(handler):
+            return False
+        # 一次只处理一个：每个包都要单独确认版本名，连弹 N 个框没法用
+        handler(paths[0])
+        return True
 
     def _install_from_link(self):
         dlg = InputDialog(self.spec["link_title"], self.spec["link_hint"],
@@ -834,6 +889,8 @@ class PclCatalogPage(QWidget):
     def _import_local(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self, self.spec["local_dialog"], "", self.spec["local_filter"])
+        if self._route_modpack_import(paths):
+            return
         for p in paths:
             self._install({"name": p, "path": p}, self.local_btn)
 

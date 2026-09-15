@@ -11,6 +11,7 @@ from qfluentwidgets import (
 from mclauncher.feedback_defaults import CATEGORIES
 from mclauncher import feedback as fb_mod
 from mclauncher.i18n import tr
+from ..pcl_chrome import prestyle_page
 
 _SEND_ICON = getattr(FIF, "SEND", None) or getattr(FIF, "MAIL", None) or FIF.HELP
 
@@ -33,6 +34,7 @@ class FeedbackPage(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
+        prestyle_page(self, scroll)
 
         head = QVBoxLayout()
         head.addWidget(SubtitleLabel(tr("反馈")))

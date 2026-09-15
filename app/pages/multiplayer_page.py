@@ -55,11 +55,16 @@ class MultiplayerPage(QWidget):
         title_row.addWidget(self.state_pill)
         title_row.addStretch(1)
         head.addLayout(title_row)
-        head.addWidget(CaptionLabel(
+        intro = CaptionLabel(
             tr("输入邀请码即可加入。陶瓦是 EasyTier P2P 打洞，不是 FRP 隧道；"
             "会和 HMCL 一样传官方节点，并带上本机 HMCL 用过的自定义会合节点。"
             "官方 PCL 联机大厅协议未开放，PCL 房间号无法互通；局域网请用下面地址。")
-        ))
+        )
+        # 不换行的长标签会把自己的最小宽度顶到整句文字那么宽（~1200px），再经
+        # 分区栈传给主窗口：一点进这页窗口就被撑大。QStackedWidget 的最小尺寸取
+        # 所有子页之最大，哪怕这页没显示也照样顶。
+        intro.setWordWrap(True)
+        head.addWidget(intro)
         self.lan_hint = CaptionLabel(self.backend.lan_hint())
         self.lan_hint.setWordWrap(True)
         self.lan_hint.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -323,7 +328,7 @@ class MultiplayerPage(QWidget):
         """定时轮询入口：快照放后台线程算，算完回 UI 线程渲染。
 
         `terracotta.snapshot()` 会读包元数据、探安装状态、查进程存活，
-        原来每 700 ms 在 UI 线程里同步跑一次，页面开着就一直卡顿。
+        每 700 ms 一次若放在 UI 线程同步跑，页面开着就一直卡顿。
         `_polling` 保证同一时刻只有一次在飞，慢一点也不会堆积。
         """
         call_async = getattr(self.backend, "call_async", None)

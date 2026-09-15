@@ -67,13 +67,17 @@ def _cli_progress(message, done, total):
 
 def get_instance(name=None):
     from mclauncher.instances import Instance, InstanceError
-    name = name or CONFIG.get("default_instance", "default")
-    inst = Instance(name)
+    from mclauncher import single_root
+    try:
+        single_root.migrate()  # 旧的多实例结构并进单一游戏目录，幂等
+    except Exception as e:  # noqa: BLE001
+        utils.log.warning("游戏目录合并失败: %s", e)
+    inst = Instance(name or None)
     if not inst.path.is_dir():
-        if name == CONFIG.get("default_instance", "default"):
-            inst.create()  # 默认实例不存在时自动创建
+        if inst.is_root:
+            inst.create()
         else:
-            raise InstanceError(f"实例 {name} 不存在，请先创建（GUI 的“实例”页或 `instance create`）。")
+            raise InstanceError(f"实例 {name} 不存在，请先创建（`instance create`）。")
     return inst
 
 
@@ -558,7 +562,7 @@ def gui_main():
     def _ui_hook(kind, text, path):
         from PySide6.QtCore import QTimer
         from app.pages.crash_dialog import show_launcher_error
-        QTimer.singleShot(0, lambda: show_launcher_error(window, kind, text, path))
+        QTimer.singleShot(0, window, lambda: show_launcher_error(window, kind, text, path))
 
     install_guard(ui_hook=_ui_hook)
     window.show()

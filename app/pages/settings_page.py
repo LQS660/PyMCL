@@ -3,14 +3,17 @@
 
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, ComboBox, FluentIcon as FIF, InfoBar, InfoBarPosition,
     LineEdit, PasswordLineEdit, PrimaryPushButton, PushButton, ScrollArea, SettingCard,
-    SettingCardGroup, SpinBox, SubtitleLabel, SwitchButton,
+    SettingCardGroup, Slider, SpinBox, SubtitleLabel, SwitchButton,
 )
 from mclauncher.i18n import tr
+from ..background import IMAGE_GLOBS, VIDEO_GLOBS
+from ..main_window import WINDOW_ASPECT_LABELS
+from ..pcl_chrome import prestyle_page
 
 
 def _spin_card(icon, title, desc, lo, hi, value):
@@ -22,6 +25,23 @@ def _spin_card(icon, title, desc, lo, hi, value):
     card.hBoxLayout.addWidget(spin, 0, Qt.AlignRight)
     card.hBoxLayout.addSpacing(16)
     return card, spin
+
+
+def _slider_card(icon, title, desc, lo, hi, value, suffix="%"):
+    card = SettingCard(icon, title, desc)
+    readout = BodyLabel(f"{value}{suffix}", card)
+    readout.setFixedWidth(46)
+    readout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    slider = Slider(Qt.Horizontal, card)
+    slider.setRange(lo, hi)
+    slider.setValue(value)
+    slider.setFixedWidth(190)
+    slider.valueChanged.connect(lambda v: readout.setText(f"{v}{suffix}"))
+    card.hBoxLayout.addWidget(slider, 0, Qt.AlignRight)
+    card.hBoxLayout.addSpacing(8)
+    card.hBoxLayout.addWidget(readout, 0, Qt.AlignRight)
+    card.hBoxLayout.addSpacing(16)
+    return card, slider
 
 
 def _switch_card(icon, title, desc, checked=False):
@@ -73,34 +93,34 @@ class SettingsPage(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
+        # 趁 host 还空着先把根 / 滚动区 / 视口 / 宿主刷成主题底：这四下等
+        # 54 张卡都建好再刷要 ~145ms（每次都整棵子树重新 polish）。
+        prestyle_page(self, scroll)
 
         root.addWidget(SubtitleLabel(tr("设置")))
 
         iso_group = SettingCardGroup(tr("版本隔离与存储"), host)
         self.share_libs_card, self.share_libs = _switch_card(
             FIF.LIBRARY, tr("共享 libraries"),
-            tr("所有实例共享依赖库（节省空间，但会降低隔离性）"),
+            tr("依赖库放到游戏目录外的 shared/，多个游戏目录也能共用"),
             checked=settings["share_libraries"])
         self.share_assets_card, self.share_assets = _switch_card(
             FIF.PHOTO, tr("共享 assets 资源"),
-            tr("所有实例共享资源文件（节省空间，但会降低隔离性）"),
+            tr("资源文件放到游戏目录外的 shared/，多个游戏目录也能共用"),
             checked=settings["share_assets"])
         iso_group.addSettingCard(self.share_libs_card)
         iso_group.addSettingCard(self.share_assets_card)
-        iso_map = {
-            "none": tr("关闭（共用实例目录）"),
-            "saves": tr("隔离存档"),
-            "mods": tr("隔离 Mod 与配置"),
-            "all": tr("隔离全部"),
-        }
+        # 措辞只在 version_settings 里定义一份，版本管理页和这里说的是同一件事
+        from mclauncher.version_settings import ISOLATION_LABELS
+        iso_map = {k: tr(v) for k, v in ISOLATION_LABELS.items()}
         self._iso_keys = {v: k for k, v in iso_map.items()}
         self.iso_card, self.iso_box = _combo_card(
             FIF.FOLDER, tr("新版本默认隔离"),
-            tr("安装新版本时写入该版本的隔离模式，可稍后在版本设置改"),
+            tr("安装新版本时写入该版本的隔离模式，可稍后在版本管理页一键切换"),
             list(iso_map.values()),
             iso_map.get(settings.get("default_isolation") or "none", iso_map["none"]))
         iso_group.addSettingCard(self.iso_card)
-        game_card = SettingCard(FIF.FOLDER, tr("游戏目录"), tr("实例与版本所在文件夹"))
+        game_card = SettingCard(FIF.FOLDER, tr("游戏目录"), tr("所有版本所在的 .minecraft 文件夹"))
         self.game_dir = LineEdit(game_card)
         self.game_dir.setText(settings.get("game_dir") or "")
         self.game_dir.setFixedWidth(220)
@@ -110,9 +130,34 @@ class SettingsPage(QWidget):
         game_card.hBoxLayout.addWidget(browse, 0, Qt.AlignRight)
         game_card.hBoxLayout.addSpacing(16)
         iso_group.addSettingCard(game_card)
+
+        export_card = SettingCard(
+            getattr(FIF, "SHARE", FIF.DOWNLOAD), tr("导出位置"),
+            tr("导出模组 / 光影 / 存档时默认落在这儿。留空就是启动器目录下的 exports"))
+        self.export_dir = LineEdit(export_card)
+        self.export_dir.setPlaceholderText(tr("默认：启动器目录 / exports"))
+        self.export_dir.setText(settings.get("export_dir") or "")
+        self.export_dir.setFixedWidth(220)
+        export_browse = PushButton(tr("浏览"))
+        export_browse.clicked.connect(self._browse_export)
+        export_card.hBoxLayout.addWidget(self.export_dir, 0, Qt.AlignRight)
+        export_card.hBoxLayout.addWidget(export_browse, 0, Qt.AlignRight)
+        export_card.hBoxLayout.addSpacing(16)
+        iso_group.addSettingCard(export_card)
         root.addWidget(iso_group)
 
         ui_group = SettingCardGroup(tr("界面"), host)
+        # 首启向导只在 first_run 为真时弹一次；跳过了或者想重看「拖文件」
+        # 「侧栏可排」那几句的人，从这儿手动再跑一遍。摆在「界面」组第一张，
+        # 藏进「维护」里新用户找不到。
+        wizard_card = SettingCard(
+            getattr(FIF, "ROBOT", None) or FIF.HELP, tr("启动向导"),
+            tr("重新走一遍首次运行的分步设置：目录、下载源、内存、隔离，顺带回顾几个容易错过的功能"))
+        self.wizard_btn = PushButton(tr("重新运行"))
+        self.wizard_btn.clicked.connect(self._rerun_wizard)
+        wizard_card.hBoxLayout.addWidget(self.wizard_btn, 0, Qt.AlignRight)
+        wizard_card.hBoxLayout.addSpacing(8)
+        ui_group.addSettingCard(wizard_card)
         self.motion_card, self.motion_sw = _switch_card(
             FIF.PLAY if hasattr(FIF, "PLAY") else FIF.SYNC,
             tr("界面动画"),
@@ -140,11 +185,55 @@ class SettingsPage(QWidget):
             tr("主题色"), tr("例如 #2E9B6B"))
         self.color_edit.setText(settings.get("theme_color") or "#2E9B6B")
         self.bg_card, self.bg_edit = _line_card(
-            FIF.PHOTO, tr("背景图"), tr("本地图片路径，留空为纯色"))
+            FIF.PHOTO, tr("背景图"), tr("本地图片或 mp4 视频，留空为纯色"))
         self.bg_edit.setText(settings.get("ui_background") or "")
         self.bg_pick = PushButton(tr("选择文件"))
         self.bg_pick.clicked.connect(self._browse_background)
         self.bg_card.hBoxLayout.addWidget(self.bg_pick, 0, Qt.AlignRight)
+        self.bg_dir_card, self.bg_dir_edit = _line_card(
+            FIF.FOLDER, tr("壁纸文件夹"),
+            tr("填了就轮播文件夹里的图片和视频；留空才用上面那张单图"))
+        self.bg_dir_edit.setText(settings.get("ui_background_folder") or "")
+        self.bg_dir_pick = PushButton(tr("选择文件夹"))
+        self.bg_dir_pick.clicked.connect(self._browse_background_folder)
+        self.bg_dir_next = PushButton(tr("下一张"))
+        self.bg_dir_next.clicked.connect(self._next_wallpaper)
+        for b in (self.bg_dir_pick, self.bg_dir_next):
+            self.bg_dir_card.hBoxLayout.addWidget(b, 0, Qt.AlignRight)
+        self.bg_dir_card.hBoxLayout.addSpacing(16)
+        self.bg_shuffle_card, self.bg_shuffle = _switch_card(
+            FIF.SYNC, tr("随机顺序轮播"),
+            tr("开：每次随机抽一张；关：按文件名顺序走"),
+            checked=bool(settings.get("ui_background_shuffle", False)))
+        self.bg_interval_card, self.bg_interval_spin = _spin_card(
+            FIF.HISTORY if hasattr(FIF, "HISTORY") else FIF.SYNC,
+            tr("轮播间隔（分钟）"), tr("隔多久换下一张"),
+            1, 1440, int(settings.get("ui_background_interval", 10) or 10))
+        self.bg_restore_card = SettingCard(
+            FIF.HISTORY if hasattr(FIF, "HISTORY") else FIF.SYNC,
+            tr("壁纸复原"), tr("撤销退回上一张；恢复默认清回纯色，之后还能再撤销回来"))
+        self.bg_undo_btn = PushButton(tr("撤销上一张"))
+        self.bg_undo_btn.clicked.connect(self._undo_background)
+        self.bg_reset_btn = PushButton(tr("恢复默认"))
+        self.bg_reset_btn.clicked.connect(self._reset_background)
+        for b in (self.bg_undo_btn, self.bg_reset_btn):
+            self.bg_restore_card.hBoxLayout.addWidget(b, 0, Qt.AlignRight)
+        self.bg_restore_card.hBoxLayout.addSpacing(16)
+        self.side_alpha_card, self.side_alpha = _slider_card(
+            FIF.TRANSPARENT if hasattr(FIF, "TRANSPARENT") else FIF.VIEW,
+            tr("侧栏与标题栏不透明度"),
+            tr("100% 为纯色；调低后壁纸会从侧栏和标题栏后面透出来"),
+            30, 100, int(settings.get("ui_sidebar_opacity", 100) or 100))
+        self.bg_blur_card, self.bg_blur = _slider_card(
+            FIF.BRUSH if hasattr(FIF, "BRUSH") else FIF.PHOTO,
+            tr("壁纸模糊"),
+            tr("糊掉壁纸细节，压在上面的字才不跟花纹打架；0 为原图"),
+            0, 40, int(settings.get("ui_background_blur", 0) or 0), suffix=" px")
+        self.bg_dim_card, self.bg_dim = _slider_card(
+            FIF.CONSTRACT if hasattr(FIF, "CONSTRACT") else FIF.BRIGHTNESS,
+            tr("壁纸遮罩"),
+            tr("在壁纸上盖一层主题底色：浅色主题提亮、深色主题压暗，字更读得清"),
+            0, 80, int(settings.get("ui_background_dim", 0) or 0))
         vis_map = {
             "keep": tr("保持显示"),
             "minimize": tr("最小化"),
@@ -174,13 +263,31 @@ class SettingsPage(QWidget):
             tr("默认游戏窗口"), tr("可被版本设置覆盖"),
             list(win_map.values()),
             win_map.get(settings.get("window_mode") or "window", win_map["window"]))
+        # 启动器自己的窗口比例：锁死的档位拖边拖角都保比例，壁纸按整窗裁切，
+        # 选一张同比例的壁纸就能完整显示；「自由拖动」= 老行为
+        aspect_map = {k: tr(v) for k, v in WINDOW_ASPECT_LABELS.items()}
+        self._aspect_keys = {v: k for k, v in aspect_map.items()}
+        self.aspect_card, self.aspect_box = _combo_card(
+            FIF.FIT_PAGE if hasattr(FIF, "FIT_PAGE") else FIF.VIEW,
+            tr("启动器窗口比例"), tr("锁定后拖动窗口始终保持这个比例，壁纸不会被裁头裁脚"),
+            list(aspect_map.values()),
+            aspect_map.get(settings.get("ui_window_aspect") or "4:3", aspect_map["4:3"]))
+        self.aspect_box.currentTextChanged.connect(self._on_aspect_changed)
         ui_group.addSettingCard(self.dark_card)
         ui_group.addSettingCard(self.color_card)
         ui_group.addSettingCard(self.bg_card)
+        ui_group.addSettingCard(self.bg_dir_card)
+        ui_group.addSettingCard(self.bg_shuffle_card)
+        ui_group.addSettingCard(self.bg_interval_card)
+        ui_group.addSettingCard(self.bg_restore_card)
+        ui_group.addSettingCard(self.bg_blur_card)
+        ui_group.addSettingCard(self.bg_dim_card)
+        ui_group.addSettingCard(self.side_alpha_card)
         ui_group.addSettingCard(self.vis_card)
         ui_group.addSettingCard(self.home_card)
         ui_group.addSettingCard(self.hp_card)
         ui_group.addSettingCard(self.win_card)
+        ui_group.addSettingCard(self.aspect_card)
         # 语言
         self.lang_card, self.lang_box = _combo_card(
             FIF.EDIT if hasattr(FIF, "EDIT") else FIF.SETTING,
@@ -271,7 +378,7 @@ class SettingsPage(QWidget):
             FIF.SYNC, tr("下载并发线程数"), tr("同时下载的文件数量"),
             1, 64, settings["download_threads"])
         self.memory_card, self.memory_spin = _spin_card(
-            FIF.DEVELOPER_TOOLS, tr("默认内存 (MB)"), tr("新实例的默认 JVM 内存"),
+            FIF.DEVELOPER_TOOLS, tr("默认内存 (MB)"), tr("没在版本设置里单独指定时用的 JVM 内存"),
             512, 32768, settings["default_memory_mb"])
         gc_map = {
             "auto": tr("G1（推荐）"),
@@ -379,7 +486,7 @@ class SettingsPage(QWidget):
         tool_card = SettingCard(FIF.DEVELOPER_TOOLS, tr("维护工具"), tr("更新、清理、导出、全局 Mod"))
         self.chk_upd = PrimaryPushButton(tr("检查更新"))
         self.clean_btn = PushButton(tr("清理"))
-        self.export_btn = PushButton(tr("导出实例"))
+        self.export_btn = PushButton(tr("导出整合包"))
         self.global_btn = PushButton(tr("全局 Mod"))
         for b in (self.chk_upd, self.clean_btn, self.export_btn, self.global_btn):
             tool_card.hBoxLayout.addWidget(b, 0, Qt.AlignRight)
@@ -462,6 +569,19 @@ class SettingsPage(QWidget):
         self.color_edit.editingFinished.connect(self._on_theme_color_committed)
         # 背景图同理：手输路径回车/失焦就应用，不必先点「保存设置」
         self.bg_edit.editingFinished.connect(self._on_bg_committed)
+        self.bg_dir_edit.editingFinished.connect(self._on_bg_folder_committed)
+        self.bg_shuffle.checkedChanged.connect(self._on_rotate_changed)
+        self.bg_interval_spin.valueChanged.connect(self._on_rotate_changed)
+        # 三个外观滑块每动一格都落盘 + apply_theme 就是几十次全量重绘；
+        # 拖动只改窗口做预览，停手 260ms 再一起落一次。不接 sliderReleased
+        # 是因为键盘方向键、点击槽位跳值都不发那个信号。
+        self._look_commit = QTimer(self)
+        self._look_commit.setSingleShot(True)
+        self._look_commit.setInterval(260)
+        self._look_commit.timeout.connect(self._commit_look)
+        for slider in (self.side_alpha, self.bg_blur, self.bg_dim):
+            slider.valueChanged.connect(self._preview_look)
+        self._sync_bg_buttons()
 
     def refresh_from_config(self):
         """把磁盘上的最新设置推回控件。
@@ -473,6 +593,11 @@ class SettingsPage(QWidget):
         self.dark_sw.setChecked(bool(settings.get("ui_dark")))
         self.color_edit.setText(settings.get("theme_color") or "#2E9B6B")
         self.bg_edit.setText(settings.get("ui_background") or "")
+        self.bg_dir_edit.setText(settings.get("ui_background_folder") or "")
+        self.side_alpha.setValue(int(settings.get("ui_sidebar_opacity", 100) or 100))
+        self.bg_blur.setValue(int(settings.get("ui_background_blur", 0) or 0))
+        self.bg_dim.setValue(int(settings.get("ui_background_dim", 0) or 0))
+        self._sync_bg_buttons()
         self.multi_sw.setChecked(bool(settings.get("allow_multi_instance", False)))
 
     def _sync_ai_mode(self, _text=""):
@@ -506,14 +631,17 @@ class SettingsPage(QWidget):
         start = cur if cur and os.path.isfile(cur) else ""
         path, _ = QFileDialog.getOpenFileName(
             self, tr("选择背景图"), start,
-            tr("图片 (*.png *.jpg *.jpeg *.bmp *.webp *.gif)") + ";;" + tr("所有文件 (*)"))
+            f"{tr('图片与视频')} ({IMAGE_GLOBS} {VIDEO_GLOBS});;"
+            f"{tr('图片')} ({IMAGE_GLOBS});;"
+            f"{tr('视频')} ({VIDEO_GLOBS});;" + tr("所有文件 (*)"))
         if not path:
             return
         self.bg_edit.setText(path)
         # 选完立即落盘并刷主题，马上能看到效果；之后点「保存设置」写的也是同一个值
         self.backend.save_settings({"ui_background": path})
         self._apply_theme_now()
-        InfoBar.success(tr("已应用"), tr("背景已更新"), parent=self,
+        self._sync_bg_buttons()
+        InfoBar.success(tr("已应用"), self._bg_message(), parent=self,
                         position=InfoBarPosition.TOP, duration=2000)
 
     def _on_bg_committed(self):
@@ -522,6 +650,119 @@ class SettingsPage(QWidget):
             return
         self.backend.save_settings({"ui_background": path})
         self._apply_theme_now()
+        self._sync_bg_buttons()
+
+    def _browse_background_folder(self):
+        cur = self.bg_dir_edit.text().strip()
+        folder = QFileDialog.getExistingDirectory(
+            self, tr("选择壁纸文件夹"), cur if os.path.isdir(cur) else "")
+        if not folder:
+            return
+        self.bg_dir_edit.setText(folder)
+        self._on_bg_folder_committed()
+        InfoBar.success(tr("已应用"), tr("开始轮播这个文件夹"), parent=self,
+                        position=InfoBarPosition.TOP, duration=2000)
+
+    def _on_bg_folder_committed(self):
+        folder = self.bg_dir_edit.text().strip()
+        if folder == (self.backend.get_setting("ui_background_folder") or ""):
+            return
+        self.backend.save_settings({"ui_background_folder": folder})
+        self._apply_theme_now()
+        self._sync_bg_buttons()
+
+    def _on_rotate_changed(self, _value=None):
+        self.backend.save_settings({
+            "ui_background_shuffle": bool(self.bg_shuffle.isChecked()),
+            "ui_background_interval": int(self.bg_interval_spin.value()),
+        })
+        self._apply_theme_now()
+
+    def _next_wallpaper(self):
+        win = self.window()
+        if not (self.backend.get_setting("ui_background_folder") or "").strip():
+            InfoBar.info(tr("还没设壁纸文件夹"), tr("先选一个文件夹才轮播得起来"),
+                         parent=self, position=InfoBarPosition.TOP, duration=2500)
+            return
+        if hasattr(win, "next_wallpaper"):
+            win.next_wallpaper()
+
+    def _bg_layer(self):
+        return getattr(self.window(), "_bg_layer", None)
+
+    def _bg_message(self) -> str:
+        """壁纸起没起来由背景层说了算：视频解码失败、图片读不出都在它那儿。"""
+        layer = self._bg_layer()
+        error = getattr(layer, "error", "") if layer is not None else ""
+        return error or tr("背景已更新")
+
+    def _sync_bg_buttons(self):
+        self.bg_undo_btn.setEnabled(bool(self.backend.can_undo_background()))
+
+    def _show_background(self, previous: dict):
+        self.bg_edit.setText(previous.get("image") or "")
+        self.bg_dir_edit.setText(previous.get("folder") or "")
+        self._apply_theme_now()
+        self._sync_bg_buttons()
+
+    def _undo_background(self):
+        if not self.backend.can_undo_background():
+            InfoBar.info(tr("没有可撤销的壁纸"), tr("当前这张就是记录里的第一张"),
+                         parent=self, position=InfoBarPosition.TOP, duration=2500)
+            return
+        previous = self.backend.undo_background()
+        self._show_background(previous)
+        InfoBar.success(tr("已撤销"),
+                        previous.get("folder") or previous.get("image")
+                        or tr("已回到纯色背景"),
+                        parent=self, position=InfoBarPosition.TOP, duration=2500)
+
+    def _reset_background(self):
+        self._show_background(self.backend.reset_background())
+        InfoBar.success(tr("已恢复默认"), tr("背景已清回纯色，可用「撤销上一张」退回"),
+                        parent=self, position=InfoBarPosition.TOP, duration=2500)
+
+    def _look_values(self) -> dict:
+        return {
+            "ui_sidebar_opacity": int(self.side_alpha.value()),
+            "ui_background_blur": int(self.bg_blur.value()),
+            "ui_background_dim": int(self.bg_dim.value()),
+        }
+
+    def _preview_look(self, _value=None):
+        """拖动时只动窗口这一层，不落盘：走 apply_theme 会把所有已构造页面
+        重刷一遍，一路拖过去就是几十次全量重绘。"""
+        from ..pcl_chrome import Theme
+        values = self._look_values()
+        Theme.sidebar_opacity = values["ui_sidebar_opacity"]
+        win = self.window()
+        for name in ("side", "titleBar"):
+            chrome = getattr(win, name, None)
+            if chrome is not None and hasattr(chrome, "restyle"):
+                chrome.restyle()
+        layer = self._bg_layer()
+        if layer is not None:
+            layer.set_effects(values["ui_background_blur"],
+                              values["ui_background_dim"], Theme.bg)
+        self._look_commit.start()
+
+    def _commit_look(self):
+        values = self._look_values()
+        settings = self.backend.get_settings()
+        if all(int(settings.get(k, 0) or 0) == v for k, v in values.items()):
+            return
+        self.backend.save_settings(values)
+        self._apply_theme_now()
+
+    def _on_aspect_changed(self, _text=None):
+        """切比例立刻生效并落盘：窗口当场吸到新比例上，看得见才算改了。"""
+        key = self._aspect_keys.get(self.aspect_box.currentText(), "4:3")
+        if key == (self.backend.get_setting("ui_window_aspect") or "4:3"):
+            return
+        self.backend.save_settings({"ui_window_aspect": key})
+        win = self.window()
+        if hasattr(win, "apply_window_aspect"):
+            win.apply_window_aspect()
 
     # ------------------------------------------------------------------
     # 个性化布局
@@ -694,6 +935,12 @@ class SettingsPage(QWidget):
             return
         QApplication.instance().quit()
 
+    def _browse_export(self):
+        start = self.export_dir.text().strip() or self.backend.default_export_dir()
+        path = QFileDialog.getExistingDirectory(self, tr("选择导出位置"), start)
+        if path:
+            self.export_dir.setText(path)
+
     def _browse_game(self):
         path = QFileDialog.getExistingDirectory(self, tr("选择游戏目录"), self.game_dir.text())
         if not path:
@@ -763,31 +1010,15 @@ class SettingsPage(QWidget):
         self.backend.call_async(self.backend.cleaner_preview, scanned, failed)
 
     def _export(self):
-        from mclauncher.config import CONFIG
-        default = CONFIG.get("default_instance") or "default"
-        try:
-            names = [i.get("name") for i in (self.backend.get_instances() or []) if i.get("name")]
-        except Exception:
-            names = []
-        name = default
-        # 以前写死导出 default_instance，非默认实例永远导不出来。
-        if len(names) > 1:
-            from ..widgets import ComboDialog
-            dlg = ComboDialog(tr("导出实例"), tr("选择要导出为整合包的实例"),
-                              names, default if default in names else names[0], self)
-            if not dlg.exec():
-                return
-            name = dlg.value() or default
-        elif names:
-            name = names[0]
+        """把整个游戏目录打成 .mrpack。只有一个目录，不用再问导哪个。"""
+        name = self.backend.game_root_name()
         self.backend.export_modpack(name)
-        InfoBar.success(tr("开始导出"), f"实例 {name} → exports/", parent=self,
+        InfoBar.success(tr("开始导出"), f"{name} → exports/", parent=self,
                         position=InfoBarPosition.TOP, duration=3000)
 
     def _test_ai(self):
-        # 只拿页面上当前填的值去试连，不落盘。
-        # 原来这里直接 save_settings(collect())，用户只想测一下 AI，
-        # 结果整页设置（内存、分辨率、下载源……）全被静默写进了 config.json。
+        # 只拿页面上当前填的值去试连，不落盘：用户只是想测一下 AI，
+        # 不能顺手把整页设置（内存、分辨率、下载源……）静默写进 config.json。
         probe = self.backend.get_settings()
         probe.update(self.collect())
         self.test_ai_btn.setEnabled(False)
@@ -937,6 +1168,40 @@ class SettingsPage(QWidget):
 
         self.backend.call_async(self.backend.get_smart_recommendation, shown, failed)
 
+    def _rerun_wizard(self):
+        """从设置里手动再跑一遍首启向导。
+
+        向导的 apply() 自己落盘、自己切游戏目录，这里不再经 collect()。
+        但落完必须把那四项推回本页控件：用户接着点「保存设置」时 collect()
+        拿的是控件值，不同步的话向导刚写的会被旧值悄悄盖掉。
+        「跳过向导」什么都不动——手动跑的时候 first_run 早就是 False 了。
+        """
+        from .first_run import FirstRunDialog
+        dlg = FirstRunDialog(self.backend, self.window())
+        if not dlg.exec():
+            return
+        dlg.apply()
+        self._sync_wizard_fields()
+        InfoBar.success(tr("向导已完成"), tr("目录、下载源、内存、隔离已按向导里的选择写入"),
+                        parent=self, position=InfoBarPosition.TOP, duration=3000)
+        lp = getattr(self.window(), "launch_page", None)
+        if lp is not None and hasattr(lp, "reload"):
+            lp.reload()
+
+    def _sync_wizard_fields(self):
+        """把向导刚写进 CONFIG 的四项推回本页对应控件。"""
+        settings = self.backend.get_settings()
+        src_labels = {k: v for v, k in self._src_keys.items()}
+        iso_labels = {k: v for v, k in self._iso_keys.items()}
+        src = src_labels.get(settings.get("download_source") or "auto")
+        if src:
+            self.src_box.setCurrentText(src)
+        iso = iso_labels.get(settings.get("default_isolation") or "none")
+        if iso:
+            self.iso_box.setCurrentText(iso)
+        self.memory_spin.setValue(int(settings.get("default_memory_mb") or 4096))
+        self.game_dir.setText(settings.get("game_dir") or "")
+
     def collect(self) -> dict:
         # 语言：只在保存时写入
         lang_map = {v: k for k, v in self.backend.available_languages().items()}
@@ -965,7 +1230,12 @@ class SettingsPage(QWidget):
             "ui_dark": self.dark_sw.isChecked(),
             "theme_color": self.color_edit.text().strip() or "#2E9B6B",
             "ui_background": self.bg_edit.text().strip(),
+            "ui_background_folder": self.bg_dir_edit.text().strip(),
+            "ui_background_shuffle": bool(self.bg_shuffle.isChecked()),
+            "ui_background_interval": int(self.bg_interval_spin.value()),
+            **self._look_values(),
             "default_isolation": self._iso_keys.get(self.iso_box.currentText(), "none"),
+            "export_dir": self.export_dir.text().strip(),
             "default_jvm_args": self.jvm_edit.text().strip(),
             "update_url": self.upd_url.text().strip(),
             "launcher_visibility": self._vis_keys.get(self.vis_box.currentText(), "keep"),
@@ -976,6 +1246,7 @@ class SettingsPage(QWidget):
             "homepage_mode": self._home_keys.get(self.home_box.currentText(), "news"),
             "custom_homepage": self.hp_edit.text().strip(),
             "window_mode": self._win_keys.get(self.win_box.currentText(), "window"),
+            "ui_window_aspect": self._aspect_keys.get(self.aspect_box.currentText(), "4:3"),
             "allow_multi_instance": self.multi_sw.isChecked(),
             "language": lang,
         }
