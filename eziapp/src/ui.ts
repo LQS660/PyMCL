@@ -108,7 +108,7 @@ export function flyToTasks(source: Element | null | undefined, text = '', color?
     document.body.appendChild(ball);
 
     // 尺寸固定 44px，逐帧只写 transform 和 opacity——这两个属性合成器能自己处理，
-    // 不回主线程排版。以前每帧改 width/height/left/top/font-size，五个属性全都
+    // 不回主线程排版。若每帧改 width/height/left/top/font-size，五个属性全都
     // 触发重排，一次飞行就是几十次整页 layout。
     const BALL = 44;
     const t0 = performance.now();
@@ -346,6 +346,114 @@ export function inputDialog(title: string, placeholder = '', value = ''): Promis
   });
 }
 
+export interface PickedFile {
+  name: string;
+  size: number;
+  base64: string;
+}
+
+/** 前端读上来的文件走 base64 送后端，超过这个尺寸就别走这条路了 */
+export const UPLOAD_LIMIT = 256 * 1024 * 1024;
+
+/** 读成 base64（不含 data: 前缀）。拖进来的和选出来的走同一条路。 */
+export function readPickedFile(file: File): Promise<PickedFile | null> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onerror = () => resolve(null);
+    reader.onload = () => resolve({
+      name: file.name,
+      size: file.size,
+      base64: String(reader.result || '').split(',', 2)[1] || '',
+    });
+    reader.readAsDataURL(file);
+  });
+}
+
+/** 弹系统文件选择器。取消返回 null。 */
+export function pickFile(accept = ''): Promise<PickedFile | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    if (accept) input.accept = accept;
+    input.style.display = 'none';
+    // 用户按了取消不会触发 change，只能靠窗口重新聚焦收尾，否则这个 Promise 永远挂着
+    let settled = false;
+    const finish = (value: PickedFile | null) => {
+      if (settled) return;
+      settled = true;
+      input.remove();
+      resolve(value);
+    };
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      if (!file) return finish(null);
+      void readPickedFile(file).then(finish);
+    });
+    window.addEventListener('focus', () => {
+      setTimeout(() => { if (!input.files?.length) finish(null); }, 400);
+    }, { once: true });
+    document.body.appendChild(input);
+    input.click();
+  });
+}
+
+/**
+ * 把读上来的文件落到后端暂存目录，返回真实路径。
+ * 浏览器只给文件名不给路径，而导入模组 / 主题 / 整合包那几个 RPC 收的都是路径。
+ */
+export async function stashUpload(file: PickedFile): Promise<string> {
+  if (file.size > UPLOAD_LIMIT) {
+    throw new Error(`文件超过 ${Math.round(UPLOAD_LIMIT / 1048576)} MB，请改用「从链接安装」`);
+  }
+  const path = await bridge.call<string>('stash_upload', { name: file.name, data: file.base64 });
+  if (!path) throw new Error('暂存失败：后端没有返回路径');
+  return path;
+}
+
+/** 选一个文件并落盘，一步到位。取消返回 null。 */
+export async function pickFileToPath(accept = ''): Promise<{ path: string; name: string } | null> {
+  const picked = await pickFile(accept);
+  if (!picked) return null;
+  return { path: await stashUpload(picked), name: picked.name };
+}
+
+/** 给一块区域接上拖拽导入，返回解绑函数。 */
+export function enableFileDrop(
+  target: HTMLElement,
+  onFiles: (files: File[]) => void,
+  accept?: (file: File) => boolean,
+): () => void {
+  const hasFiles = (e: DragEvent) =>
+    Array.from(e.dataTransfer?.items || []).some((i) => i.kind === 'file');
+  const onOver = (e: DragEvent) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    target.classList.add('drop-active');
+  };
+  const onLeave = (e: DragEvent) => {
+    // 拖过子元素会连发 dragleave，只有真的离开这块区域才收掉高亮
+    if (e.relatedTarget && target.contains(e.relatedTarget as Node)) return;
+    target.classList.remove('drop-active');
+  };
+  const onDrop = (e: DragEvent) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    target.classList.remove('drop-active');
+    const files = Array.from(e.dataTransfer?.files || []).filter((f) => !accept || accept(f));
+    if (files.length) onFiles(files);
+    else toast('这个文件类型不支持，换一个试试', 'warning');
+  };
+  target.addEventListener('dragover', onOver);
+  target.addEventListener('dragleave', onLeave);
+  target.addEventListener('drop', onDrop);
+  return () => {
+    target.removeEventListener('dragover', onOver);
+    target.removeEventListener('dragleave', onLeave);
+    target.removeEventListener('drop', onDrop);
+  };
+}
+
 // 加载指示器：骨架屏比转圈更能撑住布局，也不会让页面看起来卡住
 export function showLoading(container: HTMLElement) {
   container.innerHTML = `
@@ -406,9 +514,9 @@ export function initBridgeLifecycle(onReady: () => void) {
   }
 
   /**
-   * 退避重试 5 次后放弃。以前放弃就彻底完了——状态栏停在「未连接」，
-   * 界面上没有任何重来的入口，用户把 bridge 起好了也只能重开整个应用。
-   * 现在把状态栏变成可点的手动重连。
+   * 退避重试 5 次后放弃，但放弃后状态栏变成可点的手动重连——
+   * 否则状态栏停在「未连接」、界面上没有任何重来的入口，
+   * 用户把 bridge 起好了也只能重开整个应用。
    */
   function offerManualRetry() {
     updateStatus('未连接（点此重连）');

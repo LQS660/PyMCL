@@ -1,7 +1,7 @@
 // 账号管理：离线、微软设备代码和 Authlib-Injector 登录。
 import { bridge } from '../bridge';
 import { store, type AccountInfo } from '../store';
-import { confirmDialog, formDialog, registerPageCleanup, showError, showSkeleton, toast } from '../ui';
+import { confirmDialog, formDialog, pickFile, registerPageCleanup, showError, showSkeleton, toast } from '../ui';
 import { errorMessage, escapeHtml } from './common';
 
 interface LoginState {
@@ -279,40 +279,6 @@ function renderTypeLabel(type: string): string {
   return typeLabel[type] || type || '账号';
 }
 
-/** 弹一个系统文件选择器，拿回 base64（不含 data: 前缀）。取消返回 null。 */
-function pickPng(): Promise<{ name: string; base64: string } | null> {
-  return new Promise((resolve) => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'image/png,.png';
-    input.style.display = 'none';
-    // 用户按了取消不会触发 change，只能靠窗口重新聚焦收尾，否则这个 Promise 永远挂着
-    let settled = false;
-    const finish = (value: { name: string; base64: string } | null) => {
-      if (settled) return;
-      settled = true;
-      input.remove();
-      resolve(value);
-    };
-    input.addEventListener('change', () => {
-      const file = input.files?.[0];
-      if (!file) return finish(null);
-      const reader = new FileReader();
-      reader.onerror = () => finish(null);
-      reader.onload = () => finish({
-        name: file.name,
-        base64: String(reader.result || '').split(',', 2)[1] || '',
-      });
-      reader.readAsDataURL(file);
-    });
-    window.addEventListener('focus', () => {
-      setTimeout(() => { if (!input.files?.length) finish(null); }, 400);
-    }, { once: true });
-    document.body.appendChild(input);
-    input.click();
-  });
-}
-
 /** 离线账号的皮肤设置。返回 true 表示改动了，调用方需要刷新列表。 */
 async function editSkin(account: AccountInfo): Promise<boolean> {
   const hasSkin = Boolean(account.skin_file);
@@ -338,7 +304,7 @@ async function editSkin(account: AccountInfo): Promise<boolean> {
       toast('已清除自定义皮肤', 'success');
       return true;
     }
-    const picked = await pickPng();
+    const picked = await pickFile('image/png,.png');
     if (!picked) return false;
     await bridge.call('set_account_skin', {
       name: account.name, data: picked.base64, model: values.model,

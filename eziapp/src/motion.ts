@@ -48,9 +48,9 @@ export function countUp(el: HTMLElement | null, to: number, format: (v: number) 
 }
 
 /**
- * 进度条推进。宽度的缓动交给 CSS 的 `transition: width`——以前这里还额外跑一个
- * rAF 补间逐帧写 width，等于让 CSS 去追一个每帧都在变的目标，进度条既永远滞后
- * 又白烧一个循环。这里只写终值，外加完成时闪一下。
+ * 进度条推进。宽度的缓动全交给 CSS 的 `transition: width`，这里只写终值，
+ * 外加完成时闪一下。别再叠一个 rAF 补间逐帧写 width：那等于让 CSS 去追一个
+ * 每帧都在变的目标，进度条既永远滞后又白烧一个循环。
  */
 export function smoothProgress(fill: HTMLElement | null, percent: number, succeeded = false) {
   if (!fill) return;
@@ -91,8 +91,8 @@ type ViewTransitionDoc = Document & {
 /**
  * 换页转场。
  *
- * 调用方要先把页面模块 await 好再进来：以前是「淡出 90ms → 才开始 import() 该页
- * chunk」，两段等待串在一起，首次进一个页面能空出小半秒。
+ * 调用方要先把页面模块 await 好再进来：若「淡出 90ms → 才开始 import() 该页
+ * chunk」，两段等待串在一起，首次进一个页面会空出小半秒。
  *
  * 浏览器支持 View Transitions 就交给它——新旧两帧由合成器直接交叉，比先清空
  * 再重画少一次白屏。不支持时退回原来的淡出淡入。

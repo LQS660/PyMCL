@@ -75,7 +75,8 @@ body.has-bg .sidebar, body.has-bg .main-content, body.has-bg .page-header { back
   align-items: center;
   gap: 8px;
 }
-.sidebar-nav { flex: 1; padding: 6px 10px 12px; overflow-y: auto; }
+/* 列向 flex：沉底那一撮靠 .nav-spacer 撑开，跟 Qt 侧栏的 addStretch 一个意思 */
+.sidebar-nav { flex: 1; padding: 6px 10px 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
 .nav-group { margin-bottom: 6px; }
 .nav-group-title {
   padding: 10px 12px 4px;
@@ -134,30 +135,24 @@ body.has-bg .sidebar, body.has-bg .main-content, body.has-bg .page-header { back
   text-align: center;
   line-height: 18px;
 }
-.nav-section > .nav-item { font-weight: 650; }
-/* 分组默认收起：grid-template-rows 从 0fr 过渡到 1fr，内容多高都能动画，
-   不用像 max-height 那样猜一个够大的值。对齐 Qt 版 PclSideBar 的折叠行为。
-   条目必须裹在 .nav-children-inner 里只占一行——直接把 N 个条目摆进来的话，
-   0fr 只管得住第一行，其余 N-1 个会落进 auto 的隐式行，收起后照样占着高度。 */
-.nav-children {
-  display: grid; padding: 0 0 0 8px;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows 220ms cubic-bezier(.2, .9, .25, 1), padding 220ms ease;
-}
-.nav-children-inner { min-height: 0; overflow: hidden; display: grid; gap: 2px; }
-.nav-section.open > .nav-children {
-  grid-template-rows: 1fr; padding: 2px 0 6px 8px;
-}
-.nav-children .nav-item { padding: 7px 10px; font-size: 12.5px; }
-.nav-chevron {
-  margin-left: auto; display: flex; padding: 3px;
-  border-radius: 6px; color: var(--text-disabled);
-  transition: transform 220ms cubic-bezier(.2, .9, .25, 1), background var(--transition);
-}
-.nav-chevron .nav-svg { width: 14px; height: 14px; }
-.nav-chevron:hover { background: var(--bg-tertiary); color: var(--primary); }
-.nav-section.open .nav-chevron { transform: rotate(90deg); }
-/* 子页面是从页内 tab 进的时候，父分组也要有个在场感 */
+/* 沉底分隔：它下面的项（更多 / 设置 / 下载任务）被推到侧栏最底下，对齐 Qt 的 stretch */
+.nav-spacer { flex: 1; min-height: 10px; }
+.nav-item.nav-pinned { font-weight: 550; }
+.nav-item.dragging { opacity: .5; }
+.nav-item.nav-drop-before { box-shadow: inset 0 2px 0 var(--primary); }
+.nav-item.nav-drop-after { box-shadow: inset 0 -2px 0 var(--primary); }
+/* 分区横条：一栏里的子页排成一排，跟 Qt 分区页顶上那条一样 */
+.section-bar { padding: 10px 22px 0; }
+.section-bar .tabs { margin: 0; }
+.nav-edit-body { max-height: 56vh; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+.nav-edit-group { display: flex; flex-direction: column; gap: 4px; }
+.nav-edit-group.disabled { opacity: .45; pointer-events: none; }
+.nav-edit-head { font-size: 12px; font-weight: 650; color: var(--text-secondary); }
+.nav-edit-row { display: flex; align-items: center; gap: 6px; }
+.nav-edit-name { flex: 1; font-size: 13px; }
+.nav-edit-empty { font-size: 12px; color: var(--text-disabled); }
+.nav-edit-hint { font-size: 11px; color: var(--text-disabled); margin-top: 4px; }
+/* 子页是从分区横条进来的时候，那一栏的一级项也要有个在场感 */
 .nav-item.active-branch:not(.active) { color: var(--primary); }
 .sidebar-foot {
   padding: 10px 14px 14px;
@@ -465,6 +460,16 @@ body.has-bg .sidebar, body.has-bg .main-content, body.has-bg .page-header { back
   width: 52px; height: 52px; border-radius: 12px; object-fit: cover; background: var(--primary-light);
   display: grid; place-items: center; font-weight: 760; color: var(--primary); flex: 0 0 52px;
 }
+
+/* 拖文件进来时整块区域亮一圈。用 outline 而不是 border：不占布局，
+   底下那些卡片不会因为多出 2px 而整体抖一下。 */
+.drop-active {
+  outline: 2px dashed var(--primary);
+  outline-offset: -6px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--primary-light) 45%, transparent);
+}
+.drop-active * { pointer-events: none; }
 
 .settings-section { margin-bottom: 8px; }
 .settings-section-title { font-size: 15px; font-weight: 680; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }

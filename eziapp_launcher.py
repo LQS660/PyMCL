@@ -8,6 +8,7 @@ import base64
 import json
 import os
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -133,10 +134,43 @@ def _shutdown(httpd):
         httpd.server_close()
 
 
+def _ui_host_exe() -> Path | None:
+    """内嵌窗口宿主（uihost/pymcl-ui.exe）。打包后在解包目录，源码运行时在仓库里。"""
+    for base in (_asset_root(), ROOT):
+        for rel in ("uihost/pymcl-ui.exe", "uihost/build/pymcl-ui.exe"):
+            exe = base / rel
+            if exe.is_file():
+                return exe
+    return None
+
+
+def _open_window(url: str, title: str = "PyMCL 启动器"):
+    """用自带的 WebView2 宿主把 UI 开成一个普通桌面窗口。
+
+    返回那个进程；拿不到宿主就返回 None，由调用方退回浏览器。窗口是这次运行的
+    寿命：它一关，主循环就收摊，不再需要另外留一个「关掉我就退出」的小框。
+    """
+    exe = _ui_host_exe()
+    if exe is None:
+        return None
+    cmd = [
+        str(exe), "--url", url, "--title", title,
+        "--width", "1280", "--height", "820",
+        "--min-width", "980", "--min-height", "650",
+    ]
+    try:
+        return subprocess.Popen(cmd, cwd=str(exe.parent))
+    except OSError as exc:
+        print(f"[EziApp] 内嵌窗口启动失败（{exc}），改用浏览器")
+        return None
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Launch PyMCL EziApp with a private local bridge")
     parser.add_argument("--ui-url", help="已运行的本机开发 UI 地址；省略时启动 eziapp/dist")
-    parser.add_argument("--no-browser", action="store_true", help="只启动服务，不自动打开浏览器")
+    parser.add_argument("--no-browser", action="store_true", help="只启动服务，不打开界面")
+    parser.add_argument("--ui-mode", choices=("window", "browser"), default="window",
+                        help="window=内嵌桌面窗口（默认，没有宿主时自动退回浏览器）；browser=开系统浏览器")
     args = parser.parse_args(argv)
 
     static_server = None
@@ -167,11 +201,23 @@ def main(argv=None):
 
         print(f"PYMCL_BRIDGE port={bridge_port} host={LOOPBACK_HOST} root={_data_root()} auth=token")
         print(f"EziApp UI: {_safe_display_url(launch_url)}")
+
+        window = None
         if not args.no_browser:
-            webbrowser.open(launch_url)
-        print("按 Ctrl+C 退出")
-        while True:
-            time.sleep(1)
+            if args.ui_mode == "window":
+                window = _open_window(launch_url)
+            if window is None:
+                if args.ui_mode == "window":
+                    print("[EziApp] 没找到内嵌窗口宿主，改用系统浏览器")
+                webbrowser.open(launch_url)
+
+        if window is not None:
+            print("关闭窗口即退出")
+            window.wait()  # 窗口就是这次运行的寿命
+        else:
+            print("按 Ctrl+C 退出")
+            while True:
+                time.sleep(1)
     except KeyboardInterrupt:
         print("退出")
     finally:

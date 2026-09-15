@@ -1,11 +1,17 @@
 import './styles/main.css';
 import { bridge, initBridge } from './bridge';
 import { router, type PageKey } from './router';
-import { store } from './store';
-import { initBridgeLifecycle, toast, clearPageCleanups, applyAppearance } from './ui';
+import { store, type SettingsInfo } from './store';
+import { initBridgeLifecycle, toast, clearPageCleanups, applyAppearance, showContextMenu } from './ui';
 import { installRipple, pageSwap, pop } from './motion';
 // 极小模块，静态引它不会把 dashboard chunk 拽进入口包（见 layout_bus 头注释）。
 import { requestLayoutEdit } from './layout_bus';
+// 侧栏编排的纯逻辑，与 Qt 版 app/main_window.py 同源，见 nav_model 头注释。
+import {
+  ALL_SUB_KEYS, NAV_KEY_FOR_PAGE, NAV_STYLE_GROUPED, PAGE_FOR_NAV_KEY, SECTION_IDS,
+  SUB_TITLES, navItemsFromConfig, navStyle, pinNavConfig, reorderNavConfig,
+  sectionMembersFromConfig, unpinNavConfig, type NavConfig, type NavEntry, type SectionId,
+} from './nav_model';
 // 只取类型：`import type` 会被编译掉，不会把 downloads chunk 拽进入口包。
 import type { DownloadCategory } from './pages/downloads';
 
@@ -44,65 +50,8 @@ const FILLED = new Set(['more']);
 const icon = (name: string) =>
   `<svg class="nav-svg${FILLED.has(name) ? ' filled' : ''}" viewBox="0 0 20 20" aria-hidden="true"><path d="${ICONS[name] || ''}"/></svg>`;
 
-type NavChild = { key: PageKey; label: string; icon: string };
-
-/** 全部可导航的页面，按「常驻侧栏」「分组内」「只走快捷入口」三档摆。 */
-const NAV_META: Record<string, NavChild> = {
-  launch: { key: 'launch', label: '启动', icon: 'launch' },
-  downloads: { key: 'downloads', label: '下载', icon: 'download' },
-  java: { key: 'java', label: 'Java', icon: 'java' },
-  ai: { key: 'ai', label: 'AI 助手', icon: 'ai' },
-  instances: { key: 'instances', label: '实例', icon: 'instances' },
-  mods: { key: 'mods', label: '模组', icon: 'mods' },
-  accounts: { key: 'accounts', label: '账号', icon: 'accounts' },
-  multiplayer: { key: 'multiplayer', label: '联机', icon: 'multiplayer' },
-  servers: { key: 'servers', label: '服务器', icon: 'servers' },
-  playtime: { key: 'playtime', label: '时长', icon: 'playtime' },
-  feedback: { key: 'feedback', label: '反馈', icon: 'feedback' },
-  settings: { key: 'settings', label: '设置', icon: 'settings' },
-  tools: { key: 'tools', label: '工具', icon: 'tools' },
-  tasks: { key: 'tasks', label: '下载任务', icon: 'tasks' },
-};
-
-// 下载页顶部本来就有一条覆盖全部七个分类的 tab（downloads.ts renderShell），
-// 侧栏再铺一遍是同一组入口出现两次。这里只留一个总入口，分类交给页内 tab。
-const DOWNLOAD_CHILDREN: NavChild[] = [
-  { key: 'vanilla', label: '内容下载', icon: 'grid' },
-  NAV_META.java,
-];
-// 工具页的清理 / 更新 / 诊断 / 全局 Mod 在设置页都有入口（settings.ts 的「维护」组
-// 甚至有个按钮直接跳过去），时长在启动页有常驻卡片——两者都不再占侧栏位置，
-// 仍可从设置页和启动页的快捷入口卡片进。
-const MORE_CHILDREN: NavChild[] = [
-  NAV_META.instances, NAV_META.multiplayer, NAV_META.servers,
-  NAV_META.feedback, NAV_META.settings,
-];
-/** 没有用户配置时，默认把这两项提到侧栏根——它们是改得最勤的两页。 */
-const DEFAULT_PINNED = ['mods', 'accounts'];
-
-const navChild = (it: NavChild) =>
-  `<a class="nav-item" data-page="${it.key}" title="${it.label}"><span class="nav-icon">${icon(it.icon)}</span><span class="nav-label">${it.label}</span></a>`;
-
-/** Qt 版把固定项写在 ui_nav_pinned 里（键名是 account/mods 这套），这里对齐过来。 */
-const PIN_ALIASES: Record<string, string> = {
-  account: 'accounts', instance: 'instances', version: 'vanilla',
-  mod: 'mods-catalog', download: 'downloads',
-};
-
-function pinnedKeys(): NavChild[] {
-  const raw = store.mergedSettings()?.ui_nav_pinned;
-  const list = Array.isArray(raw) && raw.length ? raw : DEFAULT_PINNED;
-  const hidden = new Set(
-    (store.mergedSettings()?.ui_nav_hidden as string[] | undefined) || []);
-  const seen = new Set<string>();
-  return list
-    .map((k) => PIN_ALIASES[String(k)] || String(k))
-    .filter((k) => !hidden.has(k) && !seen.has(k) && (seen.add(k), NAV_META[k]))
-    .map((k) => NAV_META[k]);
-}
-
 const TITLES: Record<PageKey, string> = {
-  launch: '启动', instances: '实例', downloads: '下载', vanilla: '原版游戏',
+  launch: '启动', instances: '版本管理', downloads: '下载', vanilla: '原版游戏',
   'mods-catalog': 'Mod', mods: '模组管理', modpacks: '整合包', datapacks: '数据包',
   resourcepacks: '资源包', shaders: '光影包', worlds: '世界', tasks: '下载任务',
   accounts: '账号', java: 'Java', servers: '服务器', playtime: '游玩时长',
@@ -110,98 +59,229 @@ const TITLES: Record<PageKey, string> = {
   tools: '工具', more: '更多',
 };
 
-/**
- * 每个分组「管辖」哪些页面。这跟侧栏上摆出来的子项不是一回事：下载组只露两项，
- * 但七个分类页都归它管，从页内 tab 跳过去时也要让它亮起来。
- */
-const SECTION_MEMBERS: Record<string, Set<PageKey>> = {
-  downloads: new Set<PageKey>(['downloads', 'vanilla', 'mods-catalog', 'modpacks',
-    'datapacks', 'resourcepacks', 'shaders', 'worlds', 'java']),
-  more: new Set<PageKey>(['more', 'instances', 'multiplayer', 'servers',
-    'playtime', 'feedback', 'settings', 'tools']),
-};
-
-/** 分组当前是否展开：记在 localStorage，切页不丢。 */
-function sectionOpen(id: string): boolean {
-  return localStorage.getItem(`pymcl.nav.${id}`) === '1';
+/** 侧栏读的就是后端那一份设置（ui_nav_* 由 get_settings 带过来）。 */
+function navConfig(): NavConfig {
+  return store.mergedSettings() as NavConfig;
 }
 
+const escapeAttr = (text: string) => text.replace(/[&<>"]/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] || c));
+
+function navItemHtml(entry: Extract<NavEntry, { kind: 'item' }>): string {
+  const label = escapeAttr(entry.label);
+  const badge = entry.key === 'tasks'
+    ? '<span class="badge" id="task-badge" style="display:none">0</span>' : '';
+  return `<a class="nav-item${entry.top ? '' : ' nav-pinned'}" data-page="${entry.page}"`
+    + ` data-nav-key="${entry.key}" title="${label}"${entry.draggable ? ' draggable="true"' : ''}>`
+    + `<span class="nav-icon">${icon(entry.icon)}</span>`
+    + `<span class="nav-label">${label}</span>${badge}</a>`;
+}
+
+function navHtml(): string {
+  return navItemsFromConfig(navConfig()).map((entry) => {
+    if (entry.kind === 'header') return `<div class="nav-group-title">${escapeAttr(entry.label)}</div>`;
+    if (entry.kind === 'stretch') return '<div class="nav-spacer"></div>';
+    return navItemHtml(entry);
+  }).join('');
+}
+
+let navHtmlCache = '';
+
 /**
- * 可折叠的分组。对齐 Qt 版 PclSideBar 的行为——eziapp 之前两个分组永远摊开，
- * 22 个条目全挤在侧栏里，这是「臃肿」的直接来源。
+ * 按配置重画侧栏。侧栏在设置回来之前就得先出来一版（否则开屏是空的），
+ * 设置到手后再刷一次；HTML 没变就一个节点都不动。
  */
-function navSection(id: string, head: NavChild, children: NavChild[]): string {
-  const open = sectionOpen(id);
-  return `
-    <div class="nav-section${open ? ' open' : ''}" data-section="${id}">
-      <a class="nav-item nav-section-head" data-page="${head.key}" title="${head.label}">
-        <span class="nav-icon">${icon(head.icon)}</span><span class="nav-label">${head.label}</span>
-        <span class="nav-chevron" data-section-toggle="${id}" role="button" aria-label="展开或收起">${icon('chevron')}</span>
-      </a>
-      <div class="nav-children"><div class="nav-children-inner">${children.map(navChild).join('')}</div></div>
-    </div>`;
+function renderNav() {
+  const host = document.getElementById('sidebar-nav');
+  if (!host) return;
+  const html = navHtml();
+  if (html === navHtmlCache) return;
+  navHtmlCache = html;
+  host.innerHTML = html;
+  bindNavItems(host);
+  highlightNav(router.page);
+  paintTaskBadge(true);
+}
+
+let lastBadgeCount = -1;
+
+/**
+ * 「下载任务」上那颗计数。侧栏一重画它就是个新节点，所以每次都现查，
+ * 不缓存引用；计数没变就一个字节都不写（下载高峰期这个订阅每帧都跑）。
+ */
+function paintTaskBadge(force = false) {
+  const badge = document.getElementById('task-badge');
+  if (!badge) return;
+  if (!force && store.taskCount === lastBadgeCount) return;
+  const grew = lastBadgeCount >= 0 && store.taskCount > lastBadgeCount;
+  badge.textContent = String(store.taskCount);
+  badge.style.display = store.taskCount > 0 ? '' : 'none';
+  if (grew && !force) pop(badge);
+  lastBadgeCount = store.taskCount;
 }
 
 function bindNavItems(host: ParentNode) {
-  host.querySelectorAll('.nav-item').forEach((el) => {
-    const key = (el as HTMLElement).dataset.page as PageKey;
-    el.addEventListener('click', () => router.navigate(key));
+  host.querySelectorAll<HTMLElement>('.nav-item').forEach((el) => {
+    const page = el.dataset.page as PageKey;
+    el.addEventListener('click', () => router.navigate(page));
     // 指针停到侧栏条目上就把那一页的 chunk 拉回来。真点下去时模块通常已经在内存里，
     // 转场不必再等一次网络/磁盘往返。
-    el.addEventListener('pointerenter', () => { void loadPage(key).catch(() => undefined); }, { passive: true });
+    el.addEventListener('pointerenter', () => { void loadPage(page).catch(() => undefined); }, { passive: true });
+    el.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      showNavMenu(el);
+    });
+    bindNavDrag(el);
+  });
+}
+
+/** 当前页属于哪个分区（被固定到侧栏的子页不属于任何分区）。 */
+function sectionOfKey(key: string): SectionId | null {
+  if (!key || !ALL_SUB_KEYS.has(key)) return null;
+  const members = sectionMembersFromConfig(navConfig());
+  return SECTION_IDS.find((sec) => members[sec].includes(key)) || null;
+}
+
+function highlightNav(page: PageKey) {
+  const navKey = NAV_KEY_FOR_PAGE[page] || '';
+  const section = sectionOfKey(navKey);
+  document.querySelectorAll<HTMLElement>('.nav-item').forEach((el) => {
+    const key = el.dataset.navKey || '';
+    el.classList.toggle('active', key === navKey);
+    // 子页是从分区横条进来的，那一栏的一级项跟着亮（对齐 Qt 的分区高亮）
+    el.classList.toggle('active-branch', !!section && key === section && key !== navKey);
   });
 }
 
 /**
- * 侧栏是在设置回来之前就画好的，那一刻只能用默认固定项。设置到手后按
- * ui_nav_pinned / ui_nav_hidden 重排一次；内容没变就不动 DOM。
+ * 侧栏改动落盘：先按新配置画出来，再提交给桥；桥拒了就回滚成后端的实况。
+ * 两端读同一份 config.json，这里写完 Qt 版下次开也是这个样子。
  */
-function syncPinnedNav() {
-  const host = document.getElementById('nav-pinned');
-  if (!host) return;
-  const html = pinnedKeys().map(navChild).join('');
-  if (host.innerHTML === html) return;
-  host.innerHTML = html;
-  bindNavItems(host);
-  document.querySelectorAll('.nav-item').forEach((el) => {
-    el.classList.toggle('active', (el as HTMLElement).dataset.page === router.page);
+async function saveNav(patch: Record<string, unknown>) {
+  store.setSettings({ ...(store.settings || {}), ...patch } as SettingsInfo);
+  renderNav();
+  renderSectionBar(router.page);
+  try {
+    await bridge.call('save_settings', patch);
+  } catch (e: unknown) {
+    toast(e instanceof Error ? e.message : '侧栏没能保存', 'error');
+    void loadInitialData();
+  }
+}
+
+function showNavMenu(el: HTMLElement) {
+  const key = el.dataset.navKey || '';
+  if (!key) return;
+  const cfg = navConfig();
+  const hidden = ((cfg.ui_nav_hidden as string[] | undefined) || []).filter((k) => typeof k === 'string');
+  const items = [];
+  if (!ALL_SUB_KEYS.has(key) || navStyle(cfg) === NAV_STYLE_GROUPED) {
+    items.push({
+      label: '在侧栏隐藏这一项',
+      onClick: () => { void saveNav({ ui_nav_hidden: [...new Set([...hidden, key])] }); },
+    });
+  }
+  if (ALL_SUB_KEYS.has(key) && navStyle(cfg) !== NAV_STYLE_GROUPED) {
+    items.push({
+      label: '取消固定（放回分区）',
+      onClick: () => {
+        const out = unpinNavConfig(cfg, key);
+        if (!out) return;
+        void saveNav(out.patch);
+        toast(`「${SUB_TITLES[key] || key}」放回了「${out.section === 'download' ? '游戏' : '更多'}」`, 'success');
+      },
+    });
+  }
+  items.push({ label: '自定义侧栏…', onClick: () => { void openNavEditor(); } });
+  showContextMenu(el, items);
+}
+
+async function openNavEditor() {
+  const { showSidebarEditor } = await import('./pages/nav_editor');
+  const patch = await showSidebarEditor(navConfig());
+  if (patch) await saveNav(patch);
+}
+
+/** 侧栏内拖动排序 / 把分区横条上的子页拖进侧栏固定。 */
+function bindNavDrag(el: HTMLElement) {
+  el.addEventListener('dragstart', (ev) => {
+    ev.dataTransfer?.setData('text/pymcl-nav', el.dataset.navKey || '');
+    ev.dataTransfer!.effectAllowed = 'move';
+    el.classList.add('dragging');
   });
+  el.addEventListener('dragend', () => {
+    el.classList.remove('dragging');
+    document.querySelectorAll('.nav-drop-before,.nav-drop-after')
+      .forEach((n) => n.classList.remove('nav-drop-before', 'nav-drop-after'));
+  });
+  el.addEventListener('dragover', (ev) => {
+    ev.preventDefault();
+    const rect = el.getBoundingClientRect();
+    const before = ev.clientY < rect.top + rect.height / 2;
+    el.classList.toggle('nav-drop-before', before);
+    el.classList.toggle('nav-drop-after', !before);
+  });
+  el.addEventListener('dragleave', () => {
+    el.classList.remove('nav-drop-before', 'nav-drop-after');
+  });
+  el.addEventListener('drop', (ev) => {
+    ev.preventDefault();
+    el.classList.remove('nav-drop-before', 'nav-drop-after');
+    const target = el.dataset.navKey || '';
+    const rect = el.getBoundingClientRect();
+    const before = ev.clientY < rect.top + rect.height / 2;
+    const navKey = ev.dataTransfer?.getData('text/pymcl-nav') || '';
+    const memberKey = ev.dataTransfer?.getData('text/pymcl-member') || '';
+    const cfg = navConfig();
+    if (navKey) {
+      const patch = reorderNavConfig(cfg, navKey, target, before);
+      if (patch) void saveNav(patch);
+      return;
+    }
+    if (memberKey) pinMember(memberKey, target, before);
+  });
+}
+
+function pinMember(key: string, target?: string, before = true) {
+  const out = pinNavConfig(navConfig(), key, target, before);
+  if (!out) return;
+  if ('error' in out) {
+    toast(out.error, 'warning', 5000);
+    return;
+  }
+  void saveNav(out.patch);
+  toast(`「${SUB_TITLES[key] || key}」已固定到侧栏`, 'success');
 }
 
 function renderShell() {
   app.innerHTML = `
     <div class="sidebar">
       <div class="sidebar-title"><span class="nav-icon">${icon('brand')}</span><span class="nav-label">PyMCL</span></div>
-      <nav class="sidebar-nav">
-        ${navChild(NAV_META.launch)}
-        ${navSection('downloads', NAV_META.downloads, DOWNLOAD_CHILDREN)}
-        <div id="nav-pinned">${pinnedKeys().map(navChild).join('')}</div>
-        ${navChild(NAV_META.ai)}
-        ${navSection('more', { key: 'more', label: '更多', icon: 'more' }, MORE_CHILDREN)}
-        <a class="nav-item" data-page="tasks" title="下载任务"><span class="nav-icon">${icon('tasks')}</span><span class="nav-label">下载任务</span><span class="badge" id="task-badge" style="display:none">0</span></a>
-      </nav>
+      <nav class="sidebar-nav" id="sidebar-nav"></nav>
+      <button class="sidebar-edit" id="edit-nav" type="button" title="侧栏排法、顺序、显隐与固定项"><span class="nav-icon">${icon('grid')}</span><span class="nav-label">自定义侧栏</span></button>
       <button class="sidebar-edit" id="edit-layout" type="button" title="自由调整启动页布局：拖动、缩放、增删卡片"><span class="nav-icon">${icon('tools')}</span><span class="nav-label">编辑布局</span></button>
       <div class="sidebar-foot" id="bridge-status">桥接: 未连接</div>
       <div class="sidebar-resizer" id="sidebar-resizer"></div>
     </div>
     <div class="main-content">
       <header class="page-header"><div class="page-title" id="page-title">PyMCL 启动器</div></header>
+      <div class="section-bar" id="section-bar" style="display:none"></div>
       <main class="page-content" id="page-content"></main>
     </div>
     <div class="toast-container" id="toast-container"></div>`;
 
-  // 箭头只管折叠，不跟着跳页；点条目本身仍然跳转（并顺手展开那一组）
-  document.querySelectorAll<HTMLElement>('[data-section-toggle]').forEach((el) => {
-    el.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      const id = el.dataset.sectionToggle!;
-      const host = document.querySelector(`.nav-section[data-section="${id}"]`);
-      const open = host?.classList.toggle('open') ?? false;
-      localStorage.setItem(`pymcl.nav.${id}`, open ? '1' : '0');
-    });
+  renderNav();
+  // 从分区横条把子页拖到侧栏空白处也算固定（对齐 Qt 的拖拽固定）
+  const nav = document.getElementById('sidebar-nav');
+  nav?.addEventListener('dragover', (ev) => ev.preventDefault());
+  nav?.addEventListener('drop', (ev) => {
+    const key = ev.dataTransfer?.getData('text/pymcl-member') || '';
+    if (!key) return;
+    ev.preventDefault();
+    pinMember(key);
   });
 
-  bindNavItems(app);
+  document.getElementById('edit-nav')?.addEventListener('click', () => { void openNavEditor(); });
   // 不在启动页时画布还没挂上：layout_bus 记下这次请求，切过去后由画布自己领走
   document.getElementById('edit-layout')?.addEventListener('click', () => {
     if (!requestLayoutEdit()) router.navigate('launch');
@@ -226,8 +306,10 @@ function renderShell() {
       window.removeEventListener('pointerup', up);
       if (frame) cancelAnimationFrame(frame);
       apply();
-      // 桥接不往返 ui_sidebar_width，存本地覆盖层
+      // 本地覆盖层先记一份（离线也还原得回来），同时写回后端，
+      // Qt 版读的是同一个 ui_sidebar_width
       store.setLocalPrefs({ ui_sidebar_width: width });
+      void bridge.call('save_settings', { ui_sidebar_width: width }).catch(() => undefined);
     };
     window.addEventListener('pointermove', move, { passive: true });
     window.addEventListener('pointerup', up);
@@ -248,9 +330,52 @@ function renderShell() {
   router.subscribe(() => void renderPage(router.page));
 }
 
+/**
+ * 分区横条：一栏里的子页在这里排成一排，跟 Qt 版分区页顶上那条一样，
+ * 成员与顺序都读 ui_section_members。把一颗拖进侧栏就是固定。
+ */
+function renderSectionBar(page: PageKey) {
+  const host = document.getElementById('section-bar');
+  if (!host) return;
+  const navKey = NAV_KEY_FOR_PAGE[page] || '';
+  const section = sectionOfKey(navKey);
+  if (!section) {
+    host.innerHTML = '';
+    host.style.display = 'none';
+    return;
+  }
+  const members = sectionMembersFromConfig(navConfig())[section];
+  host.style.display = '';
+  host.innerHTML = `<div class="tabs">${members.map((key) =>
+    `<button class="tab${key === navKey ? ' active' : ''}" draggable="true"`
+    + ` data-member="${key}" title="拖到侧栏可固定">${escapeAttr(SUB_TITLES[key] || key)}</button>`).join('')}</div>`;
+  host.querySelectorAll<HTMLElement>('[data-member]').forEach((btn) => {
+    const key = btn.dataset.member!;
+    btn.addEventListener('click', () => router.navigate(PAGE_FOR_NAV_KEY[key] || 'launch'));
+    btn.addEventListener('dragstart', (ev) => {
+      ev.dataTransfer?.setData('text/pymcl-member', key);
+      ev.dataTransfer!.effectAllowed = 'move';
+    });
+  });
+}
+
+/** 点分区（游戏 / 更多）落到那一栏的第一项——分区本身不是页面。 */
+function sectionLanding(page: PageKey): PageKey | null {
+  const section: SectionId | null = page === 'downloads' ? 'download' : page === 'more' ? 'more' : null;
+  if (!section) return null;
+  const first = sectionMembersFromConfig(navConfig())[section][0];
+  const target = first ? PAGE_FOR_NAV_KEY[first] : null;
+  return target && target !== page ? target : null;
+}
+
 let renderSeq = 0;
 
 async function renderPage(page: PageKey) {
+  const landing = sectionLanding(page);
+  if (landing) {
+    router.navigate(landing);
+    return;
+  }
   const content = document.getElementById('page-content');
   const title = document.getElementById('page-title');
   if (!content || !title) return;
@@ -260,18 +385,8 @@ async function renderPage(page: PageKey) {
   // 等 chunk 的这段时间里用户可能又点了别处，那就让后来的那次说了算。
   if (seq !== renderSeq) return;
   clearPageCleanups();
-  document.querySelectorAll('.nav-item').forEach((el) => {
-    el.classList.toggle('active', (el as HTMLElement).dataset.page === page);
-  });
-  // 七个下载分类里只有一个在侧栏露面，其余靠页内 tab 到达；不管走哪条路，
-  // 「下载」这一组都得亮起来，并且把它所在的分组展开。
-  for (const [id, members] of Object.entries(SECTION_MEMBERS)) {
-    const host = document.querySelector(`.nav-section[data-section="${id}"]`);
-    if (!host) continue;
-    const inside = members.has(page);
-    host.querySelector('.nav-section-head')?.classList.toggle('active-branch', inside);
-    if (inside) host.classList.add('open');
-  }
+  highlightNav(page);
+  renderSectionBar(page);
   title.textContent = TITLES[page] || 'PyMCL';
   await pageSwap(content, () => paint(content));
 }
@@ -299,7 +414,8 @@ const pageLoaders: Record<PageKey, () => Promise<Painter>> = {
   resourcepacks: () => downloadPainter('resourcepacks'),
   shaders: () => downloadPainter('shaders'),
   worlds: () => downloadPainter('worlds'),
-  // 两个分区横条本身不是页面，点它落到该分区的第一项
+  // 两个分区横条本身不是页面：renderPage 会先把它换成该分区的第一项，
+  // 这两条只在整栏被清空（成员全被固定走）时兜底
   downloads: () => downloadPainter('vanilla'),
   more: async () => (await import('./pages/instances')).renderInstancesPage,
 };
@@ -334,7 +450,8 @@ async function loadInitialData() {
   if (settings.status === 'fulfilled') {
     store.setSettings(settings.value as any);
     applyAppearance(store.mergedSettings());
-    syncPinnedNav();
+    renderNav();
+    renderSectionBar(router.page);
   }
   if (instances.status === 'fulfilled') store.setInstances(instances.value as any);
   if (versions.status === 'fulfilled') store.setVersionList(versions.value as any);
@@ -369,6 +486,9 @@ async function maybeClipboardHint() {
 
 async function init() {
   renderShell();
+  // 文件拖到没接收区的地方，Edge 默认会把它当网页打开，整个界面就没了
+  window.addEventListener('dragover', (e) => e.preventDefault());
+  window.addEventListener('drop', (e) => e.preventDefault());
   void renderPage(router.page);
   const bridgeConfigured = await initBridge();
   if (!bridgeConfigured) {
@@ -384,16 +504,7 @@ async function init() {
     bridge.subscribe('game_started', () => { store.gameRunning = true; store.notify(); });
     bridge.subscribe('game_exited', () => { store.gameRunning = false; store.notify(); });
     bridge.subscribe('ui_changed', () => reloadInitialData());
-    const badge = document.getElementById('task-badge');
-    let lastCount = -1;
-    store.subscribe(() => {
-      // 这个订阅在下载高峰期每帧都跑，计数没变就一个字节都不写
-      if (!badge || store.taskCount === lastCount) return;
-      badge.textContent = String(store.taskCount);
-      badge.style.display = store.taskCount > 0 ? '' : 'none';
-      if (lastCount >= 0 && store.taskCount > 0) pop(badge);
-      lastCount = store.taskCount;
-    });
+    store.subscribe(() => paintTaskBadge());
     void loadInitialData();
     void maybeClipboardHint();
   });

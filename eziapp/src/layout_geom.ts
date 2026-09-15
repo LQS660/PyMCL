@@ -12,7 +12,11 @@ export const DEFAULT_PROFILE = '';
 
 /** 每种卡片的最小尺寸（像素，正文部分；卡片本体再加标题栏 40px）。 */
 export const CARD_MIN_SIZE: Record<string, [number, number]> = {
-  banner: [340, 150],
+  // 横幅 150→125，与 Python 侧 mclauncher/ui_layout.py 对齐：横幅里已经没有
+  // 启动按钮/进度条了，只剩渐变 Hero（量出来最矮 148）；留 150 的话矮窗口下
+  // 150+40 的下限会顶过比例高度，把下面那张卡压掉一截。两端不一起改，同一份
+  // 布局文档在两边缩放的下限就不一样了。
+  banner: [340, 125],
   config: [330, 300],
   log: [260, 180],
   news: [220, 180],
@@ -27,12 +31,16 @@ export const FALLBACK_MIN: [number, number] = [200, 120];
 export const HEADER_PX = 40;
 
 /** 新增卡片时各类型的默认几何（画布比例）。 */
+// 跟 Qt 版 app/dashboard.py 的 _ADD_DEFAULT 一字不差：两端读的是同一份布局文档，
+// 新卡默认落点不一致就是「Qt 加的卡在网页版压着横幅」这类以后很难查的 bug。
 export const ADD_DEFAULT: Record<string, [number, number, number, number]> = {
   banner: [0.0, 0.0, 1.0, 0.24],
-  config: [0.0, 0.26, 0.34, 0.7],
-  log: [0.36, 0.26, 0.4, 0.7],
-  news: [0.78, 0.26, 0.22, 0.7],
-  quick: [0.32, 0.3, 0.34, 0.3],
+  config: [0.0, 0.32, 0.34, 0.66],
+  log: [0.36, 0.32, 0.4, 0.66],
+  // 新闻这一栏矮一截（0.66→0.52）：它是右下角唯一会跟启动坞抢地方的卡，
+  // 坞就浮在那个角上。停在坞上沿之前收住，加回来的新闻卡才不被压着。
+  news: [0.78, 0.32, 0.22, 0.52],
+  quick: [0.32, 0.32, 0.34, 0.3],
   notes: [0.32, 0.34, 0.28, 0.26],
   playtime: [0.32, 0.36, 0.32, 0.22],
   tasks: [0.32, 0.36, 0.32, 0.22],
@@ -100,15 +108,22 @@ export function itemFromDict(raw: unknown): LayoutItem {
   );
 }
 
+/**
+ * 出厂布局，跟 Qt 版 mclauncher/ui_layout.py 的 default_doc() 一致：横幅通栏 + 左侧
+ * 启动配置，其余留空。实时日志和新闻不在出厂版式里，想要的人在「编辑布局 →
+ * 添加卡片」里加回来（两种类型仍在 CARD_MIN_SIZE 白名单内）。空出来的右半边留给
+ * 启动页右下角的启动坞，那块空着坞才一张卡都不压。
+ *
+ * 横幅 0.30 而不是 0.26：0.26 在矮窗口里换算出来比横幅卡的最小高（165）还小，
+ * 会被下限顶出去、压住下面那张卡。
+ */
 export function defaultDoc(): LayoutDoc {
   return {
     version: LAYOUT_VERSION,
     grid: 8,
     items: [
-      newItem('banner', 0.0, 0.0, 1.0, 0.26, { id: 'banner-main', z: 0 }),
-      newItem('config', 0.0, 0.275, 0.315, 0.725, { id: 'config-main', z: 1 }),
-      newItem('log', 0.325, 0.275, 0.41, 0.725, { id: 'log-main', z: 2 }),
-      newItem('news', 0.745, 0.275, 0.255, 0.725, { id: 'news-main', z: 3 }),
+      newItem('banner', 0.0, 0.0, 1.0, 0.30, { id: 'banner-main', z: 0 }),
+      newItem('config', 0.0, 0.315, 0.315, 0.685, { id: 'config-main', z: 1 }),
     ],
   };
 }

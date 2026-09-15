@@ -1,6 +1,9 @@
 import { bridge } from '../bridge';
 import { store } from '../store';
-import { confirmDialog, inputDialog, showError, showSkeleton, toast, flyToTasks } from '../ui';
+import {
+  confirmDialog, enableFileDrop, pickFile, readPickedFile, registerPageCleanup,
+  showError, showSkeleton, stashUpload, toast, flyToTasks, type PickedFile,
+} from '../ui';
 import { errorMessage, escapeHtml, formatBytes } from './common';
 
 interface ModEntry { filename?: string; enabled?: boolean; bytes?: number }
@@ -62,7 +65,7 @@ function render(container: HTMLElement, instance: string, version: string, targe
           <div class="form-group"><label class="form-label">目录</label><select class="select" id="mods-target">${targets.map((t) => `<option value="${escapeHtml(t.value || '')}">${escapeHtml(t.label || t.value || '共享')}</option>`).join('')}</select></div>
           <div class="form-group" style="flex:1;min-width:180px"><label class="form-label">筛选</label><input class="input" id="mods-filter" placeholder="按文件名筛选…" style="width:100%"></div>
           <button class="btn" id="mods-folder">打开目录</button>
-          <button class="btn" id="mods-import">导入 jar</button>
+          <button class="btn" id="mods-import" title="也可以把 jar 直接拖进这个页面">导入 jar</button>
           <button class="btn btn-primary" id="mods-update">检查更新</button>
         </div>
       </div>
@@ -85,14 +88,19 @@ function render(container: HTMLElement, instance: string, version: string, targe
     catch (e) { toast(errorMessage(e, '打开失败'), 'error'); }
   });
   container.querySelector('#mods-import')?.addEventListener('click', async () => {
-    const path = await inputDialog('导入模组', '本地 jar 完整路径', '');
-    if (!path?.trim()) return;
-    try {
-      await bridge.call('install_mod', { name: path, instance: instSel.value, extra: { path, instance: instSel.value, version: tgtSel.value, source: '本地' } });
-      toast('已加入导入任务', 'success');
-      await flyToTasks(container.querySelector('#mods-import'), path);
-    } catch (e) { toast(errorMessage(e, '导入失败'), 'error'); }
+    const picked = await pickFile('.jar,application/java-archive');
+    if (!picked) return;
+    await importJars(container, instSel, tgtSel, [picked]);
   });
+  // 拖一个 jar 进来跟点「导入 jar」等价
+  registerPageCleanup(enableFileDrop(
+    container,
+    async (files) => {
+      const picked = (await Promise.all(files.map(readPickedFile))).filter(Boolean) as PickedFile[];
+      if (picked.length) await importJars(container, instSel, tgtSel, picked);
+    },
+    (f) => f.name.toLowerCase().endsWith('.jar'),
+  ));
   container.querySelector('#mods-update')?.addEventListener('click', async () => {
     const btn = container.querySelector<HTMLButtonElement>('#mods-update')!;
     btn.disabled = true;
@@ -111,6 +119,29 @@ function render(container: HTMLElement, instance: string, version: string, targe
       toast(errorMessage(e, '检查更新失败'), 'error');
     }
   });
+}
+
+/** 选出来的和拖进来的 jar 走同一条路：先落盘换真实路径，再交给 install_mod。 */
+async function importJars(
+  container: HTMLElement,
+  instSel: HTMLSelectElement,
+  tgtSel: HTMLSelectElement,
+  files: PickedFile[],
+) {
+  let done = 0;
+  for (const file of files) {
+    try {
+      const path = await stashUpload(file);
+      await bridge.call('install_mod', {
+        name: file.name, instance: instSel.value,
+        extra: { path, instance: instSel.value, version: tgtSel.value, source: '本地' },
+      });
+      done++;
+    } catch (e) { toast(errorMessage(e, `导入 ${file.name} 失败`), 'error'); }
+  }
+  if (!done) return;
+  toast(done > 1 ? `已加入 ${done} 个导入任务` : '已加入导入任务', 'success');
+  await flyToTasks(container.querySelector('#mods-import'), files[0].name);
 }
 
 function paintList(container: HTMLElement, rows: ModEntry[]) {

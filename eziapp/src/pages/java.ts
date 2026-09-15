@@ -119,7 +119,7 @@ function render(container: HTMLElement, vendors: { value: string; label: string 
     const javaPath = (el as HTMLElement).dataset.java!;
     el.querySelector('[data-action="set-default"]')?.addEventListener('click', async () => {
       try {
-        // 只提交这一个键。以前是 `{...store.settings, default_java}`，
+        // 只提交这一个键，不要 `{...store.settings, default_java}` 整份回传：
         // store 里可能是别处存进去的残缺 settings，整份回传会把没带上的键一起写坏。
         await bridge.call('save_settings', { default_java: javaPath });
         store.setSettings({ ...(store.settings || {}), default_java: javaPath } as any);

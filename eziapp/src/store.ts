@@ -94,6 +94,15 @@ export interface SettingsInfo {
   window_mode: string;
   game_dir: string;
   offline_skin: string;
+  // 侧栏编排：跟 Qt 版共用 config.json 里的同一批键，语义见 nav_model.ts
+  ui_nav_style?: string;
+  ui_nav_order?: string[];
+  ui_nav_pinned?: string[];
+  ui_nav_hidden?: string[];
+  ui_nav_defaults?: string;
+  ui_nav_groups?: { title: string; keys: string[] }[];
+  ui_section_members?: Record<string, string[]>;
+  ui_sidebar_width?: number;
 }
 
 export interface AIChat {

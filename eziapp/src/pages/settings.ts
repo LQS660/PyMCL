@@ -1,7 +1,10 @@
 import { bridge } from '../bridge';
 import { router } from '../router';
 import { store } from '../store';
-import { applyAppearance, confirmDialog, dismissOverlay, formDialog, inputDialog, showError, showSkeleton, toast } from '../ui';
+import {
+  applyAppearance, confirmDialog, dismissOverlay, formDialog, inputDialog, pickFileToPath,
+  showError, showSkeleton, toast,
+} from '../ui';
 import { escapeHtml, errorMessage } from './common';
 import { showGlobalMods } from './dialogs';
 import { requestLayoutEdit } from '../layout_bus';
@@ -64,7 +67,7 @@ function render(container: HTMLElement, s: any, extra: Extra) {
         ${row('深色模式', '立即生效', toggle('ui_dark', !!s.ui_dark))}
         ${row('主题色', '例如 #2E9B6B', `<input class="input" id="theme_color" value="${escapeHtml(s.theme_color || '#2E9B6B')}" style="width:140px">`)}
         ${row('背景图', '本地图片路径或 http(s) 地址，可留空', `<input class="input" id="ui_background" value="${escapeHtml(s.ui_background || '')}" style="width:260px">`)}
-        ${row('语言', '后端文案语言，重启后完全生效', `<select class="select" id="language">${Object.entries(extra.langs).map(([k, v]) => `<option value="${escapeHtml(k)}" ${k === extra.lang ? 'selected' : ''}>${escapeHtml(v)}</option>`).join('')}</select>`)}
+        ${row('语言', '只影响后端消息和 Qt 版；这个界面本身目前只有中文', `<select class="select" id="language">${Object.entries(extra.langs).map(([k, v]) => `<option value="${escapeHtml(k)}" ${k === extra.lang ? 'selected' : ''}>${escapeHtml(v)}</option>`).join('')}</select>`)}
         ${row('启动器可见性', '游戏启动后窗口怎么处理', `<select class="select" id="launcher_visibility">
           ${[['keep', '保持显示'], ['minimize', '最小化'], ['hide', '隐藏'], ['hide_reopen', '隐藏后重开'], ['close', '关闭启动器']].map(([k, l]) => `<option value="${k}" ${s.launcher_visibility === k ? 'selected' : ''}>${l}</option>`).join('')}</select>`)}
         ${row('启动页主页', '新闻 / 自定义 HTML / 空白', `<select class="select" id="homepage_mode">
@@ -209,7 +212,7 @@ function render(container: HTMLElement, s: any, extra: Extra) {
       await bridge.call('set_multi_instance', { allow: multi }).catch(() => undefined);
       if (lang !== extra.lang) {
         await bridge.call('set_language', { lang }).catch(() => undefined);
-        toast('语言已切换，重启后界面文案完全生效', 'info', 5000);
+        toast('语言已保存：后端消息和 Qt 版会跟着变，这个界面的文案还没做多语言', 'info', 6000);
       }
       store.setLocalPrefs(local);
       store.setSettings({ ...(store.settings || {}), ...payload } as any);
@@ -290,10 +293,12 @@ function render(container: HTMLElement, s: any, extra: Extra) {
     catch (e) { toast(errorMessage(e, '删除失败'), 'error'); }
   });
   document.getElementById('import-theme')?.addEventListener('click', async () => {
-    const path = await inputDialog('导入主题包', '主题文件完整路径（.json）', '');
-    if (!path?.trim()) return;
-    try { const name = await bridge.call<string>('import_theme', { path: path.trim() }); toast(`已导入主题「${name || path}」`, 'success'); }
-    catch (e) { toast(errorMessage(e, '导入失败'), 'error'); }
+    try {
+      const picked = await pickFileToPath('.json,application/json');
+      if (!picked) return;
+      const name = await bridge.call<string>('import_theme', { path: picked.path });
+      toast(`已导入主题「${name || picked.name}」`, 'success');
+    } catch (e) { toast(errorMessage(e, '导入失败'), 'error'); }
   });
   document.getElementById('export-theme')?.addEventListener('click', async () => {
     const values = await formDialog('导出主题包', [

@@ -1,7 +1,10 @@
 import { bridge } from '../bridge';
 import { router, type PageKey } from '../router';
 import { store, type InstanceInfo, type VersionInfo } from '../store';
-import { confirmDialog, inputDialog, registerPageCleanup, showSkeleton, toast, flyToTasks } from '../ui';
+import {
+  confirmDialog, enableFileDrop, inputDialog, pickFile, readPickedFile, registerPageCleanup,
+  showSkeleton, stashUpload, toast, flyToTasks, type PickedFile,
+} from '../ui';
 import { errorMessage, escapeHtml, formatDownloads } from './common';
 import { pickCatalogFile } from './dialogs';
 
@@ -43,6 +46,16 @@ const catalogConfig: Record<Exclude<DownloadCategory, 'vanilla'>, {
   resourcepacks: { search: 'search_resourcepacks', install: 'install_resourcepack', list: 'get_installed_resourcepacks', del: 'delete_resourcepack', kind: 'resourcepack', noun: '资源包', placeholder: '搜索资源包', types: ['全部', '16x', '32x', '64x', '写实'] },
   shaders: { search: 'search_shaders', install: 'install_shader', list: 'get_installed_shaders', del: 'delete_shader', kind: 'shader', noun: '光影包', placeholder: '搜索光影', types: ['全部', '写实', '卡通', '高性能', '光追'] },
   worlds: { search: 'search_worlds', install: 'install_world', list: 'list_saves', del: 'delete_save', kind: 'world', noun: '世界', placeholder: '搜索世界', types: ['全部', '生存', '冒险', '创造'] },
+};
+
+/** 各类目认哪些本地文件——既给文件选择器过滤，也给拖拽判重 */
+const localAccept: Record<Exclude<DownloadCategory, 'vanilla'>, string> = {
+  mods: '.jar',
+  modpacks: '.zip,.mrpack',
+  datapacks: '.zip',
+  resourcepacks: '.zip',
+  shaders: '.zip',
+  worlds: '.zip',
 };
 
 const catalogState: Record<string, { query: string; source: string; gameVersion: string; type: string; rows: CatalogEntry[]; mode: 'search' | 'installed' | 'favs' }> = {};
@@ -115,15 +128,13 @@ export async function renderDownloadPage(container: HTMLElement, requestedCatego
 }
 
 function renderShell(container: HTMLElement, category: DownloadCategory) {
+  // 分类之间的切换条由外壳按 ui_section_members 画（main.ts renderSectionBar），
+  // 跟 Qt 版一样归分区所有：页内再铺一条就是同一组入口出现两次，
+  // 而且用户把某个分类挪进「更多」之后，页内那条还会照旧显示。
   container.innerHTML = `
     <div style="display:flex;flex-direction:column;gap:14px;max-width:1180px">
-      <div class="tabs">${(Object.keys(categoryMeta) as DownloadCategory[]).map((key) =>
-        `<button class="tab ${key === category ? 'active' : ''}" data-download-route="${key}">${categoryMeta[key].icon} ${categoryMeta[key].label}</button>`).join('')}</div>
       <div id="download-panel"></div>
     </div>`;
-  container.querySelectorAll<HTMLButtonElement>('[data-download-route]').forEach((button) => {
-    button.addEventListener('click', () => router.navigate(categoryMeta[button.dataset.downloadRoute as DownloadCategory].route));
-  });
   const panel = container.querySelector<HTMLElement>('#download-panel');
   if (!panel) return;
   if (category === 'vanilla') renderVanilla(panel);
@@ -280,7 +291,7 @@ function renderCatalog(panel: HTMLElement, category: Exclude<DownloadCategory, '
         <button class="tab ${state.mode === 'favs' ? 'active' : ''}" data-mode="favs">收藏</button>
         ${category === 'mods' ? '<select class="select" id="catalog-mods-target" style="display:none;max-width:190px"></select><button class="btn btn-sm" id="catalog-update" style="display:none">检查更新</button>' : ''}
         <button class="btn btn-sm" id="catalog-link">从链接安装</button>
-        <button class="btn btn-sm" id="catalog-local">导入本地</button>
+        <button class="btn btn-sm" id="catalog-local" title="也可以把文件直接拖进这个页面">导入本地</button>
         <span id="catalog-status" style="font-size:12px;color:var(--text-secondary)"></span>
       </div>
     </div>
@@ -481,11 +492,29 @@ function renderCatalog(panel: HTMLElement, category: Exclude<DownloadCategory, '
     if (!url) return;
     void doInstall({ name: url, url, source: sourceSelect.value }, panel.querySelector('#catalog-link')!);
   });
+  const importLocal = async (files: PickedFile[]) => {
+    const btn = panel.querySelector<HTMLElement>('#catalog-local')!;
+    for (const file of files) {
+      try {
+        // 浏览器不给真实路径，先把内容落到后端暂存目录换一个
+        const path = await stashUpload(file);
+        await doInstall({ name: file.name, path, source: '本地' } as CatalogEntry, btn);
+      } catch (e) { toast(errorMessage(e, `导入 ${file.name} 失败`), 'error'); }
+    }
+  };
   panel.querySelector('#catalog-local')?.addEventListener('click', async () => {
-    const path = await inputDialog('导入本地文件', '完整路径', '');
-    if (!path) return;
-    void doInstall({ name: path, path, source: '本地' } as CatalogEntry, panel.querySelector('#catalog-local')!);
+    const picked = await pickFile(localAccept[category]);
+    if (picked) await importLocal([picked]);
   });
+  const accepted = localAccept[category].split(',');
+  registerPageCleanup(enableFileDrop(
+    panel,
+    async (files) => {
+      const picked = (await Promise.all(files.map(readPickedFile))).filter(Boolean) as PickedFile[];
+      if (picked.length) await importLocal(picked);
+    },
+    (f) => accepted.some((ext) => f.name.toLowerCase().endsWith(ext)),
+  ));
   if (state.mode === 'search' && !state.rows.length) void search();
   else if (state.mode === 'search') paintSearch(state.rows);
   else setMode(state.mode);
