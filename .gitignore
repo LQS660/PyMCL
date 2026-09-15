@@ -73,10 +73,45 @@ pymcl-feedback-client-src.zip
 wpf/**/bin/
 wpf/**/obj/
 /_shots/
-/_shot*.png
+# 离屏冒烟脚本每跑一次就重画一张，删了下一轮又回来；按产物对待
+/_*.png
+
+# 一次性排查脚本。写临时脚本请丢系统临时目录，别再往仓库根攒。
+# 之前只挡了 _*_repro / _*_tmp 这几个窄写法，实际攒下来的近 80 个都是从别的
+# 名字进来的，所以这里按「仓库根 + 下划线开头」一刀切。真要长期留的脚本请挪进
+# scripts/ 并去掉下划线前缀。
+/_*.py
+/_*.log
+/_*.txt
+/_*.json
+
+# app/ 的整树备份副本，i18n 改造时留的
+/_app_backup_i18n/
 
 # PYMCL_HOME 落在仓库根时生成的实例数据（assets/libraries/saves，数百 MB）
 /default/
 
 # WPF 前端的本地 UI 状态（侧栏宽度、主题、布局）
 wpf-ui.json
+
+# 离线皮肤：整个目录都是 skinserver.py 在 utils.ROOT 下现建的。
+# yggdrasil_key.pem 是每台机器自己生成的 RSA 4096 私钥（丢了会自动重建），
+# 绝不能进仓库。
+/skins/
+
+# authlib.py 运行时按需下载，不是源码
+/authlib-injector.jar
+
+# _make_source_zip.py / _pack_*.py 的产物
+/*-src.zip
+/PyMCL-Qt-src.zip
+
+# 配置备份（config.json 本体已在文件开头忽略）
+config.json.bak*
+
+# 构建日志
+/build_*.log
+/build_qt_log.txt
+
+# 运行时统计
+/playtime.json
