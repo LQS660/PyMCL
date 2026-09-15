@@ -15,13 +15,17 @@ ISOLATION_SAVES = "saves"
 ISOLATION_MODS = "mods"
 ISOLATION_ALL = "all"
 ISOLATION_LABELS = {
-    ISOLATION_NONE: "关闭（共用实例目录）",
+    ISOLATION_NONE: "大锅饭（与其他版本共用）",
     ISOLATION_SAVES: "隔离存档",
     ISOLATION_MODS: "隔离 Mod 与配置",
-    ISOLATION_ALL: "隔离全部",
+    ISOLATION_ALL: "完全独立",
 }
 SHARED_LINKS = ("mods", "config", "resourcepacks", "shaderpacks", "downloads")
 SAVES_LINKS = ("saves",)
+# 版本卡上的一键开关只在这两档之间翻，四档细分留在版本设置里
+ISOLATED_DEFAULT = ISOLATION_ALL
+# 转独立时从大锅饭里带一份过去的内容
+SEED_DIRS = ("mods", "config", "resourcepacks", "shaderpacks")
 
 DEFAULTS = {
     "isolation": ISOLATION_NONE,
@@ -78,6 +82,52 @@ def save(instance, version_id, data: dict) -> dict:
         cur["isolation"] = ISOLATION_NONE
     utils.write_json(_file(instance, version_id), cur)
     return cur
+
+
+def is_isolated(settings) -> bool:
+    """这个版本是否有自己的 mods 目录（而不是吃大锅饭）。"""
+    iso = (settings or {}).get("isolation") or ISOLATION_NONE
+    return iso in (ISOLATION_MODS, ISOLATION_ALL)
+
+
+def set_isolation(instance, version_id, mode, seed=False) -> dict:
+    """切隔离模式。`seed=True` 时把大锅饭里现有的模组/配置复制一份过去。
+
+    转独立那一下版本目录是空的，不带种子的话用户会以为模组丢了；
+    但整合包版本转独立时又不该把别人的模组拖进来，所以交给调用方决定。
+    """
+    if mode not in ISOLATION_LABELS:
+        raise ValueError(f"未知的隔离模式: {mode!r}")
+    before = load(instance, version_id)
+    data = save(instance, version_id, {"isolation": mode})
+    if seed and is_isolated(data) and not is_isolated(before):
+        _seed_from_shared(instance, version_id)
+    apply_isolation(instance, version_id, data)
+    return data
+
+
+def _seed_from_shared(instance, version_id):
+    import shutil
+
+    src_root = Path(instance.path)
+    dest_root = instance.versions_dir() / version_id
+    for name in SEED_DIRS:
+        src = src_root / name
+        if not src.is_dir():
+            continue
+        dest = dest_root / name
+        utils.ensure_dir(dest)
+        for child in src.iterdir():
+            target = dest / child.name
+            if target.exists() or child.is_symlink():
+                continue
+            try:
+                if child.is_dir():
+                    shutil.copytree(child, target, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(child, target)
+            except OSError:
+                continue
 
 
 def game_dir(instance, version_id, settings=None) -> Path:
@@ -137,6 +187,16 @@ def apply_isolation(instance, version_id, settings=None) -> Path:
         for name in ("mods", "config"):
             utils.ensure_dir(gdir / name)
     elif iso == ISOLATION_ALL:
+        # 从「隔离存档 / 隔离 Mod」切过来时，之前建的联接还指着共享池，
+        # 不摘掉的话「完全独立」写进去的东西照样落在大锅饭里。
+        for name in set(SHARED_LINKS) | set(SAVES_LINKS) | {"screenshots"}:
+            _drop_link(gdir / name)
         for name in ("mods", "config", "saves", "resourcepacks", "shaderpacks"):
             utils.ensure_dir(gdir / name)
     return gdir
+
+
+def _drop_link(path: Path):
+    from .single_root import drop_link
+
+    drop_link(path)

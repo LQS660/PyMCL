@@ -29,6 +29,20 @@ def sanitize_id(raw: str) -> str:
     return s
 
 
+def unique_id(instance: Instance, raw: str) -> str:
+    """在已有版本名上自动加 -2、-3，避免撞车。"""
+    base = sanitize_id(raw)
+    vdir = instance.versions_dir()
+    name = base
+    n = 2
+    while (vdir / name).exists():
+        suffix = f"-{n}"
+        trimmed = base[: max(1, 64 - len(suffix))].rstrip(" .") or base
+        name = f"{trimmed}{suffix}"
+        n += 1
+    return name
+
+
 def _vdir(instance: Instance, version_id: str) -> Path:
     p = instance.versions_dir() / version_id
     if not p.is_dir():

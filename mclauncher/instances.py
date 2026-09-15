@@ -1,5 +1,14 @@
 # -*- coding: utf-8 -*-
-"""实例（版本隔离）管理。每个实例是一个独立的 .minecraft 目录。"""
+"""游戏目录管理。
+
+对齐 PCL/HMCL：只有一个游戏目录（`.minecraft`），版本平铺在它的 `versions/`
+下面，谁装了哪些模组由每个版本自己的隔离开关决定（见 `version_settings`）。
+
+`Instance` 这个类保留下来当「游戏目录句柄」用——启动链、安装器、模组管理
+都拿它当参数，换名字要动两千行。历史上它还能指向 `.minecraft/<子目录>`
+形式的多实例，那套结构现在由 `single_root.migrate()` 在启动时并进根目录，
+这里只留下读旧结构的能力，供迁移期与命令行兜底。
+"""
 import re
 from pathlib import Path
 
@@ -29,9 +38,24 @@ class InstanceError(Exception):
     pass
 
 
-def list_instances() -> list:
-    """返回所有实例名。"""
-    root = CONFIG.instances_dir
+def root_dir() -> Path:
+    """唯一的游戏目录。默认是启动器主目录下的 `.minecraft`。"""
+    return CONFIG.instances_dir
+
+
+def root_name() -> str:
+    """游戏目录的展示名。UI 里凡是要一个「实例名」的地方都用它。"""
+    return root_dir().name or ".minecraft"
+
+
+def single_root_mode() -> bool:
+    """游戏目录本身已经是版本容器（迁移完成）。"""
+    return (root_dir() / INSTANCE_META).is_file()
+
+
+def list_legacy_instances() -> list:
+    """旧结构里 `.minecraft/<实例名>/` 那一层的子实例名。"""
+    root = root_dir()
     if not root.is_dir():
         return []
     names = []
@@ -39,6 +63,29 @@ def list_instances() -> list:
         if child.is_dir() and (child / INSTANCE_META).is_file():
             names.append(child.name)
     return sorted(names)
+
+
+def list_instances() -> list:
+    """可用的游戏目录名。单目录模式下就是游戏目录本身那一个。"""
+    legacy = list_legacy_instances()
+    if single_root_mode() or not legacy:
+        return [root_name()] + legacy
+    return legacy
+
+
+def resolve_name(name) -> str:
+    """把外部传进来的实例名归一到真实目录名。
+
+    单目录模式下，`default` 这类已经并进根目录的旧名字一律落到游戏目录，
+    否则调用方随手传的 `instance="default"` 会在 `.minecraft` 里重新长出
+    一个空实例来。
+    """
+    s = str(name or "").strip()
+    if not s or s == root_name():
+        return ""
+    if single_root_mode() and not (root_dir() / s / INSTANCE_META).is_file():
+        return ""
+    return s
 
 
 def sanitize_instance_name(raw, fallback="游戏") -> str:
@@ -76,7 +123,9 @@ def unique_instance_name(raw, fallback="游戏") -> str:
 
 def get_instance_path(name) -> Path:
     root = CONFIG.instances_dir.resolve()
-    if not name or name in (".", "..") or not re.fullmatch(r"[^\\/:*?\"<>|]+", name):
+    if not name or str(name) == root.name:
+        return root
+    if name in (".", "..") or not re.fullmatch(r"[^\\/:*?\"<>|]+", name):
         raise InstanceError(f"非法实例名: {name!r}")
     path = (root / name).resolve()
     # 防路径穿越：实例必须直接位于实例目录之下
@@ -88,12 +137,22 @@ def get_instance_path(name) -> Path:
 class Instance:
     def __init__(self, name=None):
         if name is None:
-            name = CONFIG.get("default_instance", "default")
-        self.name = name
-        self.path = get_instance_path(name)
+            name = CONFIG.get("default_instance", "")
+        self.name = resolve_name(name) or root_name()
+        self.path = get_instance_path(self.name)
+        self.is_root = self.path == CONFIG.instances_dir.resolve()
 
     # ---- 创建 / 删除 / 重命名
     def create(self, meta=None):
+        if self.is_root:
+            # 游戏目录本身不存在「已存在」这回事，补齐结构即可
+            self.ensure_standard_dirs()
+            if not (self.path / INSTANCE_META).is_file():
+                utils.write_json(self.path / INSTANCE_META, {
+                    "name": self.name, "mc_version": None, "modpack": None,
+                    "java": JAVA_AUTO, **({} if not meta else meta),
+                })
+            return
         if self.path.is_dir():
             raise InstanceError(f"实例 {self.name} 已存在。")
         utils.ensure_dir(self.path)
@@ -103,15 +162,18 @@ class Instance:
         utils.write_json(self.path / INSTANCE_META, data)
 
     def delete(self):
+        if self.is_root:
+            raise InstanceError("游戏目录不能删除，请到「版本管理」里逐个卸载版本。")
         if not self.path.is_dir():
             raise InstanceError(f"实例 {self.name} 不存在。")
         utils.remove_tree(self.path)
         if CONFIG.get("default_instance") == self.name:
-            names = list_instances()
-            CONFIG.set("default_instance", names[0] if names else "default")
+            CONFIG.set("default_instance", "")
             CONFIG.save()
 
     def rename(self, new_name):
+        if self.is_root:
+            raise InstanceError("游戏目录不能重命名，请到设置里改「游戏目录」。")
         new_path = get_instance_path(new_name)
         if new_path.exists():
             raise InstanceError(f"实例 {new_name} 已存在。")

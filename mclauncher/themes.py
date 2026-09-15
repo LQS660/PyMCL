@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """主题包体系：保存/加载/管理完整主题配置。
 
-一个主题包包含：颜色、深色模式、背景图路径。
+一个主题包包含：颜色、深色模式、壁纸路径、侧栏不透明度。
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import utils
-from .config import CONFIG
+from .config import CONFIG, push_background_history
 
 THEMES_DIR = "themes"
 THEME_EXT = ".json"
@@ -39,6 +39,12 @@ def _current_theme() -> dict:
         "theme_color": CONFIG.get("theme_color", "#2E9B6B"),
         "ui_dark": bool(CONFIG.get("ui_dark", False)),
         "ui_background": CONFIG.get("ui_background", ""),
+        "ui_sidebar_opacity": CONFIG.get("ui_sidebar_opacity", 100),
+        "ui_background_blur": CONFIG.get("ui_background_blur", 0),
+        "ui_background_dim": CONFIG.get("ui_background_dim", 0),
+        "ui_background_folder": CONFIG.get("ui_background_folder", ""),
+        "ui_background_shuffle": CONFIG.get("ui_background_shuffle", False),
+        "ui_background_interval": CONFIG.get("ui_background_interval", 10),
         "window_mode": CONFIG.get("window_mode", "window"),
         "custom_homepage": CONFIG.get("custom_homepage", ""),
         "homepage_mode": CONFIG.get("homepage_mode", "news"),
@@ -82,10 +88,22 @@ def load_theme(name: str) -> dict:
     if not isinstance(theme, dict):
         raise ValueError(f"主题包数据损坏: {name}")
     updates = {}
-    for key in ("theme_color", "ui_dark", "ui_background", "window_mode",
-                 "custom_homepage", "homepage_mode"):
+    for key in ("theme_color", "ui_dark", "ui_background", "ui_sidebar_opacity",
+                "ui_background_blur", "ui_background_dim", "ui_background_folder",
+                "ui_background_shuffle", "ui_background_interval",
+                "window_mode", "custom_homepage", "homepage_mode"):
         if key in theme:
             updates[key] = theme[key]
+    # 主题包换壁纸也得能撤销。这条路径直接写 CONFIG、绕开了 save_settings，
+    # 不在这儿补一次，用主题包换掉的那张就退不回来了。
+    old = (str(CONFIG.get("ui_background") or ""),
+           str(CONFIG.get("ui_background_folder") or ""))
+    new = (str(updates.get("ui_background", old[0]) or ""),
+           str(updates.get("ui_background_folder", old[1]) or ""))
+    if new != old:
+        images, folders = push_background_history(*old)
+        updates["ui_background_history"] = images
+        updates["ui_background_folder_history"] = folders
     if updates:
         CONFIG.update(updates)
         CONFIG.save()

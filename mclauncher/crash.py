@@ -486,6 +486,8 @@ class _Analyzer:
             if "com.electronwill.nightconfig.core.io.ParsingException: Not enough data available" in mc \
                     and "mod_config" not in self.reasons:
                 self.append("nightconfig")
+            if "error remapping game jars" in mc:
+                self.append("fabric_remap", seek(mc, r"(?<=the jar file ).+?(?= can't be written)"))
             if "Cannot find launch target fmlclient, unable to launch" in mc:
                 self.append("forge_incomplete")
             if "Invalid paths argument, contained no existing paths" in mc and r"libraries\net\minecraftforge\fmlcore" in mc:
@@ -850,6 +852,18 @@ def _fmt_reason(code: str, extra: list[str], log_all: str, manual: bool) -> tupl
         "no_files": (
             "你的游戏出现了一些问题，但未能找到相关记录文件，因此无法继续分析。", True),
     }
+    if code == "fabric_remap":
+        where = f"\n写不进去的文件：{one}\n" if one else "\n"
+        return (
+            "Fabric / Quilt 首次启动要在版本目录下生成重映射后的游戏 jar，这一步写文件失败了。"
+            + where +
+            "\n常见原因：\n"
+            " - 杀毒软件（火绒、360 等）拦截了 javaw 写入；\n"
+            " - 游戏目录没有写入权限，或磁盘空间不足；\n"
+            " - 系统卷信息异常：Java 查不到目录属于哪个盘，于是把所有目录都当成只读。\n"
+            "   命令行执行 mountvol，如果列不出任何装入点，就是这种情况，重启电脑一般能恢复。\n\n"
+            "可以依次尝试：把启动器和游戏目录加入杀毒软件白名单、删掉版本目录下的 .fabric "
+            "文件夹后重启电脑再启动、把游戏目录换到别的位置。", True)
     if code in table:
         return table[code]
 
@@ -1030,6 +1044,7 @@ def _title_of(reasons: dict) -> str:
         "mod_certain": "Mod 导致崩溃",
         "mixin": "Mod 注入失败",
         "fabric_solution": "Fabric 报错",
+        "fabric_remap": "Fabric 无法生成游戏 jar",
         "forge_error": "Forge 报错",
         "mod_dup": "Mod 重复安装",
         "mod_missing": "缺少前置 Mod",

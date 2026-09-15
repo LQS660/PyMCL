@@ -35,7 +35,12 @@ LAYOUT_VERSION = 1
 # skin 只有 eziapp 会渲染；Qt 遇到不认识的类型直接跳过，放在这里是为了
 # 两边导入/校验时用同一张白名单，eziapp 存的皮肤卡不会被 Qt 的导入丢掉。
 CARD_MIN_SIZE: dict[str, tuple[int, int]] = {
-    "banner": (340, 150),
+    # 横幅 125：卡片本体最小高 = 这里 + 标题栏 40 = 165，扣掉正文宿主的
+    # 16px 上下边距正好 149，压着渐变 Hero 自己那 148（量出来的：上下各 26 的
+    # 边距 + kicker 16 + 6 + 大标题 39 + 6 + 副标题 17）。横幅里只剩渐变 Hero
+    # （启动/停止按钮、进度条、状态行都在启动坞），再给高就多余；矮窗口下
+    # 过高的下限会顶过比例高度，把下面那张卡压掉一截。
+    "banner": (340, 125),
     "config": (330, 300),
     "log": (260, 180),
     "news": (220, 180),
@@ -154,7 +159,10 @@ class LayoutDoc:
             for row in raw:
                 if isinstance(row, dict):
                     doc.items.append(LayoutItem.from_dict(row))
-        if not doc.items:
+        if not doc.items and not isinstance(raw, list):
+            # items 缺失 / 不是列表 = 这份数据压根不是布局文档，回落默认。
+            # 显式的空列表是用户自己把卡片删光了，照原样留着——换成默认布局
+            # 等于下次开机又给他塞回四张卡。
             return default_doc()
         doc.normalize()
         return doc
@@ -191,12 +199,21 @@ class LayoutDoc:
 
 
 def default_doc() -> LayoutDoc:
-    """内置默认布局：还原改造前启动页的版式（横幅通栏 + 三栏）。"""
+    """内置默认布局：横幅通栏 + 左侧启动配置，其余留空。
+
+    实时日志和新闻都不在出厂版式里，想要的人自己在「编辑布局 → 添加卡片」
+    里加回来（两种类型仍在 CARD_MIN_SIZE 白名单内，加回来还落在各自那一栏）。
+    空出来的右半边留给启动页右下角的启动坞（LaunchPage._build_launch_dock）
+    ——那块空着，坞才一张卡都不压。
+
+    启动/停止按钮也不在这几张卡片里，卡片被用户删光了照样能开游戏。
+    """
+    # 横幅 0.30 而不是 0.26：0.26 在矮窗口里换算出来比横幅卡的最小高（165）还
+    # 小，会被下限顶出去、压住下面那张卡。0.30 让比例高度在 1180x600 上就已经
+    # 够到下限，四档常见窗口高度下两张卡都隔着 4~10px 不挨着。
     return LayoutDoc([
-        LayoutItem("banner", 0.0, 0.0, 1.0, 0.26, item_id="banner-main", z=0),
-        LayoutItem("config", 0.0, 0.275, 0.315, 0.725, item_id="config-main", z=1),
-        LayoutItem("log", 0.325, 0.275, 0.41, 0.725, item_id="log-main", z=2),
-        LayoutItem("news", 0.745, 0.275, 0.255, 0.725, item_id="news-main", z=3),
+        LayoutItem("banner", 0.0, 0.0, 1.0, 0.30, item_id="banner-main", z=0),
+        LayoutItem("config", 0.0, 0.315, 0.315, 0.685, item_id="config-main", z=1),
     ], grid=8)
 
 

@@ -7,7 +7,9 @@
 - 本地 .jar 模组导入
 - 实例 mods 目录管理（列表 / 删除）
 """
+import difflib
 import json
+import math
 import re
 import shutil
 from pathlib import Path
@@ -120,9 +122,13 @@ def _mr_facets(project_type, game_version=None, categories=None):
 
 
 def search_mods(dm: DownloadManager, query, limit=30, game_version=None, categories=None):
-    """搜索 Modrinth 模组（project_type:mod），官方与镜像短超时轮询。"""
+    """搜索 Modrinth 模组（project_type:mod），官方与镜像短超时轮询。
+
+    空查询是「按下载量出热门榜」，query 必须真的留空——传一个空格进去
+    Modrinth 会当成搜一个空格，两边镜像都稳定返回 0 条。
+    """
     params = {
-        "query": query or " ",
+        "query": (query or "").strip(),
         "facets": _mr_facets("mod", game_version, categories),
         "limit": limit,
         "index": "relevance" if (query or "").strip() else "downloads",
@@ -274,7 +280,7 @@ def search_mods_chinese(dm: DownloadManager, query, limit=30, api_key=None):
                                       class_id=CF_CLASS_MOD))
     except Exception as e:
         utils.log.warning("中文搜索回退 CurseForge 失败: %s", e)
-    return hits[:limit]
+    return rank_hits(hits, q, "mod")[:limit]
 
 
 def _alias_to_modrinth_hits(dm: DownloadManager, slug, title=None, limit=30):
@@ -316,6 +322,83 @@ def _alias_to_cf_hits(dm: DownloadManager, cf_id, title=None, api_key=None):
     except Exception as e:
         utils.log.warning("CurseForge 项目 %s 查询失败: %s", cf_id, e)
         return []
+
+
+# ================================================================ 多源结果排序
+
+# 两个平台的下载量不在一个量级：同一个 mod 在 CurseForge 的计数通常是
+# Modrinth 的好几倍，直接比大小会让 Modrinth 的结果整体沉底。系数与
+# PCL2 的 Modules/Resource/ResourceSearcher.vb::GetDownloadCountMult 对齐。
+PLATFORM_WEIGHT = {
+    "mod": {"curseforge": 1.0, "modrinth": 5.0},
+    "modpack": {"curseforge": 1.0, "modrinth": 5.0},
+    "datapack": {"curseforge": 10.0, "modrinth": 1.0},
+    "resourcepack": {"curseforge": 1.0, "modrinth": 4.0},
+    "shader": {"curseforge": 1.0, "modrinth": 4.0},
+}
+
+# log10(折算下载量) / POPULARITY_DIVISOR：10 亿下载正好折成 1 分，
+# 与一次满分的名称匹配等价，所以热门度永远压不过名字对上了。
+POPULARITY_DIVISOR = 9.0
+ALIAS_BONUS = 0.2
+DESCRIPTION_WEIGHT = 0.05
+
+
+def weighted_downloads(hit, kind="mod"):
+    """把不同平台的下载量折算到同一把尺子上。"""
+    weights = PLATFORM_WEIGHT.get(kind) or PLATFORM_WEIGHT["mod"]
+    mult = weights.get(str(hit.get("source") or "").lower(), 1.0)
+    try:
+        downloads = float(hit.get("downloads") or 0)
+    except (TypeError, ValueError):
+        downloads = 0.0
+    return max(downloads, 0.0) * mult
+
+
+def _similarity(text, query):
+    text = str(text or "").strip().lower()
+    if not text or not query:
+        return 0.0
+    if text == query:
+        return 1.0
+    if query in text:
+        # 子串命中按被覆盖的比例给分：名字越短说明命中得越准。
+        return 0.8 + 0.2 * len(query) / len(text)
+    return difflib.SequenceMatcher(None, query, text).ratio()
+
+
+def rank_hits(hits, query="", kind="mod"):
+    """把多个来源拼起来的搜索结果重排成一个统一的顺序。
+
+    空查询时纯按折算后的下载量降序，也就是「热门推荐」。有查询词时排序分 =
+    相对相似度（最高 1）+ log10(折算下载量) / 9 + 命中中文别名 0.2。
+    """
+    rows = [h for h in hits if isinstance(h, dict)]
+    q = (query or "").strip().lower()
+    if not rows:
+        return []
+    if not q:
+        return sorted(rows, key=lambda h: weighted_downloads(h, kind), reverse=True)
+
+    sims = []
+    for hit in rows:
+        sims.append(max(
+            _similarity(hit.get("title") or hit.get("name"), q),
+            _similarity(hit.get("slug"), q),
+            DESCRIPTION_WEIGHT * _similarity(
+                hit.get("description") or hit.get("summary"), q),
+        ))
+    best = max(sims) or 1.0
+
+    scored = []
+    for hit, sim in zip(rows, sims):
+        score = sim / best
+        score += math.log10(max(weighted_downloads(hit, kind), 1.0)) / POPULARITY_DIVISOR
+        if hit.get("matched_alias"):
+            score += ALIAS_BONUS
+        scored.append((score, hit))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [hit for _score, hit in scored]
 
 
 # ================================================================ 实例信息检测
@@ -489,6 +572,8 @@ CF_CLASS_SHADER = 6552
 CF_CLASS_DATAPACK = 6945
 CF_CLASS_WORLD = 17
 
+CF_MAX_PAGE_SIZE = 50     # 官方硬上限，超一个都是 400
+
 
 def _cf_api_headers(api_key=None):
     """官方 API 标准请求头。"""
@@ -651,8 +736,11 @@ def search_curseforge(dm: DownloadManager, query=None, limit=30, api_key=None,
     params = {
         "gameId": 432,
         "classId": class_id,
-        "sortField": 2,      # 按人气排序
-        "pageSize": limit * 2 if categories else limit,
+        "sortField": 2,          # 按人气排序
+        "sortOrder": "desc",     # 缺省是升序，漏了会把最冷门的排到最前面
+        # 分类是拉回来再本地过滤的，所以多取一些；但 CurseForge 的上限就是 50，
+        # 超了整个请求直接 400，分类筛选会变成一页空白。
+        "pageSize": min(CF_MAX_PAGE_SIZE, limit * 2 if categories else limit),
         "index": 0,
     }
     if query:
@@ -929,7 +1017,7 @@ def search_modrinth_projects(dm: DownloadManager, query, project_type, limit=30,
                              game_version=None, categories=None):
     """按 project_type 搜 Modrinth（shader / resourcepack / datapack / mod）。"""
     params = {
-        "query": query or " ",
+        "query": (query or "").strip(),
         "facets": _mr_facets(project_type, game_version, categories),
         "limit": limit,
         "index": "relevance" if (query or "").strip() else "downloads",

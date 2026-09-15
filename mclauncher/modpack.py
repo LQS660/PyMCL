@@ -184,7 +184,7 @@ def resolve_cf_modpack_file(dm: DownloadManager, addon_id, api_key=None, cf_slug
 
 def install_cf_modpack(dm: DownloadManager, addon_id, instance: Instance,
                        api_key=None, on_progress=None, cancel=None, cf_slug=None,
-                       file_id=None):
+                       file_id=None, isolate=False, version_name=""):
     """安装 CurseForge 整合包：解析最新文件后下载 zip，再复用 install_cf_zip。"""
     from .mods import _cf_download_urls, cf_files
 
@@ -235,7 +235,8 @@ def install_cf_modpack(dm: DownloadManager, addon_id, instance: Instance,
     else:
         raise ModpackError(f"整合包下载失败: {last_err}")
     try:
-        return install_cf_zip(dm, tmp, instance, on_progress=on_progress, cancel=cancel)
+        return install_cf_zip(dm, tmp, instance, on_progress=on_progress, cancel=cancel,
+                              isolate=isolate, version_name=version_name)
     finally:
         try:
             tmp.unlink(missing_ok=True)
@@ -418,10 +419,10 @@ def modrinth_search(dm: DownloadManager, query, limit=25,
 
     facets = _mr_facets("modpack", game_version, categories)
     params = {
-        "query": query,
+        "query": (query or "").strip(),
         "facets": facets,
         "limit": limit,
-        "index": "relevance",
+        "index": "relevance" if (query or "").strip() else "downloads",
     }
     if categories:
         cats = category_facets(categories[0] if len(categories) == 1 else "")
@@ -631,6 +632,31 @@ def _plain_pack_version(root: Path):
     return plain
 
 
+def _prepare_target_version(instance: Instance, version_id, version_name="", isolate=False,
+                            on_progress=None):
+    """定下整合包这一版最终叫什么、内容往哪写，返回 (版本 id, 内容根目录)。
+
+    改名要趁加载器刚装完、版本目录里还只有一个 json 的时候做：等模组下完再改，
+    rename_version 是整目录复制，几百兆的 mods 要白搬一趟。
+    隔离同理——先开好，模组才会直接落进这个版本自己的 mods。
+    """
+    from . import version_ops, version_settings as vs
+
+    vid = version_id or ""
+    want = str(version_name or "").strip()
+    if vid and want and want != vid:
+        target = version_ops.unique_id(instance, want)
+        vid = version_ops.rename_version(instance, vid, target)
+        _emit(on_progress, f"版本命名为 {vid}")
+    if not vid or not isolate:
+        return vid, Path(instance.path)
+    # 整合包转独立不带种子：别把大锅饭里别人的模组拖进来
+    vs.set_isolation(instance, vid, vs.ISOLATION_ALL, seed=False)
+    root = Path(vs.game_dir(instance, vid))
+    _emit(on_progress, f"版本 {vid} 设为完全独立，整合包内容写进 {root}")
+    return vid, root
+
+
 def _resolve_pack_minecraft(dm, declared, on_progress=None):
     """整合包声明的 MC 版本 -> 官方可安装版本。"""
     if not declared:
@@ -650,7 +676,7 @@ def _resolve_pack_minecraft(dm, declared, on_progress=None):
 
 def install_mrpack_by_slug(dm: DownloadManager, slug, instance: Instance,
                            on_progress=None, cancel=None, force=False, java=None,
-                           version_id=None):
+                           version_id=None, isolate=False, version_name=""):
     """通过 Modrinth slug 安装整合包；某个包版本装不上就自动换下一个。"""
     proj = modrinth_project(dm, slug)
     title = proj.get("title") or slug
@@ -685,7 +711,8 @@ def install_mrpack_by_slug(dm: DownloadManager, slug, instance: Instance,
         try:
             return install_mrpack(dm, pack_file.get("url"), instance,
                                   on_progress=on_progress, cancel=cancel,
-                                  force=force, java=java)
+                                  force=force, java=java,
+                                  isolate=isolate, version_name=version_name)
         except (ModpackError, InstallError, manifest_mod.VersionNotFound) as e:
             last_err = e
             _emit(on_progress, f"{label} 安装失败: {e}")
@@ -695,6 +722,46 @@ def install_mrpack_by_slug(dm: DownloadManager, slug, instance: Instance,
                 break
             _emit(on_progress, "该版本装不上，尝试下一个整合包版本…")
     raise ModpackError(f"「{title}」多个版本均无法安装: {last_err}")
+
+
+def _has_mrpack_index(path: Path) -> bool:
+    """这个包（压缩包或目录）里有没有 modrinth.index.json。"""
+    if path.is_dir():
+        return ((path / "modrinth.index.json").is_file()
+                or _nested_marker_root(path, "modrinth.index.json") is not None)
+    try:
+        with zipfile.ZipFile(path) as zf:
+            return any(n.split("/")[-1] == "modrinth.index.json"
+                       and len(n.split("/")) <= 4 for n in zf.namelist())
+    except (zipfile.BadZipFile, OSError):
+        return False
+
+
+def install_local_pack(dm: DownloadManager, source, instance: Instance,
+                       on_progress=None, cancel=None, force=False, java=None,
+                       isolate=False, version_name=""):
+    """本地整合包统一入口：.mrpack / CurseForge zip / 直接压缩的 .minecraft，
+    以及这三种已经解开的目录。
+
+    按包里的索引文件挑安装器，不按后缀——改过名的 .mrpack 走 zip 那条路
+    只会撞上「缺少 manifest.json」。
+    """
+    p = Path(str(source))
+    if not p.exists():
+        raise ModpackError(f"找不到整合包: {source}")
+    game_root = getattr(instance, "path", None)
+    if p.is_dir() and game_root is not None:
+        root = Path(game_root).resolve()
+        target = p.resolve()
+        # 把游戏目录自己（或它里面的目录）当整合包导入，就是拿自己往自己里面拷
+        if target == root or root in target.parents:
+            raise ModpackError(f"{p} 就在游戏目录里，不能当整合包导入")
+        # 反过来套也一样：游戏目录在这个文件夹里面，拷贝的落点就在源目录内，越拷越多
+        if target in root.parents:
+            raise ModpackError(f"游戏目录在 {p} 里面，不能把它当整合包导入")
+    fn = install_mrpack if _has_mrpack_index(p) else install_cf_zip
+    return fn(dm, str(p), instance, on_progress=on_progress, cancel=cancel,
+              force=force, java=java, isolate=isolate, version_name=version_name)
 
 
 def _fetch_mrpack(dm: DownloadManager, source):
@@ -710,18 +777,29 @@ def _fetch_mrpack(dm: DownloadManager, source):
 
 
 def install_mrpack(dm: DownloadManager, source, instance: Instance,
-                   on_progress=None, cancel=None, force=False, java=None):
-    """安装 .mrpack 整合包到指定实例。"""
+                   on_progress=None, cancel=None, force=False, java=None,
+                   isolate=False, version_name=""):
+    """安装 .mrpack 整合包到指定实例。source 也可以是已经解开的包目录。
+
+    isolate：把这一版设成完全独立，整合包内容写进版本自己的目录。
+    version_name：给装出来的版本改个名（空则沿用加载器给的 id）。
+    """
     downloaded = bool(re.match(r"^https?://", str(source)))
+    unpacked = not downloaded and Path(str(source)).is_dir()
     _emit(on_progress, f"{'下载' if downloaded else '读取'}整合包: {source}")
-    pack_path = _fetch_mrpack(dm, source)
-    _emit(on_progress, f"解压整合包 {Path(pack_path).name}")
-    tmpdir = Path(tempfile.mkdtemp(prefix="pymcl_mrpack_"))
+    if unpacked:
+        # 拖进来的就是解开的包目录：原地读，别删人家的文件夹
+        pack_path = tmpdir = Path(str(source))
+    else:
+        pack_path = _fetch_mrpack(dm, source)
+        _emit(on_progress, f"解压整合包 {Path(pack_path).name}")
+        tmpdir = Path(tempfile.mkdtemp(prefix="pymcl_mrpack_"))
     try:
-        try:
-            utils.safe_extract_zip(pack_path, tmpdir)
-        except (zipfile.BadZipFile, ValueError) as e:
-            raise ModpackError(f"不是有效的 mrpack 文件: {e}")
+        if not unpacked:
+            try:
+                utils.safe_extract_zip(pack_path, tmpdir)
+            except (zipfile.BadZipFile, ValueError) as e:
+                raise ModpackError(f"不是有效的 mrpack 文件: {e}")
 
         pack_root = tmpdir
         index_file = tmpdir / "modrinth.index.json"
@@ -791,6 +869,9 @@ def install_mrpack(dm: DownloadManager, source, instance: Instance,
         else:
             _emit(on_progress, "整合包未声明 Forge/Fabric/Quilt/NeoForge，仅安装原版")
 
+        vid, content_root = _prepare_target_version(
+            instance, loader_vid or mc_version, version_name, isolate, on_progress)
+
         # 整合包文件：每个文件一条任务，镜像失败立刻换官方 CDN（不要拆成两个会互相计失败的任务）
         from .mods import modrinth_download_urls
         tasks = []
@@ -803,9 +884,9 @@ def install_mrpack(dm: DownloadManager, source, instance: Instance,
             downloads = [u for u in (f.get("downloads") or []) if u]
             if not rel or not downloads:
                 continue
-            dest = (instance.path / rel).resolve()
+            dest = (content_root / rel).resolve()
             # 防路径穿越
-            if not str(dest).startswith(str(instance.path.resolve()) + os.sep):
+            if not str(dest).startswith(str(content_root.resolve()) + os.sep):
                 raise ModpackError(f"整合包文件路径非法: {rel}")
             hashes = f.get("hashes") or {}
             tasks.append((
@@ -832,23 +913,25 @@ def install_mrpack(dm: DownloadManager, source, instance: Instance,
             src = pack_root / overrides_dir
             if src.is_dir():
                 _emit(on_progress, f"复制 {overrides_dir}")
-                _copy_tree_over(src, instance.path)
+                _copy_tree_over(src, content_root)
                 break
 
         pack_meta = {
             "name": idx.get("name", Path(pack_path).stem),
             "version": idx.get("versionId"),
             "mc_version": mc_version,
+            "version_id": vid,
             "loader": f"{loader}-{deps.get(loader)}" if loader else None,
             "source": "modrinth",
             "instance": instance.name,
         }
         instance.set_meta("modpack", pack_meta)
-        instance.set_meta("mc_version", loader_vid or mc_version)
+        instance.set_meta("mc_version", vid)
         _emit(on_progress, f"整合包 {pack_meta['name']} 安装完成 -> 实例 {instance.name}")
         return pack_meta
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        if not unpacked:
+            shutil.rmtree(tmpdir, ignore_errors=True)
         if downloaded:
             try:
                 pack_path.unlink(missing_ok=True)
@@ -859,9 +942,14 @@ def install_mrpack(dm: DownloadManager, source, instance: Instance,
 # ================================================================ CurseForge
 
 def install_cf_zip(dm: DownloadManager, source, instance: Instance,
-                   on_progress=None, cancel=None, force=False, java=None):
-    """安装 CurseForge 整合包 zip（本地文件或直链）。"""
+                   on_progress=None, cancel=None, force=False, java=None,
+                   isolate=False, version_name=""):
+    """安装 CurseForge 整合包 zip（本地文件、直链，或已经解开的包目录）。
+
+    isolate / version_name 的含义同 install_mrpack。
+    """
     downloaded = False
+    unpacked = False
     if re.match(r"^https?://", str(source)):
         tmp = Path(tempfile.gettempdir()) / f"pymcl_cfpack_{abs(hash(str(source)))}.zip"
         dm.download(str(source), tmp, timeout=900)
@@ -869,15 +957,19 @@ def install_cf_zip(dm: DownloadManager, source, instance: Instance,
         downloaded = True
     else:
         pack_path = Path(source)
-        if not pack_path.is_file():
+        if pack_path.is_dir():
+            # 拖进来的就是解开的包目录：原地读，别删人家的文件夹
+            unpacked = True
+        elif not pack_path.is_file():
             raise ModpackError(f"找不到整合包文件: {source}")
 
-    tmpdir = Path(tempfile.mkdtemp(prefix="pymcl_cfpack_"))
+    tmpdir = pack_path if unpacked else Path(tempfile.mkdtemp(prefix="pymcl_cfpack_"))
     try:
-        try:
-            utils.safe_extract_zip(pack_path, tmpdir)
-        except (zipfile.BadZipFile, ValueError) as e:
-            raise ModpackError(f"不是有效的整合包 zip: {e}")
+        if not unpacked:
+            try:
+                utils.safe_extract_zip(pack_path, tmpdir)
+            except (zipfile.BadZipFile, ValueError) as e:
+                raise ModpackError(f"不是有效的整合包 zip: {e}")
 
         manifest_file = tmpdir / "manifest.json"
         pack_root = tmpdir
@@ -891,7 +983,8 @@ def install_cf_zip(dm: DownloadManager, source, instance: Instance,
             # 没有 manifest.json：按“直接压缩的 .minecraft 目录”整合包安装
             return _install_plain_zip(dm, tmpdir, instance, pack_path,
                                       on_progress=on_progress, cancel=cancel,
-                                      force=force, java=java)
+                                      force=force, java=java,
+                                      isolate=isolate, version_name=version_name)
         mf = utils.read_json(manifest_file, None) or {}
         if mf.get("manifestType") != "minecraftModpack":
             raise ModpackError("manifest.json 不是 minecraftModpack 类型")
@@ -933,6 +1026,9 @@ def install_cf_zip(dm: DownloadManager, source, instance: Instance,
         loader_vid = install_loader(installer, loader, loader_version, mc_version, force=force)
         _emit(on_progress, f"加载器安装完成: {loader_vid}")
 
+        vid, content_root = _prepare_target_version(
+            instance, loader_vid or mc_version, version_name, isolate, on_progress)
+
         # mods 文件：先批量查元数据，再用 CDN 直链（官网 /download 会被 Cloudflare 403）
         from .mods import cf_files_by_ids, cf_mod_download_urls
         raw_files = [f for f in (mf.get("files") or []) if f.get("projectID") and f.get("fileID")]
@@ -949,7 +1045,7 @@ def install_cf_zip(dm: DownloadManager, source, instance: Instance,
             filename = info.get("fileName")
             download_url = info.get("downloadUrl")
             dest_name = filename or f"mod-{pid}-{fid}.jar"
-            dest = instance.path / "mods" / dest_name
+            dest = content_root / "mods" / dest_name
             sha1 = None
             for h in info.get("hashes") or []:
                 if h.get("algo") == 1 and h.get("value"):
@@ -968,22 +1064,24 @@ def install_cf_zip(dm: DownloadManager, source, instance: Instance,
         if overrides:
             src = pack_root / overrides
             if src.is_dir():
-                _copy_tree_over(src, instance.path)
+                _copy_tree_over(src, content_root)
 
         pack_meta = {
             "name": mf.get("name", Path(pack_path).stem),
             "version": mf.get("version", "?"),
             "mc_version": mc_version,
+            "version_id": vid,
             "loader": loader_id,
             "source": "curseforge",
             "instance": instance.name,
         }
         instance.set_meta("modpack", pack_meta)
-        instance.set_meta("mc_version", loader_vid or mc_version)
+        instance.set_meta("mc_version", vid)
         _emit(on_progress, f"整合包 {pack_meta['name']} 安装完成 -> 实例 {instance.name}")
         return pack_meta
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        if not unpacked:
+            shutil.rmtree(tmpdir, ignore_errors=True)
         if downloaded:
             try:
                 pack_path.unlink(missing_ok=True)
@@ -1020,7 +1118,8 @@ def _copy_mc_tree(root: Path, dest: Path):
 
 
 def _install_plain_zip(dm: DownloadManager, tmpdir: Path, instance: Instance, pack_path,
-                       on_progress=None, cancel=None, force=False, java=None):
+                       on_progress=None, cancel=None, force=False, java=None,
+                       isolate=False, version_name=""):
     """没有 manifest.json 的 zip：按“直接压缩的 .minecraft 目录”整合包安装。
 
     版本与加载器从 zip 里 versions/<名>/<名>.json 推断；装好后其余目录
@@ -1071,17 +1170,21 @@ def _install_plain_zip(dm: DownloadManager, tmpdir: Path, instance: Instance, pa
         else:
             _emit(on_progress, "未识别到 Forge/Fabric 加载器，按原版安装（mods 不会被加载）")
 
-    _copy_mc_tree(root, instance.path)
+    vid, content_root = _prepare_target_version(
+        instance, loader_vid or mc_version, version_name, isolate, on_progress)
+
+    _copy_mc_tree(root, content_root)
     pack_meta = {
         "name": Path(pack_path).stem,
         "version": "?",
         "mc_version": mc_version or None,
+        "version_id": vid,
         "loader": (f"{loader}-{loader_version}" if loader else "vanilla"),
         "source": "plain-zip",
         "instance": instance.name,
     }
     instance.set_meta("modpack", pack_meta)
-    instance.set_meta("mc_version", loader_vid or mc_version or "")
+    instance.set_meta("mc_version", vid or "")
     _emit(on_progress, f"整合包 {pack_meta['name']} 安装完成 -> 实例 {instance.name}")
     return pack_meta
 

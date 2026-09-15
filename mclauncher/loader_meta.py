@@ -117,8 +117,8 @@ def neoforge_prefix(mc_version: str) -> str:
 def filter_neoforge_versions(versions, mc_version: str) -> list[str]:
     """从 maven 全量版本里挑出属于该 MC 版本的构建，挑不出就返回空。
 
-    以前只认 NEOFORGE_MC_MAP（写死到 1.21.1），更新的 MC 会让 prefix=None
-    从而**完全不过滤**，把所有 MC 版本的 NeoForge 构建都列进下拉框，
+    不能只认 NEOFORGE_MC_MAP（写死到 1.21.1）：更新的 MC 会让 prefix=None，
+    若因此**完全不过滤**，所有 MC 版本的 NeoForge 构建都会列进下拉框，
     用户随手选一条就是版本错配。宁可只留「最新」交给安装器自己解析。
     """
     vers = [str(v).strip() for v in (versions or []) if str(v).strip()]

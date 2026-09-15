@@ -121,7 +121,7 @@ def write_apply_script(package: str, exe: Path) -> Path:
 def apply_exe(package: str, spawn: bool = True) -> str:
     """写替换脚本并把它拉起来。
 
-    以前这里只写了个 bat 就返回路径，没人执行、进程也不退出：
+    写完 bat 必须真的拉起它并退出本进程：只写不执行的话，
     「检查更新」下完一个包，然后什么都没发生。
     """
     exe = Path(sys.argv[0]).resolve()

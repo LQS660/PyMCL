@@ -12,9 +12,12 @@ from . import utils
 # requests 只在真正联网（微软登录）时才 import；AccountManager 本身只读写
 # 本地 JSON，backend 在 GUI 启动路径上就会构造它，不能被 requests 拖慢。
 
-# 微软 OAuth 端点
-MS_DEVICE_CODE_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
-MS_TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
+# 微软 OAuth 端点。用的是 login.live.com 老端点而不是 Azure AD v2：AAD 只认在
+# Azure 里注册过的 GUID 客户端 ID，默认那个官方启动器 ID 送过去会被 AADSTS700016
+# 拒掉。换成自己的 Azure 应用（还要 Mojang 批准接入 Minecraft API）时才该切回 AAD。
+MS_DEVICE_CODE_URL = "https://login.live.com/oauth20_connect.srf"
+MS_TOKEN_URL = "https://login.live.com/oauth20_token.srf"
+MS_SCOPE = "service::user.auth.xboxlive.com::MBI_SSL"
 XBL_AUTH_URL = "https://user.auth.xboxlive.com/user/authenticate"
 XSTS_AUTH_URL = "https://xsts.auth.xboxlive.com/xsts/authorize"
 MC_LOGIN_URL = "https://api.minecraftservices.com/authentication/login_with_xbox"
@@ -221,7 +224,8 @@ class MicrosoftAuthenticator:
             MS_DEVICE_CODE_URL,
             data={
                 "client_id": self.client_id,
-                "scope": "XboxLive.signin offline_access",
+                "scope": MS_SCOPE,
+                "response_type": "device_code",
             },
             timeout=self.timeout,
         )
@@ -278,22 +282,29 @@ class MicrosoftAuthenticator:
 
     # ---- 第 3 步：Xbox Live 认证
     def xbl_authenticate(self, ms_token):
-        resp = self.session.post(
-            XBL_AUTH_URL,
-            json={
-                "Properties": {
-                    "AuthMethod": "RPS",
-                    "SiteName": "user.auth.xboxlive.com",
-                    "RpsTicket": "d=" + ms_token,
+        # MBI_SSL 令牌直接当票据用，Azure AD 令牌要带 d= 前缀，而同一个账号换台机器
+        # 回来的形态也未必一样，所以按顺序试，第一个 200 为准。
+        if ms_token.startswith(("d=", "t=")):
+            tickets = [ms_token]
+        else:
+            tickets = [ms_token, "d=" + ms_token]
+        for ticket in tickets:
+            resp = self.session.post(
+                XBL_AUTH_URL,
+                json={
+                    "Properties": {
+                        "AuthMethod": "RPS",
+                        "SiteName": "user.auth.xboxlive.com",
+                        "RpsTicket": ticket,
+                    },
+                    "RelyingParty": "http://auth.xboxlive.com",
+                    "TokenType": "JWT",
                 },
-                "RelyingParty": "http://auth.xboxlive.com",
-                "TokenType": "JWT",
-            },
-            timeout=self.timeout,
-        )
-        if resp.status_code != 200:
-            raise AuthError(f"Xbox Live 认证失败 (HTTP {resp.status_code})")
-        return resp.json()["Token"]
+                timeout=self.timeout,
+            )
+            if resp.status_code == 200:
+                return resp.json()["Token"]
+        raise AuthError(f"Xbox Live 认证失败 (HTTP {resp.status_code})")
 
     # ---- 第 4 步：XSTS 认证
     def xsts_authenticate(self, xbl_token):
@@ -340,11 +351,12 @@ class MicrosoftAuthenticator:
         )
         if resp.status_code != 200:
             raise AuthError(f"检查正版资格失败 (HTTP {resp.status_code})")
-        items = resp.json().get("items", [])
+        items = resp.json().get("items") or []
+        if not items:
+            raise AuthError("该账号尚未购买正版 Minecraft，或 Xbox Game Pass 已到期。")
         names = {item.get("name") for item in items if isinstance(item, dict)}
-        if names & _OWNED_ITEMS:
-            return True
-        if names:
+        if not names & _OWNED_ITEMS:
+            # 条目名字会随 XGP、捆绑包变，认不出来不等于没买，交给档案接口定夺
             utils.log.warning("entitlements 未包含已知 Java 项，改由档案接口判定: %s", names)
         return True
 
@@ -408,7 +420,7 @@ class MicrosoftAuthenticator:
                 "grant_type": "refresh_token",
                 "client_id": self.client_id,
                 "refresh_token": account["refresh_token"],
-                "scope": "XboxLive.signin offline_access",
+                "scope": MS_SCOPE,
             },
             timeout=self.timeout,
         )

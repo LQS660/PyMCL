@@ -136,10 +136,28 @@ def resolve_launch_java(version_json, prefer=None, dm=None, on_progress=None, on
     return exe
 
 
+def _take_java(home: Path, results, seen) -> bool:
+    """home 要是个 Java 家目录（或 bin 目录本身），就把它的 java 可执行文件收下。"""
+    for base in (Path(home) / "bin", Path(home)):
+        for exe_name in ("java.exe", "java", "javaw.exe"):
+            exe = base / exe_name
+            if exe.is_file():
+                key = str(exe.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    results.append(exe)
+                return True
+    return False
+
+
 def _walk_javas(root: Path, results, seen, depth=0):
     """有限深度扫描目录树中的 java 可执行文件。"""
     if depth > 6 or not root or not root.is_dir():
         return
+    # 先认 root 自己。JAVA_HOME 和 `which java` 推出来的候选就是一个 JDK 家目录，
+    # 而下面那圈只翻 root 的子目录、翻到名叫 bin 的还专门跳过，
+    # `<JDK>\bin\java.exe` 这条路径一个人都碰不到 —— 机器上明明装着 Java 也报没找到。
+    _take_java(root, results, seen)
     try:
         entries = sorted(os.scandir(root), key=lambda e: e.name.lower())
     except OSError:
@@ -155,17 +173,7 @@ def _walk_javas(root: Path, results, seen, depth=0):
         if is_dir:
             if name in ("node_modules", "site-packages", "WinSxS", "Windows", "AppData"):
                 continue
-            bin_dir = Path(entry.path) / "bin"
-            matched = False
-            for exe_name in ("java.exe", "java", "javaw.exe"):
-                exe = bin_dir / exe_name
-                if exe.is_file():
-                    key = str(exe.resolve())
-                    if key not in seen:
-                        seen.add(key)
-                        results.append(exe)
-                    matched = True
-                    break
+            matched = _take_java(Path(entry.path), results, seen)
             if name.lower() in ("bin", "lib"):
                 continue
             java_hint = any(t in name.lower() for t in ("java", "jdk", "jre", "zulu", "jbr", "temurin", "adoptium"))

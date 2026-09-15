@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """服务器列表管理：增删改查、批量导入导出。
 
-游戏只读实例目录下的 servers.dat（NBT）。以前这里只写 servers.json，
-界面能加能改，进游戏多人列表却是空的。现在以 servers.dat 为准，
-json 只当导入导出和旧数据迁移。
+游戏只读实例目录下的 servers.dat（NBT），所以以 servers.dat 为准，
+json 只当导入导出和旧数据迁移——只写 servers.json 的话界面能加能改，
+进游戏多人列表却是空的。
 """
 from __future__ import annotations
 

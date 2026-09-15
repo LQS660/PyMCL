@@ -555,7 +555,7 @@ def _valid_node_url(url: str) -> bool:
     return bool(parsed.scheme and parsed.netloc)
 
 
-# 本机 HMCL 2026-08-19 10:01 成功加入时多传的自定义节点（官方 /nodes 表没有）。
+# HMCL 加入房间时会多传的自定义会合节点（官方 /nodes 表没有）。
 # GET 该地址返回 tcp://103.239.245.69:38867，EasyTier 用它做会合。
 HMCL_CUSTOM_NODE = "https://terracotta.glavo.site/acebc7d8-1208-47fd-b212-d03ac49e36e0"
 

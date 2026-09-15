@@ -21,8 +21,8 @@ _LOCK = threading.Lock()
 _CACHE = {"t": 0.0, "data": None}
 
 # CPU / GPU 探测要各拉一个 PowerShell（WMI），一块硬件不会热插拔，
-# 进程内缓存半小时足够。反馈心跳以前每 2 分钟就重探一遍——常驻
-# CPU/磁盘 churn 就是这么来的。
+# 进程内缓存半小时足够。反馈心跳每 2 分钟一次，若跟着重探就是常驻的
+# CPU/磁盘 churn。
 _STATIC_TTL = 1800.0
 _STATIC_LOCK = threading.Lock()
 _STATIC = {"cpu": None, "cpu_t": 0.0, "gpus": None, "gpus_t": 0.0}

@@ -59,7 +59,7 @@ def _patch_requests():
 class _RequestsDirectSpy:
     """直连模式下盯住 requests：它真正被导入时再打 Session 补丁。
 
-    以前 _install_direct 里直接 `import requests`，导致 GUI 启动链
+    不在 _install_direct 里直接 `import requests`：那会让 GUI 启动链
     （mclauncher/__init__ -> apply_proxy_policy）每次都把 requests
     整个拉起来。环境代理键已被清空 + NO_PROXY=*，补丁晚一点打没有窗口期。
     """

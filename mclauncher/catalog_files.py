@@ -347,7 +347,7 @@ def search_projects(dm: DownloadManager | None, kind: str, query: str, source: s
     if want_mr:
         try:
             if kind == "mod":
-                hits = mods_mod.search_mods(dm, q or " ", limit=30, game_version=gv, categories=cats)
+                hits = mods_mod.search_mods(dm, q, limit=30, game_version=gv, categories=cats)
             else:
                 hits = mods_mod.search_modrinth_projects(
                     dm, q, KIND_MR[kind], limit=30, game_version=gv, categories=cats)
@@ -369,7 +369,7 @@ def search_projects(dm: DownloadManager | None, kind: str, query: str, source: s
                 rows.append(row)
         except Exception:
             pass
-    return rows
+    return mods_mod.rank_hits(rows, q, kind)
 
 
 def _hit_row(h: dict, default_source: str) -> dict:

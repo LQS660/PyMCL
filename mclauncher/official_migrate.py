@@ -229,8 +229,8 @@ def read_official_accounts(src: Path) -> list[dict]:
 def import_accounts(src: Path, manager=None) -> list[str]:
     """把官方启动器的正版档案真正写进账号库，返回导入的角色名。
 
-    以前这里只 `len()` 了一下就返回数字，UI 说「导入版本和账号」，
-    账号那半其实一个都没落地。
+    必须真的写进账号库，不能只 `len()` 一下返回数字：UI 说的是
+    「导入版本和账号」，账号那半得真落地。
     """
     rows = read_official_accounts(src)
     if not rows:

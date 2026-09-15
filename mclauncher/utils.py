@@ -102,6 +102,44 @@ def java_executable_name() -> str:
     return "javaw.exe" if IS_WINDOWS else "java"
 
 
+def volume_lookup_broken(path) -> bool:
+    """这台机器还能不能查出一个路径属于哪个卷。
+
+    Java 判断目录可写要先走这一步（GetVolumePathName + GetVolumeInformation）。
+    装入点管理器坏掉时（mountvol 一个装入点都列不出来）这两个调用会失败，
+    Java 于是把**所有**目录都当成只读，Fabric 首次启动写不出重映射 jar。
+    """
+    if not IS_WINDOWS:
+        return False
+    try:
+        import ctypes
+
+        k32 = ctypes.windll.kernel32
+        buf = ctypes.create_unicode_buffer(261)
+        if not k32.GetVolumePathNameW(str(path), buf, 261):
+            return True
+        root = buf.value
+        if not root.endswith("\\"):
+            root += "\\"
+        return not k32.GetVolumeInformationW(root, None, 0, None, None, None, None, 0)
+    except Exception:
+        return False
+
+
+def unc_twin(path) -> str:
+    """同一个本地目录的 UNC 写法（\\\\localhost\\C$\\...），用不了就返回空串。"""
+    if not IS_WINDOWS:
+        return ""
+    drive, rest = os.path.splitdrive(os.path.abspath(str(path)))
+    if len(drive) != 2 or drive[1] != ":":
+        return ""
+    unc = "\\\\localhost\\{}$\\{}".format(drive[0], rest.lstrip("\\/"))
+    try:
+        return unc if os.path.isdir(unc) else ""
+    except OSError:
+        return ""
+
+
 # ---------------------------------------------------------------- 目录与文件
 
 def ensure_dir(path) -> Path:

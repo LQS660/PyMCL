@@ -4,6 +4,7 @@ import ctypes
 import os
 import subprocess
 import threading
+from pathlib import Path
 
 from . import APP_ID, LAUNCHER_NAME, LAUNCHER_VERSION
 from . import java as java_mod
@@ -258,6 +259,57 @@ def _offline_skin_api(props: dict) -> str:
         return ""
 
 
+_KNOT_MAIN_CLASSES = (
+    "net.fabricmc.loader.impl.launch.knot.",
+    "org.quiltmc.loader.impl.launch.knot.",
+)
+_LOADER_LIB_PREFIXES = ("net.fabricmc:fabric-loader:", "org.quiltmc:quilt-loader:")
+
+
+def _loader_versions(resolved) -> list:
+    out = []
+    for lib in resolved.get("libraries") or []:
+        name = str(lib.get("name") or "")
+        for prefix in _LOADER_LIB_PREFIXES:
+            if name.startswith(prefix):
+                out.append(name[len(prefix):])
+    return out
+
+
+def _remapped_jar_ready(gdir: Path, versions) -> bool:
+    for cache in (gdir / ".fabric" / "remappedJars", gdir / ".quilt" / "remappedJars"):
+        if not cache.is_dir():
+            continue
+        for sub in cache.iterdir():
+            if versions and not any(sub.name.endswith("-" + v) for v in versions):
+                continue
+            if any(sub.glob("*-intermediary.jar")):
+                return True
+    return False
+
+
+def _remap_safe_game_dir(game_dir, main_class, resolved) -> str:
+    """卷信息接口异常的机器上，第一次跑 Fabric / Quilt 改走 UNC 路径。
+
+    加载器把重映射后的游戏 jar 写进 --gameDir 下的 .fabric，落笔前先问 Java
+    这个目录可不可写；机器查不出路径属于哪个卷时这一问恒为「不可写」，于是
+    报 "the jar file ... can't be written"。同一个文件夹用 \\\\localhost\\C$\\...
+    访问不经过那条查询，重映射 jar 生成之后就不再需要绕路了。
+    """
+    gdir = Path(game_dir)
+    if not str(main_class or "").startswith(_KNOT_MAIN_CLASSES):
+        return str(gdir)
+    if not utils.volume_lookup_broken(gdir):
+        return str(gdir)
+    if _remapped_jar_ready(gdir, _loader_versions(resolved)):
+        return str(gdir)
+    twin = utils.unc_twin(gdir)
+    if not twin:
+        return str(gdir)
+    utils.log.warning("系统查不出 %s 属于哪个卷，本次用 %s 启动，否则加载器生成不了重映射 jar", gdir, twin)
+    return twin
+
+
 def build_launch_command(instance, version_id, account_props, java_exe,
                          memory_mb=4096, width=None, height=None,
                          extra_game_args=None, extra_jvm_args=None,
@@ -347,7 +399,8 @@ def build_launch_command(instance, version_id, account_props, java_exe,
         "clientid": CONFIG.get("microsoft_client_id") or APP_ID,
         "version_name": version_id,
         "version_type": _version_type(version_id, resolved),
-        "game_directory": str(game_directory or instance.path),
+        "game_directory": _remap_safe_game_dir(
+            game_directory or instance.path, main_class, resolved),
         "assets_root": str(assets_dir),
         "assets_index_name": assets_id,
         "game_assets": str(assets_dir / "virtual" / assets_id),
