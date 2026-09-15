@@ -34,7 +34,10 @@ hiddenimports = (
     + _hidden("mclauncher")
     + _hidden("qfluentwidgets")
     + _hidden("qframelesswindow")
-    + ["mclauncher.terracotta", "app.pages.multiplayer_page", "app.pages.ai_page",
+    # mp4 动态壁纸走 QtMultimedia；它只在 app/background.py 的函数里 import，
+    # 漏了这一条，装出来的 exe 会在壁纸那儿说「这套 PySide6 没带 QtMultimedia」
+    + ["PySide6.QtMultimedia",
+       "mclauncher.terracotta", "app.pages.multiplayer_page", "app.pages.ai_page",
        "mclauncher.feedback", "mclauncher.feedback_defaults", "mclauncher.sysinfo",
        "app.pages.feedback_page", "app.ui_alive", "app.pages.file_pick",
        "app.pages.install_wizard", "app.pages.first_run", "app.pages.global_mods_dialog"]
@@ -49,7 +52,7 @@ excludes = [
     "PySide6.Qt3DInput", "PySide6.Qt3DLogic", "PySide6.Qt3DRender",
     "PySide6.QtBluetooth", "PySide6.QtCharts", "PySide6.QtDataVisualization",
     "PySide6.QtGraphs", "PySide6.QtHttpServer", "PySide6.QtLocation",
-    "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets",
+    "PySide6.QtMultimediaWidgets",
     "PySide6.QtNfc", "PySide6.QtPdf", "PySide6.QtPdfWidgets",
     "PySide6.QtPositioning", "PySide6.QtQml", "PySide6.QtQmlModels",
     "PySide6.QtQuick", "PySide6.QtQuick3D", "PySide6.QtQuickControls2",
@@ -74,10 +77,19 @@ _DROP_IN_BUNDLE = (
 )
 
 
+# 视频壁纸要的那几件：Python 绑定 QtMultimedia.pyd、Qt6Multimedia 本体、
+# plugins/multimedia 下的解码后端。少了 .pyd 那一件最阴：DLL 与插件都在包里，
+# `import PySide6.QtMultimedia` 照样 ImportError，壁纸只在 exe 里是死的。
+# QML 那一支（Qt6MultimediaQuick）照旧不要，它拖着整个 QtQuick。
+_KEEP_MULTIMEDIA = ("qtmultimedia.pyd", "qt6multimedia.dll", "multimedia/")
+
+
 def _keep_bundle_path(dest):
     path = dest.replace("\\", "/").lower()
     if "translations/" in path and path.endswith(".qm"):
         return "zh_cn" in path or "zh_tw" in path
+    if any(token in path for token in _KEEP_MULTIMEDIA):
+        return True
     return not any(token in path for token in _DROP_IN_BUNDLE)
 
 

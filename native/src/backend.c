@@ -755,8 +755,13 @@ cJSON *backend_call(const char *method, cJSON *params) {
         if (aligned) return aligned;
     }
     {
-        cJSON *via_py = py_rpc_call(method, params);
+        int handled = 0;
+        cJSON *via_py = py_rpc_call_ex(method, params, &handled);
         if (via_py) return via_py;
+        /* Python 端跑到了、只是抛了错：pymcl_set_error 里已经是真正的原因。
+           再写一句 "unknown method" 就把它盖掉了——界面上那一片
+           "unknown method: XXX" 里，有很大一部分其实是这么来的。 */
+        if (handled) return NULL;
     }
     pymcl_set_error("unknown method: %s", method);
     return NULL;

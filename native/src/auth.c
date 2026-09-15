@@ -3,11 +3,16 @@
 
 #pragma comment(lib, "crypt32.lib")
 
-#define MS_DEVICE "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
-#define MS_TOKEN "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
+/* login.live.com 老端点。Azure AD v2 只认在 Azure 注册过的 GUID 客户端 ID，
+   默认那个官方启动器 ID 送过去会被 AADSTS700016 拒掉。 */
+#define MS_DEVICE "https://login.live.com/oauth20_connect.srf"
+#define MS_TOKEN "https://login.live.com/oauth20_token.srf"
+/* 百分号是成对写的：这个宏只拼进 snprintf 的格式串，单个 %3A 会被当成转换说明 */
+#define MS_SCOPE "service%%3A%%3Auser.auth.xboxlive.com%%3A%%3AMBI_SSL"
 #define XBL_AUTH "https://user.auth.xboxlive.com/user/authenticate"
 #define XSTS_AUTH "https://xsts.auth.xboxlive.com/xsts/authorize"
 #define MC_LOGIN "https://api.minecraftservices.com/authentication/login_with_xbox"
+#define MC_ENTITLEMENTS "https://api.minecraftservices.com/entitlements/mcstore"
 #define MC_PROFILE "https://api.minecraftservices.com/minecraft/profile"
 
 static void accounts_path(char *out, size_t n) {
@@ -69,7 +74,7 @@ static int ms_refresh(cJSON *acc) {
     const char *cid = config_str("microsoft_client_id", PYMCL_MS_CLIENT_DEFAULT);
     char form[2048];
     snprintf(form, sizeof(form),
-        "grant_type=refresh_token&client_id=%s&refresh_token=%s&scope=XboxLive.signin%%20offline_access",
+        "grant_type=refresh_token&client_id=%s&refresh_token=%s&scope=" MS_SCOPE,
         cid, rt);
     http_resp r;
     if (http_post_form(MS_TOKEN, form, &r, 20) != 0 || r.status != 200) {
@@ -81,14 +86,20 @@ static int ms_refresh(cJSON *acc) {
     http_resp_free(&r);
     const char *ms = cJSON_GetStringValue(cJSON_GetObjectItem(tok, "access_token"));
     const char *nrt = cJSON_GetStringValue(cJSON_GetObjectItem(tok, "refresh_token"));
-    /* XBL */
-    char body[2048];
-    snprintf(body, sizeof(body),
-        "{\"Properties\":{\"AuthMethod\":\"RPS\",\"SiteName\":\"user.auth.xboxlive.com\",\"RpsTicket\":\"d=%s\"},"
-        "\"RelyingParty\":\"http://auth.xboxlive.com\",\"TokenType\":\"JWT\"}", ms ? ms : "");
+    /* XBL：MBI_SSL 令牌直接当票据用，Azure AD 令牌要带 d= 前缀，按顺序试 */
+    char body[8192];
+    static const char *const rps_prefix[] = {"", "d="};
     http_resp xr;
-    if (http_post_json(XBL_AUTH, body, &xr, NULL, 20) != 0) { cJSON_Delete(tok); http_resp_free(&xr); return -1; }
-    cJSON *xj = cJSON_Parse(xr.body); http_resp_free(&xr);
+    cJSON *xj = NULL;
+    for (int p = 0; p < 2 && !xj; p++) {
+        snprintf(body, sizeof(body),
+            "{\"Properties\":{\"AuthMethod\":\"RPS\",\"SiteName\":\"user.auth.xboxlive.com\",\"RpsTicket\":\"%s%s\"},"
+            "\"RelyingParty\":\"http://auth.xboxlive.com\",\"TokenType\":\"JWT\"}", rps_prefix[p], ms ? ms : "");
+        if (http_post_json(XBL_AUTH, body, &xr, NULL, 20) == 0 && xr.status == 200)
+            xj = cJSON_Parse(xr.body);
+        http_resp_free(&xr);
+    }
+    if (!xj) { cJSON_Delete(tok); pymcl_set_error("Xbox Live 认证失败"); return -1; }
     const char *xbl = cJSON_GetStringValue(cJSON_GetObjectItem(xj, "Token"));
     snprintf(body, sizeof(body),
         "{\"Properties\":{\"SandboxId\":\"RETAIL\",\"UserTokens\":[\"%s\"]},"
@@ -115,6 +126,23 @@ static int ms_refresh(cJSON *acc) {
     const char *mct = cJSON_GetStringValue(cJSON_GetObjectItem(mj, "access_token"));
     char hdr[1024];
     snprintf(hdr, sizeof(hdr), "Authorization: Bearer %s", mct ? mct : "");
+    /* 正版资格：只看 items 非空。条目名会随 XGP、捆绑包变，认名字会误伤真买了的人 */
+    http_resp er;
+    int ent_ok = http_get(MC_ENTITLEMENTS, &er, hdr, 20) == 0 && er.status == 200;
+    cJSON *ej = ent_ok ? cJSON_Parse(er.body ? er.body : "{}") : NULL;
+    int er_status = er.status;
+    http_resp_free(&er);
+    cJSON *items = ej ? cJSON_GetObjectItem(ej, "items") : NULL;
+    int owned = cJSON_IsArray(items) && cJSON_GetArraySize(items) > 0;
+    cJSON_Delete(ej);
+    if (!ent_ok || !owned) {
+        if (ent_ok)
+            pymcl_set_error("该账号尚未购买正版 Minecraft，或 Xbox Game Pass 已到期。");
+        else
+            pymcl_set_error("检查正版资格失败 (HTTP %d)", er_status);
+        cJSON_Delete(tok); cJSON_Delete(xj); cJSON_Delete(sj); cJSON_Delete(mj);
+        return -1;
+    }
     cJSON *prof = http_get_json_hdr(MC_PROFILE, hdr, 20);
     if (mct) {
         cJSON_DeleteItemFromObject(acc, "access_token");
@@ -177,7 +205,7 @@ cJSON *account_ensure_valid(cJSON *acc) {
 int ms_login(pymcl_ctx *ctx, void (*on_code)(void *, const char *, const char *), void *ud, cJSON **out_acc) {
     const char *cid = config_str("microsoft_client_id", PYMCL_MS_CLIENT_DEFAULT);
     char form[512];
-    snprintf(form, sizeof(form), "client_id=%s&scope=XboxLive.signin%%20offline_access", cid);
+    snprintf(form, sizeof(form), "client_id=%s&scope=" MS_SCOPE "&response_type=device_code", cid);
     http_resp r;
     if (http_post_form(MS_DEVICE, form, &r, 15) != 0 || r.status != 200) {
         http_resp_free(&r);

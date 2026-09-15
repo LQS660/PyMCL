@@ -115,3 +115,7 @@ config.json.bak*
 
 # 运行时统计
 /playtime.json
+
+# C / C++ 侧的编译产物
+/native/build/
+/uihost/build/

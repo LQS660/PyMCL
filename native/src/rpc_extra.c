@@ -22,7 +22,12 @@ static int find_python(char *out, size_t n) {
 }
 
 cJSON *py_rpc_call(const char *method, cJSON *params) {
+    return py_rpc_call_ex(method, params, NULL);
+}
+
+cJSON *py_rpc_call_ex(const char *method, cJSON *params, int *handled) {
     char py[PYMCL_PATH], script[PYMCL_PATH], pin[PYMCL_PATH], pout[PYMCL_PATH], tmpdir[PYMCL_PATH];
+    if (handled) *handled = 0;
     find_python(py, sizeof(py));
     pymcl_path_join3(script, sizeof(script), g_root, "native\\tools", "py_rpc.py");
     if (!pymcl_file_exists(script)) {
@@ -78,11 +83,18 @@ cJSON *py_rpc_call(const char *method, cJSON *params) {
     cJSON *wrap = pymcl_read_json(pout);
     DeleteFileA(pout);
     if (!wrap) {
-        pymcl_set_error("py_rpc failed (rc=%d) for %s", rc, method);
+        /* 连 out 文件都没有：Python 压根没跑起来（干净机器上没装）或者超时了。
+           这跟「方法不存在」是两回事，说清楚，别让用户去查一个存在的方法名。 */
+        pymcl_set_error("%s 需要 Python 支持，但这次没跑起来（找不到 python 或已超时，rc=%d）",
+                        method, rc);
         return NULL;
     }
     if (!cJSON_IsTrue(cJSON_GetObjectItem(wrap, "ok"))) {
         const char *err = cJSON_GetStringValue(cJSON_GetObjectItem(wrap, "error"));
+        /* Python 端跑到了、只是抛了错——这一位告诉调用方错误原因已经在这儿了，
+           别再拿 "unknown method" 盖掉它。py_rpc.py 自己判定方法不存在时
+           回的也是这条路，那一种才是真的没这个方法。 */
+        if (handled && err && strncmp(err, "unknown method", 14) != 0) *handled = 1;
         pymcl_set_error("%s", err ? err : "py_rpc error");
         cJSON_Delete(wrap);
         return NULL;
@@ -90,6 +102,7 @@ cJSON *py_rpc_call(const char *method, cJSON *params) {
     cJSON *result = cJSON_DetachItemFromObject(wrap, "result");
     cJSON_Delete(wrap);
     if (!result) result = cJSON_CreateNull();
+    if (handled) *handled = 1;
     return result;
 }
 

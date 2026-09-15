@@ -28,6 +28,42 @@ from mclauncher import terracotta as terracotta_mod
 
 _tls = threading.local()
 
+# 侧栏编排的两个键在两套前端之间往返，这里只做类型清洗（字符串列表 / 两栏成员
+# 表），键名是否认识交给读它的那一端判断——桥不该知道有哪些页面。
+_NAV_SECTIONS = ("download", "more")
+
+
+def _nav_keys(raw) -> list[str]:
+    seen: set[str] = set()
+    out = []
+    for item in raw if isinstance(raw, (list, tuple)) else ():
+        key = str(item).strip()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def _nav_members(raw) -> dict[str, list[str]]:
+    if not isinstance(raw, dict):
+        return {}
+    picked = {sec: _nav_keys(raw.get(sec)) for sec in _NAV_SECTIONS}
+    return picked if any(picked.values()) else {}
+
+
+def _nav_groups(raw) -> list[dict]:
+    """分组排法的分组表：[{title, keys}]。空标题的组丢掉。"""
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for group in raw:
+        if not isinstance(group, dict):
+            continue
+        title = str(group.get("title") or "").strip()
+        if title:
+            out.append({"title": title, "keys": _nav_keys(group.get("keys"))})
+    return out
+
 
 class TaskCancelled(Exception):
     """用户取消任务时由 progress 回调抛出。"""
@@ -705,8 +741,8 @@ class BackendAPI:
         settings = self.get_settings()
         return settings.get(key, default)
 
-    def update_settings(self, settings: dict):
-        self.save_settings(settings)
+    def update_settings(self, settings: dict | None = None, **extra):
+        self.save_settings(settings, **extra)
 
     def wait_task(self, task_id: str, timeout: float = 1800, cancelled=None) -> dict:
         import time
@@ -767,9 +803,23 @@ class BackendAPI:
             "ui_nav_order": list(CONFIG.get("ui_nav_order") or []),
             "ui_nav_pinned": list(CONFIG.get("ui_nav_pinned") or []),
             "ui_nav_hidden": list(CONFIG.get("ui_nav_hidden") or []),
+            # 排法与分区成员：少了这两个键，前端只能猜出厂排法，用户在 Qt 里
+            # 切成「精简」或挪过分区成员，网页版仍按分组画。
+            "ui_nav_style": CONFIG.get("ui_nav_style") or "",
+            "ui_nav_defaults": CONFIG.get("ui_nav_defaults") or "",
+            "ui_nav_groups": _nav_groups(CONFIG.get("ui_nav_groups")),
+            "ui_section_members": _nav_members(CONFIG.get("ui_section_members")),
+            "ui_sidebar_width": int(CONFIG.get("ui_sidebar_width") or 0),
         }
 
-    def save_settings(self, data: dict):
+    def save_settings(self, data: dict | None = None, **extra):
+        """两种参数形状都认：{"data": {...}} 与整包平铺。
+
+        JSON-RPC 这一层按形参名分发（bridge/server.py _call_kwargs），前端把整包
+        设置直接当 params 发过来时，形参 `data` 一个键也收不到，整调用以
+        「缺少必需参数」失败——保存设置在网页版就是点了没反应。
+        """
+        data = {**(data if isinstance(data, dict) else {}), **extra}
         # 严格的局部更新：只写 `data` 里真正带来的键。前端（eziapp 设置页只提交 11 个键）
         # 提交部分设置时，未提交的键必须原样保留，否则等于静默清空用户配置。
         patch = {}
@@ -792,8 +842,8 @@ class BackendAPI:
             patch["curseforge_api_key"] = (data.get("curseforge_api_key") or "").strip()
         if "ai_mode" in data:
             patch["ai_mode"] = data.get("ai_mode") or "public"
-        # 地址类键各自独立判定：以前它们挂在 `"ai_mode" in data` 下面，
-        # 只要前端提交了 ai_mode 就会被 data 里不存在的值覆写成空串，
+        # 地址类键各自独立判定，不能挂在 `"ai_mode" in data` 下面：否则前端只要
+        # 提交了 ai_mode，它们就会被 data 里不存在的值覆写成空串，
         # 自定义模式随即抛「请在设置里填写自定义 NewAPI 地址」，AI 助手整个不可用。
         if "ai_gateway_url" in data:
             patch["ai_gateway_url"] = (data.get("ai_gateway_url") or "").strip()
@@ -833,6 +883,27 @@ class BackendAPI:
             patch["skip_assets"] = bool(data.get("skip_assets"))
         if "ui_dark" in data:
             patch["ui_dark"] = bool(data.get("ui_dark"))
+        # 侧栏编排：空列表要能写进去（「一项都不隐藏」是合法状态，不是没提交），
+        # 所以按「键在不在 data 里」判断，不按值真假。
+        for key in ("ui_nav_order", "ui_nav_pinned", "ui_nav_hidden"):
+            if key in data:
+                patch[key] = _nav_keys(data.get(key))
+        if "ui_section_members" in data:
+            patch["ui_section_members"] = _nav_members(data.get("ui_section_members")) or None
+        if "ui_nav_groups" in data:
+            patch["ui_nav_groups"] = _nav_groups(data.get("ui_nav_groups")) or None
+        if "ui_nav_style" in data:
+            style = str(data.get("ui_nav_style") or "").strip()
+            patch["ui_nav_style"] = style if style in ("compact", "grouped") else "grouped"
+        if "ui_nav_defaults" in data:
+            patch["ui_nav_defaults"] = str(data.get("ui_nav_defaults") or "")
+        if "ui_sidebar_width" in data:
+            try:
+                # 越界的夹回去（140~320 是侧栏能用的范围），非数字当没设过
+                width = max(140, min(320, int(data.get("ui_sidebar_width"))))
+            except (TypeError, ValueError):
+                width = 0
+            patch["ui_sidebar_width"] = width or None
         CONFIG.update(patch)
         CONFIG.save()
 
@@ -2076,6 +2147,52 @@ class BackendAPI:
     def translate(self, key: str, lang: str = "") -> str:
         from mclauncher import i18n
         return i18n._(key, lang or None)
+
+    # ==================================================================
+    # 新增 API：前端上传暂存
+    # ==================================================================
+
+    def stash_upload(self, name: str, data: str) -> str:
+        """把前端读上来的文件落到 ROOT/uploads，返回真实路径。
+
+        浏览器的文件选择器只给文件名不给路径，而导入模组 / 主题 / 本地整合包
+        那几个 RPC 收的都是路径——中间就差这一步。`data` 收 base64（可带
+        data: 前缀），跟 set_account_skin 是同一套约定。
+        """
+        import base64
+        import binascii
+        import re
+
+        blob = (data or "").strip()
+        raw = blob.split(",", 1)[-1] if blob.startswith("data:") else blob
+        try:
+            payload = base64.b64decode(raw, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("上传的数据不是有效的 base64") from exc
+        if not payload:
+            raise ValueError("上传的文件是空的")
+
+        # 文件名是前端给的，直接当路径用就能被 ../ 跳出暂存目录
+        safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", os.path.basename(name or "")).strip(" .")
+        folder = utils.ROOT / "uploads"
+        folder.mkdir(parents=True, exist_ok=True)
+        self._prune_uploads(folder)
+        dest = folder / (safe or "upload.bin")
+        if dest.exists():
+            dest = folder / f"{dest.stem}-{int(time.time())}{dest.suffix}"
+        dest.write_bytes(payload)
+        return str(dest)
+
+    @staticmethod
+    def _prune_uploads(folder: Path, keep_seconds: int = 24 * 3600) -> None:
+        """暂存目录只是个中转站：导入完那份拷贝就没用了，留着白占盘。"""
+        cutoff = time.time() - keep_seconds
+        for old in folder.glob("*"):
+            try:
+                if old.is_file() and old.stat().st_mtime < cutoff:
+                    old.unlink()
+            except OSError:
+                pass
 
     # ==================================================================
     # 新增 API：主题包

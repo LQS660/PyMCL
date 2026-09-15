@@ -80,6 +80,9 @@ def build_stub(root: Path, out: Path) -> None:
         "-municode",
         "-DUNICODE",
         "-D_UNICODE",
+        # 静态链接：zipmin.c 要 zlib，默认会去链 zlib1.dll，于是这个「单文件」
+        # exe 拷到别的机器上就是一句「找不到 zlib1.dll」。多 50 KB 换真单文件。
+        "-static",
         "-o",
         str(out),
         str(root / "pack" / "stub.c"),

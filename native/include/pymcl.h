@@ -257,6 +257,9 @@ cJSON *backend_call(const char *method, cJSON *params);
 void backend_shutdown(void);
 int server_run(const char *host, int port, const char *token);
 cJSON *py_rpc_call(const char *method, cJSON *params);
+/* 同上，另外回一位 handled：Python 端确实处理了这次调用（成功或抛错）。
+   调用方靠它区分「方法不存在」和「方法跑了但失败了」。 */
+cJSON *py_rpc_call_ex(const char *method, cJSON *params, int *handled);
 cJSON *rpc_align_call(const char *method, cJSON *params, sse_emit_fn emit);
 
 #ifdef __cplusplus

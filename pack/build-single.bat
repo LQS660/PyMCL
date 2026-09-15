@@ -33,7 +33,9 @@ copy /y "%ROOT%\native\build\pymcl-bridge.exe" "%STAGE%\native\build\" >nul
 copy /y "%ROOT%\native\data\catalog.json" "%STAGE%\native\data\" >nul
 copy /y "%ROOT%\native\tools\py_rpc.py" "%STAGE%\native\tools\" >nul
 if exist "%ROOT%\native\build\curl-ca-bundle.crt" copy /y "%ROOT%\native\build\curl-ca-bundle.crt" "%STAGE%\native\build\" >nul
-for %%D in (libcurl-4.dll zlib1.dll libwinpthread-1.dll libssl-3-x64.dll libcrypto-3-x64.dll libzstd.dll libbrotlidec.dll libbrotlicommon.dll libnghttp2-14.dll libidn2-0.dll libpsl-5.dll libssh2-1.dll libiconv-2.dll libintl-8.dll libgcc_s_seh-1.dll) do (
+rem libnghttp3 / libngtcp2 / libunistring: libcurl 的 HTTP/3 分支和 libidn2 要它们。
+rem 漏掉的话 C 桥在没装 msys64 的机器上直接 0xC0000135 起不来。
+for %%D in (libcurl-4.dll zlib1.dll libwinpthread-1.dll libssl-3-x64.dll libcrypto-3-x64.dll libzstd.dll libbrotlidec.dll libbrotlicommon.dll libnghttp2-14.dll libnghttp3-9.dll libngtcp2-16.dll libngtcp2_crypto_ossl-0.dll libidn2-0.dll libunistring-5.dll libpsl-5.dll libssh2-1.dll libiconv-2.dll libintl-8.dll libgcc_s_seh-1.dll) do (
   if exist "%ROOT%\native\build\%%D" copy /y "%ROOT%\native\build\%%D" "%STAGE%\native\build\" >nul
 )
 rem Python 对齐层：外置，不进 C 二进制；有本机 Python 时 C 桥可调全量 RPC
