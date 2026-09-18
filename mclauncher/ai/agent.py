@@ -1,24 +1,25 @@
 # -*- coding: utf-8 -*-
-"""工具循环：流式输出 + 写操作确认。"""
+"""Agent 主循环：turn 状态机 + 流式模型调用 + 工具并行调度 + 权限判权。"""
 
 from __future__ import annotations
 
 import inspect
 import json
+import uuid
 
 from . import permission
+from . import scheduler
 from . import trace
 from .client import AIClientError, chat_once, chat_stream
 from .defaults import MAX_HISTORY, MAX_TOOL_ROUNDS
 from .permission import Behavior, Decision, Rule
 from .prompt import system_prompt
 from .result import AgentResult, StopReason
+from .state import IllegalTransition, ToolCall, ToolCallStatus, TurnPhase, TurnState
 from .tools import (
-    TOOL_META, TOOL_SCHEMAS, confirm_label, is_ask_tool, is_write_tool,
+    TOOL_META, TOOL_SCHEMAS, confirm_label, is_ask_tool,
     normalize_ask_args, parse_args, run_tool, runtime_context,
 )
-
-SEARCH_TOOLS = {"search_mods", "search_modpacks", "search_versions"}
 
 
 class AgentCancelled(Exception):
@@ -67,13 +68,22 @@ def _call_confirm(confirm_fn, tname: str, args: dict, label: str, reason: str):
     return confirm_fn(tname, args, label)
 
 
+def _to_phase(turn: TurnState, phase: TurnPhase) -> None:
+    """收尾用的迁移：失败只记 trace，绝不在清理路径上抛异常。"""
+    try:
+        if turn.phase not in (TurnPhase.COMPLETING, TurnPhase.ERROR):
+            turn.transition(phase)
+    except IllegalTransition as exc:
+        trace.record("illegal_transition", phase=turn.phase.value, exc=exc)
+
+
 def run_agent(backend, settings: dict, history: list, user_text: str,
               on_delta=None, on_status=None, confirm_fn=None, ask_fn=None,
               cancelled=None, http_cancel=None):
     """
     on_delta(text)
     on_status(kind, payload)
-    confirm_fn(tool_name, args, label) -> bool
+    confirm_fn(tool_name, args, label[, reason]) -> bool | Rule
     ask_fn(questions, title) -> dict | None
     cancelled() -> bool
     返回 AgentResult（str 子类，可直接当文本用；额外带 stop_reason 等元数据）。
@@ -102,6 +112,8 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
 
     messages = _system_messages(backend, settings) + _trim_history(history)
     messages.append({"role": "user", "content": user_text})
+    state_base = messages[1]["content"] if len(messages) > 1 and \
+        messages[1].get("role") == "system" else ""
 
     instance_name = _current_instance()
     mode = permission.normalize_permission_mode(
@@ -115,218 +127,261 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
     final = ""
     acted = False
     pending: list = []
-    need_followup = False
-    followup_used = False
-    search_done: dict = {}
-    need_pick = False
-    pick_nudged = False
-    for _round in range(MAX_TOOL_ROUNDS):
-        round_no[0] = _round + 1
-        _check()
-        _status("think", {"after_tools": any(m.get("role") == "tool" for m in messages)})
-        tool_calls = []
-        text_parts = []
-        truncated = False
-        stream_failed = False
-        try:
-            for ev in chat_stream(settings, messages, TOOL_SCHEMAS, http_cancel=http_cancel):
+    ask_answered_prev = False       # 上一轮 ask_user 拿到了答案
+    continuation_used = False       # 代码保证的续步只用一次
+    continuation_pending = False    # 下一轮 progress 通道带行动指引
+    turn = TurnState(id=uuid.uuid4().hex[:12], session_id="active", turn_number=1)
+
+    try:
+        turn.transition(TurnPhase.PROCESSING_INPUT)
+        for _round in range(MAX_TOOL_ROUNDS):
+            round_no[0] = _round + 1
+            turn.rounds_used = round_no[0]
+            _check()
+            if turn.phase == TurnPhase.PROCESSING_INPUT:
+                turn.transition(TurnPhase.AWAITING_MODEL)
+            turn.transition(TurnPhase.STREAMING)
+
+            # 每轮把剩余步数注入 system 状态段（原样替换，不往历史里堆积）
+            if state_base:
+                extra = ""
+                if _round > 0:
+                    extra += f"\n\n[进度] 本轮已用 {round_no[0]}/{MAX_TOOL_ROUNDS} 步。"
+                    if MAX_TOOL_ROUNDS - round_no[0] < 4:
+                        extra += "剩余不足 4 步时请优先收尾并说明当前状态。"
+                if continuation_pending:
+                    extra += ("\n用户刚在选项里做出选择：若需要执行操作，"
+                              "请立刻调用对应工具；若无需操作，请说明原因。")
+                messages[1]["content"] = state_base + extra
+
+            _status("think", {"after_tools": any(m.get("role") == "tool" for m in messages)})
+            tool_calls = []
+            text_parts = []
+            truncated = False
+            stream_failed = False
+            try:
+                for ev in chat_stream(settings, messages, TOOL_SCHEMAS, http_cancel=http_cancel):
+                    _check()
+                    kind = ev.get("type")
+                    if kind == "delta":
+                        piece = ev.get("text") or ""
+                        text_parts.append(piece)
+                        _delta(piece)
+                    elif kind == "tool_calls":
+                        tool_calls = ev.get("tool_calls") or []
+                        break
+                    elif kind == "done":
+                        truncated = ev.get("finish_reason") == "length"
+                        break
+                    elif kind == "error":
+                        raise AIClientError(ev.get("message") or "接口错误")
+            except AIClientError as exc:
+                if exc.fatal():
+                    raise
+                stream_failed = True
+                trace.record("stream_error", round_=round_no[0], exc=exc, stream_failed=True)
+            except Exception as exc:  # noqa: BLE001
+                stream_failed = True
+                trace.record("stream_exception", round_=round_no[0], exc=exc, stream_failed=True)
+
+            if not tool_calls and (stream_failed or not "".join(text_parts)):
                 _check()
-                kind = ev.get("type")
-                if kind == "delta":
-                    piece = ev.get("text") or ""
-                    text_parts.append(piece)
-                    _delta(piece)
-                elif kind == "tool_calls":
-                    tool_calls = ev.get("tool_calls") or []
-                    break
-                elif kind == "done":
-                    truncated = ev.get("finish_reason") == "length"
-                    break
-                elif kind == "error":
-                    raise AIClientError(ev.get("message") or "接口错误")
-        except AIClientError as exc:
-            if exc.fatal():
-                raise
-            stream_failed = True
-            trace.record("stream_error", round_=round_no[0], exc=exc, stream_failed=True)
-        except Exception as exc:  # noqa: BLE001
-            stream_failed = True
-            trace.record("stream_exception", round_=round_no[0], exc=exc, stream_failed=True)
+                data = chat_once(settings, messages, TOOL_SCHEMAS, http_cancel=http_cancel)
+                if not text_parts and data.get("content"):
+                    text_parts.append(data["content"])
+                    _delta(data["content"])
+                if not tool_calls:
+                    tool_calls = data.get("tool_calls") or []
+                truncated = truncated or data.get("finish_reason") == "length"
+                if not tool_calls and not data.get("content"):
+                    trace.record("empty_fallback", round_=round_no[0],
+                                 stream_failed=stream_failed, text_len=0)
 
-        if not tool_calls and (stream_failed or not "".join(text_parts)):
-            _check()
-            data = chat_once(settings, messages, TOOL_SCHEMAS, http_cancel=http_cancel)
-            if not text_parts and data.get("content"):
-                text_parts.append(data["content"])
-                _delta(data["content"])
+            content = "".join(text_parts)
+            if truncated and content:
+                content += "\n\n（回复被长度限制截断了，需要的话让我继续。）"
+            if content:
+                final = content
+
             if not tool_calls:
-                tool_calls = data.get("tool_calls") or []
-            truncated = truncated or data.get("finish_reason") == "length"
-            if not tool_calls and not data.get("content"):
-                trace.record("empty_fallback", round_=round_no[0],
-                             stream_failed=stream_failed, text_len=0)
-
-        content = "".join(text_parts)
-        if truncated and content:
-            content += "\n\n（回复被长度限制截断了，需要的话让我继续。）"
-        if content:
-            final = content
-        if not tool_calls:
-            if need_followup and not followup_used:
-                followup_used = True
-                need_followup = False
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "选项已经选完。立刻调用对应工具执行："
-                        "装游戏用 install_game（纯原版 loader 填「无」）。"
-                        "禁止只说话，禁止说已经在装。"
-                    ),
-                })
-                continue
-            if need_pick and not pick_nudged:
-                pick_nudged = True
-                need_pick = False
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "搜索已经结束。立刻 ask_user 列出刚才的结果让用户选。"
-                        "禁止用相同关键词再搜。"
-                    ),
-                })
-                continue
-            rounds_used = _round + 1
-            if truncated:
-                return AgentResult(content, stop_reason=StopReason.TRUNCATED,
+                rounds_used = round_no[0]
+                # ask_user 刚拿到答案：由代码保证继续（一次），不靠提示词补丁
+                if ask_answered_prev and not continuation_used and content:
+                    continuation_used = True
+                    ask_answered_prev = False
+                    continuation_pending = True
+                    turn.transition(TurnPhase.SCHEDULING_TOOLS)
+                    turn.transition(TurnPhase.EXECUTING_TOOLS)
+                    turn.transition(TurnPhase.AWAITING_MODEL)
+                    continue
+                if truncated:
+                    _to_phase(turn, TurnPhase.COMPLETING)
+                    return AgentResult(content, stop_reason=StopReason.TRUNCATED,
+                                       rounds_used=rounds_used)
+                if stream_failed and not content:
+                    _to_phase(turn, TurnPhase.COMPLETING)
+                    return AgentResult("", stop_reason=StopReason.STREAM_FAILED,
+                                       detail="流式与非流式兜底都没有返回内容",
+                                       rounds_used=rounds_used)
+                if pending:
+                    _to_phase(turn, TurnPhase.COMPLETING)
+                    return AgentResult(content, stop_reason=StopReason.PENDING_TASK,
+                                       pending_tasks=pending, rounds_used=rounds_used)
+                if not content:
+                    _to_phase(turn, TurnPhase.COMPLETING)
+                    return AgentResult("", stop_reason=StopReason.EMPTY_RESPONSE,
+                                       detail="上游返回了空内容", rounds_used=rounds_used)
+                if acted:
+                    _to_phase(turn, TurnPhase.COMPLETING)
+                    return AgentResult(content, stop_reason=StopReason.COMPLETED,
+                                       rounds_used=rounds_used)
+                _to_phase(turn, TurnPhase.COMPLETING)
+                return AgentResult(content, stop_reason=StopReason.NO_TOOL_CALL,
+                                   detail="模型只回了文字，没有调用任何工具",
                                    rounds_used=rounds_used)
-            if stream_failed and not content:
-                return AgentResult("", stop_reason=StopReason.STREAM_FAILED,
-                                   detail="流式与非流式兜底都没有返回内容",
-                                   rounds_used=rounds_used)
-            if pending:
-                return AgentResult(content, stop_reason=StopReason.PENDING_TASK,
-                                   pending_tasks=pending, rounds_used=rounds_used)
-            if not content:
-                return AgentResult("", stop_reason=StopReason.EMPTY_RESPONSE,
-                                   detail="上游返回了空内容", rounds_used=rounds_used)
-            if acted:
-                return AgentResult(content, stop_reason=StopReason.COMPLETED,
-                                   rounds_used=rounds_used)
-            return AgentResult(content, stop_reason=StopReason.NO_TOOL_CALL,
-                               detail="模型只回了文字，没有调用任何工具",
-                               rounds_used=rounds_used)
 
-        assistant_msg = {"role": "assistant", "content": content or None, "tool_calls": tool_calls}
-        messages.append(assistant_msg)
-
-        ordered = sorted(
-            tool_calls,
-            key=lambda tc: 0 if is_ask_tool((tc.get("function") or {}).get("name") or "") else 1,
-        )
-        asked = False
-        wrote = False
-        for tc in ordered:
-            _check()
-            fn = tc.get("function") or {}
-            tname = fn.get("name") or ""
-            args = parse_args(fn.get("arguments"))
-            label = confirm_label(tname, args)
-            _status("tool", {"name": tname, "args": args, "label": label})
+            # ---- 工具阶段 ----
+            turn.transition(TurnPhase.SCHEDULING_TOOLS)
+            messages.append({"role": "assistant", "content": content or None,
+                             "tool_calls": tool_calls})
             acted = True
-            if is_ask_tool(tname):
-                questions = normalize_ask_args(args)
-                title = args.get("title") or ""
-                if ask_fn:
-                    answered = ask_fn(questions, title)
-                else:
-                    answered = None
-                if not answered:
-                    result = "用户取消了选择"
-                    _status("tool_skip", {"name": tname, "label": label})
-                else:
-                    asked = True
-                    result = answered if isinstance(answered, str) else json.dumps(
-                        answered, ensure_ascii=False)
-                    result = (
-                        f"{result}\n"
-                        "[系统] 用户已选完。下一步必须调用对应工具："
-                        "装游戏 → install_game（纯原版 loader=无）。不要结束对话。"
-                    )
-                    _status("tool_done", {"name": tname, "label": "已选择", "result": str(result)[:400]})
-            else:
-                result = None
-                meta = TOOL_META.get(tname)
-                res = permission.decide(meta, args, mode, rules)
+
+            tool_objs = []
+            for i, tc in enumerate(tool_calls):
+                fn = tc.get("function") or {}
+                obj = turn.add_tool_call(ToolCall(
+                    id=tc.get("id") or f"call_{round_no[0]}_{i}",
+                    name=fn.get("name") or "",
+                    args=parse_args(fn.get("arguments"))))
+                tool_objs.append(obj)
+                _status("tool", {"name": obj.name, "args": obj.args,
+                                 "label": confirm_label(obj.name, obj.args)})
+
+            # 判权：deny/modify 直接定，ask 稍后集中处理（可能弹 UI）
+            needs_perm = False
+            decisions: dict = {}
+            for obj in tool_objs:
+                if is_ask_tool(obj.name):
+                    decisions[obj.id] = ("ask", "")
+                    needs_perm = True
+                    continue
+                meta = TOOL_META.get(obj.name)
+                res = permission.decide(meta, obj.args, mode, rules)
                 if res.decision == Decision.MODIFY and res.modified_input:
-                    args = res.modified_input
+                    obj.args = res.modified_input
                 if res.decision == Decision.DENY:
-                    result = f"[权限] 已拒绝：{res.reason}"
-                    _status("tool_skip", {"name": tname, "label": label})
+                    decisions[obj.id] = ("deny", res.reason)
+                    turn.set_tool_status(obj.id, ToolCallStatus.DENIED,
+                                         result=f"[权限] 已拒绝：{res.reason}")
                 elif res.decision == Decision.ASK and dont_ask:
-                    result = "[权限] 已拒绝：用户开启了「不询问」模式"
-                    _status("tool_skip", {"name": tname, "label": label})
+                    decisions[obj.id] = ("deny", "用户开启了「不询问」模式")
+                    turn.set_tool_status(obj.id, ToolCallStatus.DENIED,
+                                         result="[权限] 已拒绝：用户开启了「不询问」模式")
                 elif res.decision == Decision.ASK:
-                    rv = _call_confirm(confirm_fn, tname, args, label, res.reason)
-                    if isinstance(rv, Rule):
-                        rules = permission.apply_updates(rules, [rv])
-                        permission.append_rule(rv, instance_name)
-                    if not isinstance(rv, Rule) and not rv:
-                        result = "用户拒绝了这次操作"
-                        _status("tool_skip", {"name": tname, "label": label})
-                if result is None:
-                    if tname in SEARCH_TOOLS:
-                        qkey = (tname, str(args.get("query") or "").strip().lower())
-                        if qkey in search_done:
-                            result = (
-                                f"{search_done[qkey]}\n"
-                                "[系统] 这一轮已经用相同关键词搜过，结果就是上面这些。"
-                                "禁止再搜同一词。立刻 ask_user 让用户选，或说明没找到。"
-                            )
-                            _status("tool_skip", {"name": tname, "label": "拦截重复搜索"})
-                            need_pick = True
-                        else:
-                            _status("tool_run", {"name": tname, "label": label})
-                            result = run_tool(backend, tname, args, wait=False, cancelled=cancelled)
-                            hint = (
-                                "\n[系统] 搜索结束。下一动作必须是 ask_user 让用户从上述结果里选。"
-                                "禁止用相同关键词再次调用该搜索。"
-                            )
-                            result = f"{result}{hint}"
-                            search_done[qkey] = result
-                            need_pick = True
-                            _status("tool_done", {"name": tname, "label": label, "result": str(result)[:400]})
-                    elif is_write_tool(tname):
-                        wrote = True
-                        _status("tool_run", {"name": tname, "label": label})
-                        wait = not (meta and (meta.long_running or meta.side_effect == "launch"))
-                        result = run_tool(backend, tname, args, wait=wait, cancelled=cancelled)
-                        extra = {}
-                        try:
-                            parsed = json.loads(result) if isinstance(result, str) and result.startswith("{") else {}
-                            if isinstance(parsed, dict) and parsed.get("task_id"):
-                                extra["task_id"] = parsed["task_id"]
-                                if parsed.get("queued"):
-                                    pending.append({"task_id": parsed["task_id"], "name": tname})
-                        except Exception:
-                            extra = {}
-                        _status("tool_done", {"name": tname, "label": label, "result": result[:400], **extra})
+                    decisions[obj.id] = ("ask", res.reason)
+                    needs_perm = True
+                else:
+                    decisions[obj.id] = ("allow", "")
+
+            # 需要用户交互的（确认 / ask_user）在这一段串行完成，绝不进并行组
+            if needs_perm:
+                turn.transition(TurnPhase.AWAITING_PERMISSION)
+            for obj in tool_objs:
+                kind, reason = decisions[obj.id]
+                if kind != "ask":
+                    continue
+                label = confirm_label(obj.name, obj.args)
+                turn.set_tool_status(obj.id, ToolCallStatus.WAITING_PERMISSION)
+                if is_ask_tool(obj.name):
+                    questions = normalize_ask_args(obj.args)
+                    title = obj.args.get("title") or ""
+                    answered = ask_fn(questions, title) if ask_fn else None
+                    if not answered:
+                        turn.set_tool_status(obj.id, ToolCallStatus.COMPLETED,
+                                             result="用户取消了选择")
+                        _status("tool_skip", {"name": obj.name, "label": label})
                     else:
-                        _status("tool_run", {"name": tname, "label": label})
-                        result = run_tool(backend, tname, args, wait=False, cancelled=cancelled)
-                        _status("tool_done", {"name": tname, "label": label, "result": str(result)[:400]})
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc.get("id") or "",
-                "name": tname,
-                "content": result,
-            })
-        need_followup = asked and not wrote
+                        answer_text = answered if isinstance(answered, str) else json.dumps(
+                            answered, ensure_ascii=False)
+                        turn.set_tool_status(obj.id, ToolCallStatus.COMPLETED,
+                                             result=answer_text)
+                        ask_answered_prev = True
+                        _status("tool_done", {"name": obj.name, "label": "已选择",
+                                              "result": str(answer_text)[:400]})
+                    continue
+                rv = _call_confirm(confirm_fn, obj.name, obj.args, label, reason)
+                if isinstance(rv, Rule):
+                    rules = permission.apply_updates(rules, [rv])
+                    permission.append_rule(rv, instance_name)
+                    decisions[obj.id] = ("allow", "")
+                elif not rv:
+                    decisions[obj.id] = ("deny", "用户拒绝了这次操作")
+                    turn.set_tool_status(obj.id, ToolCallStatus.DENIED,
+                                         result="用户拒绝了这次操作")
+                    _status("tool_skip", {"name": obj.name, "label": label})
+                else:
+                    decisions[obj.id] = ("allow", "")
+
+            turn.transition(TurnPhase.EXECUTING_TOOLS)
+
+            def _execute(obj: ToolCall) -> str:
+                try:
+                    _check()
+                    turn.set_tool_status(obj.id, ToolCallStatus.RUNNING)
+                    meta = TOOL_META.get(obj.name)
+                    label = confirm_label(obj.name, obj.args)
+                    _status("tool_run", {"name": obj.name, "label": label})
+                    wait = not (meta and (meta.long_running or meta.side_effect == "launch"))
+                    result = run_tool(backend, obj.name, obj.args, wait=wait,
+                                      cancelled=cancelled)
+                    if meta and not meta.readonly:
+                        try:
+                            parsed = json.loads(result) if isinstance(result, str) \
+                                and result.startswith("{") else {}
+                            if isinstance(parsed, dict) and parsed.get("task_id") \
+                                    and parsed.get("queued"):
+                                pending.append({"task_id": parsed["task_id"],
+                                                "name": obj.name})
+                        except Exception:  # noqa: BLE001
+                            pass
+                    _status("tool_done", {"name": obj.name, "label": label,
+                                          "result": str(result)[:400]})
+                    turn.set_tool_status(obj.id, ToolCallStatus.COMPLETED,
+                                         result=str(result))
+                    return str(result)
+                except Exception as exc:  # noqa: BLE001
+                    turn.set_tool_status(obj.id, ToolCallStatus.FAILED, error=str(exc))
+                    return f"工具失败: {exc}"
+
+            runnable = [obj for obj in tool_objs if decisions[obj.id][0] == "allow"]
+            groups = scheduler.group(runnable, TOOL_META, max_concurrency=4)
+            turn.parallel_groups = [[tc.id for tc in grp] for grp in groups]
+            scheduler.run_groups(groups, _execute, max_concurrency=4)
+
+            for obj in tool_objs:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": obj.id,
+                    "name": obj.name,
+                    "content": obj.result or "",
+                })
+            turn.transition(TurnPhase.AWAITING_MODEL)
+    except AgentCancelled:
+        _to_phase(turn, TurnPhase.COMPLETING)
+        raise
+    except AIClientError:
+        _to_phase(turn, TurnPhase.ERROR)
+        raise
+    finally:
+        trace.record("turn_end", round_=turn.rounds_used, phase=turn.phase.value,
+                     text_len=len(final))
 
     trace.record("max_rounds", round_=MAX_TOOL_ROUNDS, text_len=len(final))
+    _to_phase(turn, TurnPhase.COMPLETING)
     return AgentResult(
         final or "步骤有点多，先停在这里。你再说一下接下来要哪一步。",
         stop_reason=StopReason.MAX_ROUNDS,
-        detail=f"已用 {MAX_TOOL_ROUNDS}/{MAX_TOOL_ROUNDS} 回合",
+        detail=f"已用 {turn.rounds_used}/{MAX_TOOL_ROUNDS} 回合",
         pending_tasks=pending,
-        rounds_used=MAX_TOOL_ROUNDS,
+        rounds_used=turn.rounds_used,
     )
