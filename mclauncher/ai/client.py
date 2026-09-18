@@ -58,6 +58,27 @@ class HttpCancel:
         return self.flag
 
 
+# 上游报「塞不下」的关键词：命中即触发 reactive compact（批次 4）
+_OVERFLOW_KEYS = (
+    "maximum context length", "context length exceeded", "context_length_exceeded",
+    "prompt too long", "too many input tokens", "input length exceeds",
+    "上下文长度", "上下文过长", "输入过长", "请求过长", "超出长度",
+)
+
+
+def is_context_overflow(message: str) -> bool:
+    msg = (message or "").lower()
+    return any(key.lower() in msg for key in _OVERFLOW_KEYS)
+
+
+def max_output_tokens(settings: dict) -> int:
+    """max_tokens 可配置：默认 8192（原 2048，讲排错方案必撞顶）。"""
+    try:
+        return max(512, int((settings or {}).get("ai_max_tokens") or 8192))
+    except (TypeError, ValueError):
+        return 8192
+
+
 def normalize_base(url: str) -> str:
     u = (url or "").strip().rstrip("/")
     if not u:
@@ -347,7 +368,7 @@ def chat_stream(settings: dict, messages: list, tools: list | None = None,
         "messages": messages,
         "temperature": temperature,
         "stream": True,
-        "max_tokens": 2048,
+        "max_tokens": max_output_tokens(settings),
     }
     if tools:
         body["tools"] = tools
@@ -387,7 +408,7 @@ def chat_once(settings: dict, messages: list, tools: list | None = None,
         "messages": messages,
         "temperature": temperature,
         "stream": False,
-        "max_tokens": 2048,
+        "max_tokens": max_output_tokens(settings),
     }
     if tools:
         body["tools"] = tools

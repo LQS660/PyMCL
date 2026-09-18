@@ -82,12 +82,14 @@ class AgentThread(QThread):
     done = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, backend, settings, history, user_text, parent=None):
+    def __init__(self, backend, settings, history, user_text, parent=None,
+                 queue_fn=None):
         super().__init__(parent)
         self.backend = backend
         self.settings = settings
         self.history = history
         self.user_text = user_text
+        self._queue_fn = queue_fn
         self._cancel = False
         self._http = HttpCancel()
         self._confirm_ev = threading.Event()
@@ -133,12 +135,19 @@ class AgentThread(QThread):
         def cancelled():
             return self._cancel
 
+        def drain_inputs_fn():
+            # 运行中用户补的话：每轮开头取走，同一回合被采纳
+            try:
+                return list(self._queue_fn() or []) if self._queue_fn else []
+            except Exception:  # noqa: BLE001
+                return []
+
         try:
             result = run_agent(
                 self.backend, self.settings, self.history, self.user_text,
                 on_delta=on_delta, on_status=on_status,
                 confirm_fn=confirm_fn, ask_fn=ask_fn, cancelled=cancelled,
-                http_cancel=self._http,
+                http_cancel=self._http, drain_inputs_fn=drain_inputs_fn,
             )
             if self._cancel:
                 self.failed.emit(tr("已停止"))
@@ -907,11 +916,19 @@ class AiPage(QWidget):
             self.input.clear()
             # 这里已经把气泡贴出去了，出队时 _send 不能再贴一次
             self._add_bubble("user", text)
-            InfoBar.info(tr("已排队"), tr("这条会在当前回复结束后发出"), parent=self.window() or self,
+            InfoBar.info(tr("已插队"), tr("这句话会立刻交给正在运行的助手"),
+                         parent=self.window() or self,
                          position=InfoBarPosition.TOP, duration=1800)
             return
         self.input.clear()
         self._send(text)
+
+    def _drain_queue(self):
+        """steering：把排队的插话交给正在跑的 agent 回合（线程安全：pop 原子）。"""
+        out = []
+        while self._queue:
+            out.append(self._queue.pop(0))
+        return out
 
     def _send(self, text: str, *, echo: bool = True):
         if echo:
@@ -925,7 +942,8 @@ class AiPage(QWidget):
         self.backend._ui_launch = self._launch_prefs()
         # 只截取最近 24 条喂给模型；完整历史留在 self._history 里，不能跟着截
         worker = AgentThread(
-            self.backend, settings, chat_store.api_messages(self._history[-24:]), text, self)
+            self.backend, settings, chat_store.api_messages(self._history[-24:]), text,
+            self, queue_fn=self._drain_queue)
         self._worker = worker
         worker.delta.connect(self._on_delta, Qt.QueuedConnection)
         worker.status.connect(self._on_status, Qt.QueuedConnection)

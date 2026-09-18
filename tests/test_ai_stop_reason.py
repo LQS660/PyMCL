@@ -83,11 +83,31 @@ class StopReasonTests(StopReasonTestBase):
         self.assertEqual(res.rounds_used, 2)
 
     def test_truncated(self):
-        """★4：finish_reason=length → TRUNCATED。"""
-        res = self._run([[{"type": "delta", "text": "讲一半的排错方案"},
-                          {"type": "done", "finish_reason": "length"}]])
+        """W4-4 契约：截断先自动续写（最多 2 次），仍截断才 TRUNCATED 收场。"""
+        res = self._run([
+            [{"type": "delta", "text": "第一段"},
+             {"type": "done", "finish_reason": "length"}],
+            [{"type": "delta", "text": "第二段"},
+             {"type": "done", "finish_reason": "length"}],
+            [{"type": "delta", "text": "第三段"},
+             {"type": "done", "finish_reason": "length"}],
+        ])
         self.assertEqual(res.stop_reason, StopReason.TRUNCATED)
+        self.assertIn("第一段", str(res))
+        self.assertIn("第二段", str(res))
+        self.assertIn("第三段", str(res))
         self.assertIn("截断", str(res))
+
+    def test_truncated_continues_to_completion(self):
+        """截断后下一轮写完 → COMPLETED，全文拼接且无截断提示。"""
+        res = self._run([
+            [{"type": "delta", "text": "前一半，"},
+             {"type": "done", "finish_reason": "length"}],
+            [{"type": "delta", "text": "后一半。"}, {"type": "done"}],
+        ])
+        self.assertEqual(res.stop_reason, StopReason.COMPLETED)
+        self.assertEqual(str(res), "前一半，后一半。")
+        self.assertNotIn("截断", str(res))
 
     def test_stream_failed(self):
         """★5：流式挂了、非流式兜底也空 → STREAM_FAILED，不再静默。"""

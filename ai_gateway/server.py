@@ -50,6 +50,8 @@ RATE_PER_MIN = int(os.environ.get("RATE_PER_MIN", "40"))
 RATE_PER_DAY = int(os.environ.get("RATE_PER_DAY", "800"))
 MAX_INFLIGHT = int(os.environ.get("MAX_INFLIGHT", "4"))
 MAX_BODY = int(os.environ.get("MAX_BODY", str(512 * 1024)))
+# 单次回复上限：原来硬夹 2048，客户端改大也没用；改可配并默认放宽
+MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "8192") or 8192)
 DEGRADE_AFTER = max(8, RATE_PER_MIN // 2)
 
 
@@ -169,7 +171,8 @@ class Handler(BaseHTTPRequestHandler):
             "messages": messages,
             "temperature": min(float(body.get("temperature") or 0.3), 0.8),
             "stream": want_stream,
-            "max_tokens": min(int(body.get("max_tokens") or 2048), 2048),
+            "max_tokens": min(int(body.get("max_tokens") or MAX_OUTPUT_TOKENS),
+                              MAX_OUTPUT_TOKENS),
         }
         if body.get("tools"):
             out["tools"] = body["tools"]
@@ -187,13 +190,15 @@ class Handler(BaseHTTPRequestHandler):
         try:
             resp = urlopen(req, timeout=180)
         except HTTPError as exc:
-            err = exc.read()[:400]
+            # 错误体放宽到 2000：客户端要靠 "maximum context length" 这类
+            # 关键词触发 reactive compact，截太短关键词就被切掉了
+            err = exc.read()[:2000]
             try:
                 msg = json.loads(err.decode("utf-8", errors="replace"))
                 text = ((msg.get("error") or {}).get("message") if isinstance(msg, dict) else None) or "上游繁忙"
             except Exception:
-                text = "上游繁忙"
-            self._err(502, str(text)[:200])
+                text = err.decode("utf-8", errors="replace") or "上游繁忙"
+            self._err(502, str(text)[:800])
             return
         except URLError:
             self._err(502, "连不上上游")

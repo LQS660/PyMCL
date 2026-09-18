@@ -17,8 +17,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 from mclauncher.ai import agent as agent_mod
+from mclauncher.ai import compact as compact_mod
 from mclauncher.ai import scheduler
 from mclauncher.ai import trace as trace_mod
+from mclauncher.ai import tools as ai_tools
+from mclauncher.ai.client import is_context_overflow
 from mclauncher.ai.permission import Behavior, Rule
 from mclauncher.ai.result import StopReason
 from mclauncher.ai.state import (
@@ -265,6 +268,131 @@ class AgentLoopTests(unittest.TestCase):
         tool_msg = [m for m in seen[1] if m.get("role") == "tool"][0]
         self.assertIn("[权限] 已拒绝", tool_msg["content"])
         self.assertEqual(res.stop_reason, StopReason.COMPLETED)
+
+
+class InterruptAndSteeringTests(unittest.TestCase):
+    """批次 4：中断、插话、reactive compact、截断续写。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old_dir = trace_mod.TRACE_DIR
+        trace_mod.TRACE_DIR = Path(self._tmp.name)
+        self._seen = []
+
+    def tearDown(self):
+        trace_mod.TRACE_DIR = self._old_dir
+        self._tmp.cleanup()
+
+    def _fake_stream(self, streams):
+        holder = {"n": 0}
+
+        def fake(settings, messages, tools=None, http_cancel=None, **k):
+            self._seen.append([dict(m) for m in messages])
+            events = streams[holder["n"]]
+            holder["n"] += 1
+            yield from events
+        return fake
+
+    def _run(self, streams, **kw):
+        with mock.patch.object(agent_mod, "chat_stream",
+                               side_effect=self._fake_stream(streams)), \
+             mock.patch.object(agent_mod, "chat_once",
+                               return_value={"content": "", "tool_calls": [],
+                                             "finish_reason": "stop"}), \
+             mock.patch.object(agent_mod, "run_tool", return_value="ok"):
+            res = agent_mod.run_agent(SimpleNamespace(), {}, [], "干活", **kw)
+        return res, self._seen
+
+    def test_run_tool_cancelled_at_entry(self):
+        """W4-1：点了停止后 run_tool 入口立刻抛 ToolCancelled，不再执行。"""
+        with self.assertRaises(ai_tools.ToolCancelled):
+            ai_tools.run_tool(SimpleNamespace(), "list_mods", {},
+                              cancelled=lambda: True)
+
+    def test_run_tool_cancelled_after_execution(self):
+        state = {"v": False}
+
+        def cancelled():
+            return state["v"]
+
+        def execute(backend, name, args, wait=True, cancelled=None):
+            state["v"] = True   # 执行期间用户点了停止
+            return "ok"
+
+        with mock.patch.object(ai_tools, "execute_tool", side_effect=execute):
+            with self.assertRaises(ai_tools.ToolCancelled):
+                ai_tools.run_tool(SimpleNamespace(), "list_mods", {},
+                                  cancelled=cancelled)
+
+    def test_tool_cancelled_maps_to_agent_cancelled(self):
+        """agent 收到 ToolCancelled → 转 AgentCancelled，UI 显示已停止。"""
+        streams = [[{"type": "tool_calls", "tool_calls": [_tc("a", "list_mods")]}]]
+        with mock.patch.object(agent_mod, "chat_stream",
+                               side_effect=self._fake_stream(streams)), \
+             mock.patch.object(agent_mod, "chat_once",
+                               return_value={"content": "", "tool_calls": [],
+                                             "finish_reason": "stop"}), \
+             mock.patch.object(agent_mod, "run_tool",
+                               side_effect=ai_tools.ToolCancelled("已停止")):
+            with self.assertRaises(agent_mod.AgentCancelled):
+                agent_mod.run_agent(SimpleNamespace(), {}, [], "干活")
+
+    def test_steering_reaches_model_same_turn(self):
+        """W4-2：跑动中补的话在同一个回合被模型看到。"""
+        streams = [
+            [{"type": "tool_calls", "tool_calls": [_tc("a", "list_mods")]}],
+            [{"type": "delta", "text": "好的，内存改到 8G。"}, {"type": "done"}],
+        ]
+        queue = [["内存加到 8G"], []]
+        res, seen = self._run(streams, drain_inputs_fn=lambda: queue.pop(0))
+        steer = [m for m in seen[1] if m.get("role") == "user"
+                 and "内存加到 8G" in str(m.get("content") or "")]
+        self.assertEqual(len(steer), 1, "插话必须作为 user 消息进入下一轮请求")
+        self.assertEqual(res.stop_reason, StopReason.COMPLETED)
+
+    def test_truncation_continuation_messages(self):
+        """W4-4：截断后续写请求注入 assistant+user 两条消息。"""
+        streams = [
+            [{"type": "delta", "text": "前半"},
+             {"type": "done", "finish_reason": "length"}],
+            [{"type": "delta", "text": "后半。"}, {"type": "done"}],
+        ]
+        res, seen = self._run(streams)
+        self.assertEqual(res.stop_reason, StopReason.COMPLETED)
+        self.assertEqual(str(res), "前半后半。")
+        roles = [(m.get("role"), str(m.get("content") or "")) for m in seen[1]]
+        self.assertIn(("assistant", "前半"), roles)
+        self.assertIn(("user", "请从断开处继续，不要重复。"), roles)
+
+    def test_reactive_compact_retries_same_step(self):
+        """W4-3：上游报塞不下 → 压缩 → 重试同一步，用户看不到报错。"""
+        streams = [
+            [{"type": "error",
+              "message": "This model's maximum context length is 8192 tokens"}],
+            [{"type": "delta", "text": "恢复了"}, {"type": "done"}],
+        ]
+        compacted = [
+            {"role": "system", "content": "系统提示"},
+            {"role": "user", "content": "[历史摘要]\n摘要正文"},
+        ]
+        cres = compact_mod.CompactionResult(messages=compacted, pre_token_count=5000,
+                                            post_token_count=100)
+        with mock.patch.object(compact_mod, "compact_conversation",
+                               return_value=cres) as fake_compact:
+            res, seen = self._run(streams)
+        self.assertEqual(fake_compact.call_count, 1, "每步只抢救一次")
+        self.assertEqual(res.stop_reason, StopReason.NO_TOOL_CALL)
+        self.assertEqual(str(res), "恢复了")
+        # 重试请求用的是压缩后的 messages
+        self.assertEqual(seen[1], compacted)
+
+    def test_is_context_overflow_keywords(self):
+        self.assertTrue(is_context_overflow(
+            "This model's maximum context length is 8192 tokens"))
+        self.assertTrue(is_context_overflow("prompt too long"))
+        self.assertTrue(is_context_overflow("上下文长度超出限制"))
+        self.assertFalse(is_context_overflow("接口超时"))
+        self.assertFalse(is_context_overflow(""))
 
 
 if __name__ == "__main__":

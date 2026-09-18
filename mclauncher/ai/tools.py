@@ -644,7 +644,13 @@ def execute_tool(backend, name: str, args: dict, wait=True, cancelled=None):
     return f"未知工具: {name}"
 
 
+class ToolCancelled(Exception):
+    """用户点了停止：工具执行里抛出，agent 捕获后转 StopReason.CANCELLED。"""
+
+
 def run_tool(backend, name: str, raw_args, wait=True, cancelled=None) -> str:
+    if cancelled is not None and cancelled():
+        raise ToolCancelled("已停止")
     if isinstance(raw_args, str):
         try:
             args = json.loads(raw_args or "{}")
@@ -654,7 +660,11 @@ def run_tool(backend, name: str, raw_args, wait=True, cancelled=None) -> str:
         args = dict(raw_args or {})
     try:
         result = execute_tool(backend, name, args, wait=wait, cancelled=cancelled)
+        if cancelled is not None and cancelled():
+            raise ToolCancelled("已停止")
         return _clip(result, name)
+    except ToolCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         trace.record("tool_exception", tool_name=name, exc=exc)
         return f"工具失败: {exc}"

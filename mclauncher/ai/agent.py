@@ -12,14 +12,14 @@ from . import permission
 from . import scheduler
 from . import tokens as tokens_mod
 from . import trace
-from .client import AIClientError, chat_once, chat_stream
+from .client import AIClientError, chat_once, chat_stream, is_context_overflow
 from .defaults import MAX_HISTORY, MAX_TOOL_ROUNDS
 from .permission import Behavior, Decision, Rule
 from .prompt import system_prompt
 from .result import AgentResult, StopReason
 from .state import IllegalTransition, ToolCall, ToolCallStatus, TurnPhase, TurnState
 from .tools import (
-    TOOL_META, TOOL_SCHEMAS, confirm_label, is_ask_tool,
+    TOOL_META, TOOL_SCHEMAS, ToolCancelled, confirm_label, is_ask_tool,
     normalize_ask_args, parse_args, run_tool, runtime_context,
 )
 
@@ -81,13 +81,14 @@ def _to_phase(turn: TurnState, phase: TurnPhase) -> None:
 
 def run_agent(backend, settings: dict, history: list, user_text: str,
               on_delta=None, on_status=None, confirm_fn=None, ask_fn=None,
-              cancelled=None, http_cancel=None):
+              cancelled=None, http_cancel=None, drain_inputs_fn=None):
     """
     on_delta(text)
     on_status(kind, payload)
     confirm_fn(tool_name, args, label[, reason]) -> bool | Rule
     ask_fn(questions, title) -> dict | None
     cancelled() -> bool
+    drain_inputs_fn() -> list[str]   运行中用户插话（steering），每轮开头取走
     返回 AgentResult（str 子类，可直接当文本用；额外带 stop_reason 等元数据）。
     """
     def _check():
@@ -132,6 +133,8 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
     ask_answered_prev = False       # 上一轮 ask_user 拿到了答案
     continuation_used = False       # 代码保证的续步只用一次
     continuation_pending = False    # 下一轮 progress 通道带行动指引
+    continuation_parts: list = []   # 截断续写时已产出的片段
+    continuation_count = 0          # 截断续写次数（最多 2 次）
     turn = TurnState(id=uuid.uuid4().hex[:12], session_id="active", turn_number=1)
 
     # ---- 上下文与 token（批次 3）----
@@ -155,12 +158,50 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
         _check()
         return data.get("content") or ""
 
+    def _force_compact(round_: int) -> bool:
+        """reactive compact：上游报「塞不下」时强制压缩，成功返回 True。"""
+        try:
+            cres = compact.compact_conversation(messages, auto_cfg, _summarize)
+        except AgentCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            compact.note_compact_failure(cstate, auto_cfg)
+            trace.record("reactive_compact_failure", round_=round_, exc=exc)
+            return False
+        messages[:] = cres.messages
+        compact.note_compact_success(cstate)
+        _status("compact", {"reason": "reactive", "pre": cres.pre_token_count,
+                            "post": cres.post_token_count})
+        trace.record("reactive_compact", round_=round_,
+                     pre=cres.pre_token_count, post=cres.post_token_count)
+        return True
+
+    def _full(text: str) -> str:
+        """截断续写后，返回给用户的必须是拼完整的全文。"""
+        if not continuation_parts:
+            return text
+        return "".join(continuation_parts) + text
+
     try:
         turn.transition(TurnPhase.PROCESSING_INPUT)
         for _round in range(MAX_TOOL_ROUNDS):
             round_no[0] = _round + 1
             turn.rounds_used = round_no[0]
             _check()
+
+            # steering：用户在跑动期间补的话，同一回合被采纳
+            if drain_inputs_fn:
+                try:
+                    steers = [str(s or "").strip() for s in (drain_inputs_fn() or [])]
+                except Exception as exc:  # noqa: BLE001
+                    trace.record("drain_inputs_error", round_=round_no[0], exc=exc)
+                    steers = []
+                for steer_text in steers:
+                    if not steer_text:
+                        continue
+                    messages.append({"role": "user", "content": steer_text})
+                    _status("steer", {"text": steer_text[:200]})
+
             if turn.phase == TurnPhase.PROCESSING_INPUT:
                 turn.transition(TurnPhase.AWAITING_MODEL)
             turn.transition(TurnPhase.STREAMING)
@@ -217,59 +258,83 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                                         "cleared": mres.cleared_count,
                                         "saved": mres.tokens_saved})
 
-            n_req = len(messages)
-            tool_calls = []
-            text_parts = []
+            reactive_attempted = False
+            tool_calls: list = []
+            text_parts: list = []
             truncated = False
             stream_failed = False
-            usage_info = None
-            try:
-                for ev in chat_stream(settings, messages, TOOL_SCHEMAS, http_cancel=http_cancel):
-                    _check()
-                    kind = ev.get("type")
-                    if kind == "delta":
-                        piece = ev.get("text") or ""
-                        text_parts.append(piece)
-                        _delta(piece)
-                    elif kind == "tool_calls":
-                        tool_calls = ev.get("tool_calls") or []
-                        break
-                    elif kind == "done":
-                        truncated = ev.get("finish_reason") == "length"
-                        break
-                    elif kind == "usage":
-                        usage_info = ev.get("usage")
-                    elif kind == "error":
-                        raise AIClientError(ev.get("message") or "接口错误")
-            except AIClientError as exc:
-                if exc.fatal():
-                    raise
-                stream_failed = True
-                trace.record("stream_error", round_=round_no[0], exc=exc, stream_failed=True)
-            except Exception as exc:  # noqa: BLE001
-                stream_failed = True
-                trace.record("stream_exception", round_=round_no[0], exc=exc, stream_failed=True)
-            if usage_info:
-                tokens_mod.update_from_usage(token_state, usage_info, n_req)
+            for _attempt in range(2):
+                tool_calls = []
+                text_parts = []
+                truncated = False
+                stream_failed = False
+                n_req = len(messages)
+                usage_info = None
+                stream_err = ""
+                try:
+                    for ev in chat_stream(settings, messages, TOOL_SCHEMAS, http_cancel=http_cancel):
+                        _check()
+                        kind = ev.get("type")
+                        if kind == "delta":
+                            piece = ev.get("text") or ""
+                            text_parts.append(piece)
+                            _delta(piece)
+                        elif kind == "tool_calls":
+                            tool_calls = ev.get("tool_calls") or []
+                            break
+                        elif kind == "done":
+                            truncated = ev.get("finish_reason") == "length"
+                            break
+                        elif kind == "usage":
+                            usage_info = ev.get("usage")
+                        elif kind == "error":
+                            raise AIClientError(ev.get("message") or "接口错误")
+                except AIClientError as exc:
+                    if exc.fatal():
+                        raise
+                    stream_failed = True
+                    stream_err = str(exc)
+                    trace.record("stream_error", round_=round_no[0], exc=exc, stream_failed=True)
+                except Exception as exc:  # noqa: BLE001
+                    stream_failed = True
+                    stream_err = str(exc)
+                    trace.record("stream_exception", round_=round_no[0], exc=exc, stream_failed=True)
+                if usage_info:
+                    tokens_mod.update_from_usage(token_state, usage_info, n_req)
 
-            if not tool_calls and (stream_failed or not "".join(text_parts)):
-                _check()
-                data = chat_once(settings, messages, TOOL_SCHEMAS, http_cancel=http_cancel)
-                if isinstance(data.get("usage"), dict) and data["usage"]:
-                    tokens_mod.update_from_usage(token_state, data["usage"], len(messages))
-                if not text_parts and data.get("content"):
-                    text_parts.append(data["content"])
-                    _delta(data["content"])
-                if not tool_calls:
-                    tool_calls = data.get("tool_calls") or []
-                truncated = truncated or data.get("finish_reason") == "length"
-                if not tool_calls and not data.get("content"):
-                    trace.record("empty_fallback", round_=round_no[0],
-                                 stream_failed=stream_failed, text_len=0)
+                # reactive compact：上下文塞不下 → 压缩后重试同一个 step（每步一次）
+                if is_context_overflow(stream_err) and not reactive_attempted:
+                    reactive_attempted = True
+                    if _force_compact(round_no[0]):
+                        continue
+
+                if not tool_calls and (stream_failed or not "".join(text_parts)):
+                    _check()
+                    try:
+                        data = chat_once(settings, messages, TOOL_SCHEMAS,
+                                         http_cancel=http_cancel)
+                    except AIClientError as exc:
+                        if exc.fatal():
+                            raise
+                        if is_context_overflow(str(exc)) and not reactive_attempted:
+                            reactive_attempted = True
+                            if _force_compact(round_no[0]):
+                                continue
+                        raise
+                    if isinstance(data.get("usage"), dict) and data["usage"]:
+                        tokens_mod.update_from_usage(token_state, data["usage"], len(messages))
+                    if not text_parts and data.get("content"):
+                        text_parts.append(data["content"])
+                        _delta(data["content"])
+                    if not tool_calls:
+                        tool_calls = data.get("tool_calls") or []
+                    truncated = truncated or data.get("finish_reason") == "length"
+                    if not tool_calls and not data.get("content"):
+                        trace.record("empty_fallback", round_=round_no[0],
+                                     stream_failed=stream_failed, text_len=0)
+                break
 
             content = "".join(text_parts)
-            if truncated and content:
-                content += "\n\n（回复被长度限制截断了，需要的话让我继续。）"
             if content:
                 final = content
 
@@ -285,9 +350,21 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     turn.transition(TurnPhase.AWAITING_MODEL)
                     continue
                 if truncated:
+                    # 截断续写：把已产出内容接回去再要一段，最多 2 次（W4-4）
+                    if continuation_count < 2 and content:
+                        continuation_count += 1
+                        continuation_parts.append(content)
+                        messages.append({"role": "assistant", "content": content})
+                        messages.append({"role": "user",
+                                         "content": "请从断开处继续，不要重复。"})
+                        turn.transition(TurnPhase.SCHEDULING_TOOLS)
+                        turn.transition(TurnPhase.EXECUTING_TOOLS)
+                        turn.transition(TurnPhase.AWAITING_MODEL)
+                        continue
                     _to_phase(turn, TurnPhase.COMPLETING)
-                    return AgentResult(content, stop_reason=StopReason.TRUNCATED,
-                                       rounds_used=rounds_used)
+                    return AgentResult(
+                        _full(content) + "\n\n（回复被长度限制截断了，需要的话让我继续。）",
+                        stop_reason=StopReason.TRUNCATED, rounds_used=rounds_used)
                 if stream_failed and not content:
                     _to_phase(turn, TurnPhase.COMPLETING)
                     return AgentResult("", stop_reason=StopReason.STREAM_FAILED,
@@ -295,18 +372,18 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                                        rounds_used=rounds_used)
                 if pending:
                     _to_phase(turn, TurnPhase.COMPLETING)
-                    return AgentResult(content, stop_reason=StopReason.PENDING_TASK,
+                    return AgentResult(_full(content), stop_reason=StopReason.PENDING_TASK,
                                        pending_tasks=pending, rounds_used=rounds_used)
-                if not content:
+                if not content and not continuation_parts:
                     _to_phase(turn, TurnPhase.COMPLETING)
                     return AgentResult("", stop_reason=StopReason.EMPTY_RESPONSE,
                                        detail="上游返回了空内容", rounds_used=rounds_used)
-                if acted:
+                if acted or continuation_parts:
                     _to_phase(turn, TurnPhase.COMPLETING)
-                    return AgentResult(content, stop_reason=StopReason.COMPLETED,
+                    return AgentResult(_full(content), stop_reason=StopReason.COMPLETED,
                                        rounds_used=rounds_used)
                 _to_phase(turn, TurnPhase.COMPLETING)
-                return AgentResult(content, stop_reason=StopReason.NO_TOOL_CALL,
+                return AgentResult(_full(content), stop_reason=StopReason.NO_TOOL_CALL,
                                    detail="模型只回了文字，没有调用任何工具",
                                    rounds_used=rounds_used)
 
@@ -419,6 +496,9 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     turn.set_tool_status(obj.id, ToolCallStatus.COMPLETED,
                                          result=str(result))
                     return str(result)
+                except ToolCancelled:
+                    turn.set_tool_status(obj.id, ToolCallStatus.FAILED, error="已停止")
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     turn.set_tool_status(obj.id, ToolCallStatus.FAILED, error=str(exc))
                     return f"工具失败: {exc}"
@@ -440,6 +520,10 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
     except AgentCancelled:
         _to_phase(turn, TurnPhase.COMPLETING)
         raise
+    except ToolCancelled as exc:
+        # 工具中途被打断：对 UI 而言就是用户点了停止
+        _to_phase(turn, TurnPhase.COMPLETING)
+        raise AgentCancelled() from exc
     except AIClientError:
         _to_phase(turn, TurnPhase.ERROR)
         raise
@@ -450,7 +534,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
     trace.record("max_rounds", round_=MAX_TOOL_ROUNDS, text_len=len(final))
     _to_phase(turn, TurnPhase.COMPLETING)
     return AgentResult(
-        final or "步骤有点多，先停在这里。你再说一下接下来要哪一步。",
+        _full(final) or "步骤有点多，先停在这里。你再说一下接下来要哪一步。",
         stop_reason=StopReason.MAX_ROUNDS,
         detail=f"已用 {turn.rounds_used}/{MAX_TOOL_ROUNDS} 回合",
         pending_tasks=pending,

@@ -1082,6 +1082,7 @@ class BackendAPI(QObject):
             "ai_permission_rules": list(CONFIG.get("ai_permission_rules") or []),
             "ai_permission_dont_ask": bool(CONFIG.get("ai_permission_dont_ask", False)),
             "ai_context_window": int(CONFIG.get("ai_context_window") or 200000),
+            "ai_max_tokens": int(CONFIG.get("ai_max_tokens") or 8192),
             "download_source": CONFIG.get("download_source") or "auto",
             "community_source": CONFIG.get("community_source") or "auto",
             "use_system_proxy": bool(CONFIG.get("use_system_proxy", True)),
@@ -1191,6 +1192,8 @@ class BackendAPI(QObject):
                                       else bool(CONFIG.get("ai_permission_dont_ask", False)),
             "ai_context_window": int(data["ai_context_window"]) if "ai_context_window" in data
                                  else int(CONFIG.get("ai_context_window") or 200000),
+            "ai_max_tokens": int(data["ai_max_tokens"]) if "ai_max_tokens" in data
+                             else int(CONFIG.get("ai_max_tokens") or 8192),
             "download_source": (data.get("download_source") or CONFIG.get("download_source") or "auto"),
             "community_source": (data.get("community_source") or CONFIG.get("community_source") or "auto"),
             "use_system_proxy": bool(data.get("use_system_proxy", CONFIG.get("use_system_proxy", True))),
