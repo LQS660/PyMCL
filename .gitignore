@@ -119,3 +119,8 @@ config.json.bak*
 # C / C++ 侧的编译产物
 /native/build/
 /uihost/build/
+
+# 大体积审计/冒烟产物与冒烟输出（2026-09-19 清理）
+/_android_audit/
+/_wpf_smoke/
+/smoke_*.txt
