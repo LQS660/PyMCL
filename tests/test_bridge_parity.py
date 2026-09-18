@@ -1,6 +1,7 @@
 """bridge/api.py 必须和 app/backend.py 修得一样。
 
-eziapp / WinUI 走的是这套后端，之前只修了 Qt 那套，同一批缺陷在这里原样存在。
+eziapp / WinUI 走的是这套后端：Qt 那套后端有的每一处修法这里都得有，
+否则同一批缺陷在这边原样存在。
 """
 from __future__ import annotations
 
@@ -154,6 +155,95 @@ class BridgeSelfUpdateTests(unittest.TestCase):
         apply_exe.assert_not_called()
         self.assertIn("update_staged", [e for e, _ in emitted])
         self.assertIn("new.exe", out)
+
+
+class BridgeAiPayloadParityTests(unittest.TestCase):
+    """W0-7：把文件头那句「bridge/api.py 必须和 app/backend.py 修得一样」变成可执行门禁。
+
+    Qt 侧没有事件 payload（进程内直调 AgentResult），两侧共同的锚点是内核
+    AgentResult 的元数据面。所以这里钉死 bridge 事件 payload 的键集合：
+
+    - 桥多发一个键：AgentResult 上取不到值，发出去的是永远为空的死键 → 红；
+    - 桥少发一个键（比如内核给 Qt 加了新元数据、桥没跟上）→ 红，
+      同一批缺陷在 WPF / eziapp / WinUI 上原样存在，这正是文件头那句规约。
+    """
+
+    DONE_KEYS = {"text", "store", "stop_reason", "detail", "pending_tasks"}
+    FAIL_KEYS = {"text", "stopped"}
+    CONFIRM_KEYS = {"name", "args", "label", "reason"}
+
+    def _payload_keys(self, event: str) -> set:
+        """AST 抽出 bridge/api.py 里 emit("<event>", {字面量 dict}) 的键集合。"""
+        import ast
+        src = Path(bridge_api.__file__).read_text("utf-8")
+        keys: set = set()
+        for node in ast.walk(ast.parse(src)):
+            if not (isinstance(node, ast.Call) and node.args
+                    and isinstance(node.func, ast.Attribute) and node.func.attr == "emit"):
+                continue
+            ev = node.args[0]
+            if not (isinstance(ev, ast.Constant) and ev.value == event):
+                continue
+            payload = node.args[1] if len(node.args) > 1 else None
+            if isinstance(payload, ast.Dict):
+                keys |= {k.value for k in payload.keys if isinstance(k, ast.Constant)}
+        return keys
+
+    def test_done_payload_forwards_kernel_metadata(self):
+        from mclauncher.ai.result import AgentResult
+        result = AgentResult("ok", stop_reason="max_rounds", detail="d",
+                             pending_tasks=[{"task_id": "t"}])
+        for key in self.DONE_KEYS - {"text", "store"}:
+            self.assertTrue(hasattr(result, key),
+                            f"AgentResult 缺 {key}：bridge 在 ai.done 里发的是死键")
+        self.assertEqual(self._payload_keys("ai.done"), self.DONE_KEYS)
+
+    def test_fail_payload_keeps_stopped_flag(self):
+        self.assertEqual(self._payload_keys("ai.fail"), self.FAIL_KEYS)
+
+    def test_confirm_payload_carries_reason(self):
+        self.assertEqual(self._payload_keys("ai.confirm"), self.CONFIRM_KEYS)
+
+
+class BridgePermissionModeParityTests(unittest.TestCase):
+    """W-5：ai_permission_mode 的存取必须跟 app/backend.py 同一套词表。
+
+    WPF / wpf32 的历史遗留值（trusted / strict / readonly）后端认不出；
+    这边曾经既不校验也不透传——save_settings 白名单里压根没这几个键，
+    前端选什么档位都被静默丢掉。
+    """
+
+    def _save(self, data: dict) -> dict:
+        patch: dict = {}
+        api = BackendAPI(mock.MagicMock())  # save_settings 不碰事件总线，给个空的即可
+        with mock.patch.object(bridge_api.CONFIG, "update", side_effect=patch.update), \
+             mock.patch.object(bridge_api.CONFIG, "save"):
+            api.save_settings(data)
+        return patch
+
+    def test_known_mode_is_saved_verbatim(self):
+        for mode in ("default", "acceptEdits", "plan", "yolo", "standard", "full"):
+            self.assertEqual(self._save({"ai_permission_mode": mode})["ai_permission_mode"], mode)
+
+    def test_unknown_mode_falls_back_like_backend(self):
+        self.assertEqual(
+            self._save({"ai_permission_mode": "trusted", "ai_confirm_writes": True})
+            ["ai_permission_mode"], "default")
+        self.assertEqual(
+            self._save({"ai_permission_mode": "readonly", "ai_confirm_writes": False})
+            ["ai_permission_mode"], "yolo")
+
+    def test_mode_key_absent_is_not_touched(self):
+        self.assertNotIn("ai_permission_mode", self._save({"ai_model": "m"}))
+
+    def test_get_settings_returns_normalized_mode(self):
+        api = BackendAPI(mock.MagicMock())
+        vals = {"ai_permission_mode": "trusted", "ai_confirm_writes": True}
+        with mock.patch.object(bridge_api.CONFIG, "get",
+                               side_effect=lambda k, d=None: vals.get(k, d)):
+            mode = api.get_settings()["ai_permission_mode"]
+        from mclauncher.ai.permission import normalize_permission_mode
+        self.assertEqual(mode, normalize_permission_mode("trusted", True))
 
 
 if __name__ == "__main__":

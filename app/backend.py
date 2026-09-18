@@ -862,11 +862,12 @@ class BackendAPI(QObject):
 
     def launch_game(self, instance: str, version: str, account: str,
                     username: str, memory_mb: int, width: int, height: int,
-                    java: str = tr("自动选择"), extra_game_args=None) -> str:
+                    java: str = tr("自动选择"), extra_game_args=None,
+                    force: bool = False) -> str:
         task_id = self.start_task(
             f"启动游戏 {version}", self._launch_game_impl,
             instance, version, account, username, memory_mb, width, height, java,
-            extra_game_args,
+            extra_game_args, force,
         )
         self._launch_task_id = task_id
         return task_id
@@ -2296,7 +2297,7 @@ class BackendAPI(QObject):
 
     def _launch_game_impl(self, progress, log, instance, version, account,
                           username, memory_mb, width, height, java=tr("自动选择"),
-                          extra_game_args=None):
+                          extra_game_args=None, force: bool = False):
         if not version:
             raise LaunchError(tr("请先选择版本（到「版本」页安装）"))
         # 多开检查
@@ -2323,8 +2324,13 @@ class BackendAPI(QObject):
                 log(line)
         if not pf.get("ok", True):
             errs = [it for it in (pf.get("items") or []) if it.get("level") == "error"]
-            msg = "\n\n".join(f"· {e.get('title')}\n{e.get('detail')}" for e in errs) or tr("启动预检未通过")
-            raise LaunchError(tr("启动预检未通过") + "\n\n" + msg)
+            if force:
+                # 预检弹框里用户选了「仍要启动」：把忽略了哪几条记进任务日志头，崩溃归因好定位
+                log("[预检:强制启动] 忽略 " + str(len(errs)) + " 条 error 强制启动："
+                    + "; ".join(f"{e.get('code')}·{e.get('title')}" for e in errs))
+            else:
+                msg = "\n\n".join(f"· {e.get('title')}\n{e.get('detail')}" for e in errs) or tr("启动预检未通过")
+                raise LaunchError(tr("启动预检未通过") + "\n\n" + msg)
 
         inst = self._instance(instance)
         log(f"游戏目录: {inst.path} | 版本: {version}")

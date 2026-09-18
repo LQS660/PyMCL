@@ -520,9 +520,12 @@ export function renderLaunchPage(container: HTMLElement) {
         extraGameArgs = ['--server', serverText, '--port', '25565'];
       }
     }
+    let force = false;
     try {
       const pf = await bridge.call<{ items?: any[] }>('preflight_launch', { instance, version, memory_mb: memory, java });
-      if (await preflightDialog(Array.isArray(pf?.items) ? pf!.items : []) !== 'continue') return;
+      const verdict = await preflightDialog(Array.isArray(pf?.items) ? pf!.items : []);
+      if (verdict === 'cancel') return;
+      force = verdict === 'force';
     } catch (e: any) { return toast(e?.message || '启动预检失败', 'error'); }
     progressCard.style.display = 'block';
     logEl.textContent = '';
@@ -532,7 +535,7 @@ export function renderLaunchPage(container: HTMLElement) {
     try {
       const taskId = await bridge.call<string>('launch_game', {
         instance, version, account, username, java,
-        memory_mb: memory, width, height, extra_game_args: extraGameArgs,
+        memory_mb: memory, width, height, extra_game_args: extraGameArgs, force,
       });
       currentLaunchTaskId = taskId;
       store.gameRunning = true;

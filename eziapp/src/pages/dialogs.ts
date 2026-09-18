@@ -6,10 +6,10 @@ import { errorMessage, escapeHtml, formatBytes } from './common';
 export type PreflightItem = { level?: string; code?: string; title?: string; detail?: string };
 export type CrashAction = { id?: string; label?: string; mods?: string[]; major?: number; version?: string; instance?: string; memory_mb?: number };
 
-/** 启动预检：有 error 阻止；仅 warn 可继续。 */
+/** 启动预检：有 error 给「仍要启动」强启出口；仅 warn 可继续。 */
 export function preflightDialog(
   items: PreflightItem[],
-): Promise<'block' | 'continue' | 'cancel'> {
+): Promise<'continue' | 'cancel' | 'force'> {
   const errors = items.filter(i => i.level === 'error');
   const warns = items.filter(i => i.level === 'warn');
   if (!errors.length && !warns.length) return Promise.resolve('continue');
@@ -18,7 +18,8 @@ export function preflightDialog(
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     const blocked = errors.length > 0;
-    const rows = (blocked ? errors : warns)
+    // errors / warns 并存时合成一个框、一次拍板（对齐 Qt launch_page）
+    const rows = [...(blocked ? errors : []), ...warns]
       .map(i => `<div style="margin-bottom:10px"><strong>${escapeHtml(i.title || i.code || '')}</strong><div style="font-size:12px;color:var(--text-secondary);white-space:pre-wrap;margin-top:4px">${escapeHtml(i.detail || '')}</div></div>`)
       .join('');
     overlay.innerHTML = `
@@ -29,11 +30,22 @@ export function preflightDialog(
       </div>
     `;
     (overlay.querySelector('#pf-title') as HTMLElement).textContent = blocked ? '启动预检未通过' : '启动预检有警告';
-    (overlay.querySelector('#pf-body') as HTMLElement).innerHTML = rows;
+    const bodyEl = overlay.querySelector('#pf-body') as HTMLElement;
+    bodyEl.innerHTML = rows;
+    if (blocked) {
+      const hint = document.createElement('div');
+      hint.style.marginTop = '12px';
+      hint.textContent = '这些问题可能导致启动失败。仍要强制启动？';
+      bodyEl.appendChild(hint);
+    }
     const actions = overlay.querySelector('#pf-actions') as HTMLElement;
     if (blocked) {
-      actions.innerHTML = `<button class="btn btn-primary" id="pf-ok">知道了</button>`;
-      actions.querySelector('#pf-ok')!.addEventListener('click', () => { dismissOverlay(overlay); resolve('block'); });
+      actions.innerHTML = `
+        <button class="btn" id="pf-cancel">取消</button>
+        <button class="btn btn-primary" id="pf-force">仍要启动</button>
+      `;
+      actions.querySelector('#pf-cancel')!.addEventListener('click', () => { dismissOverlay(overlay); resolve('cancel'); });
+      actions.querySelector('#pf-force')!.addEventListener('click', () => { dismissOverlay(overlay); resolve('force'); });
     } else {
       actions.innerHTML = `
         <button class="btn" id="pf-cancel">取消</button>
@@ -43,7 +55,7 @@ export function preflightDialog(
       actions.querySelector('#pf-go')!.addEventListener('click', () => { dismissOverlay(overlay); resolve('continue'); });
     }
     overlay.addEventListener('click', e => {
-      if (e.target === overlay) { dismissOverlay(overlay); resolve(blocked ? 'block' : 'cancel'); }
+      if (e.target === overlay) { dismissOverlay(overlay); resolve('cancel'); }
     });
     document.body.appendChild(overlay);
   });

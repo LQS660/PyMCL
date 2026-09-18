@@ -80,8 +80,9 @@ def check_launch(instance, version: str, *, memory_mb: int = 0, java_exe: str = 
         unzipped = [p.name for p in mods_path.iterdir()
                     if p.is_dir() and not p.name.startswith(".")]
         if unzipped:
+            # 只是「你以为装了其实没装」：生产环境加载器直接忽略目录，不会拦启动，降为 warn
             items.append(_item(
-                "error", "mod_unzipped", "Mods 被解压成了文件夹",
+                "warn", "mod_unzipped", "Mods 被解压成了文件夹",
                 "直接放整个 .jar/.zip 即可。请删掉这些文件夹：\n - " + "\n - ".join(unzipped[:12])))
         jars = [p.name for p in mods_path.iterdir() if p.suffix.lower() == ".jar"]
         looks_loader = any(tok in version.lower() for tok in (
@@ -290,6 +291,32 @@ def _check_natives(inst: Instance, version: str, resolved: dict, items: list[dic
             f"{ndir} 为空或不完整。启动时会尝试再解压；若仍黑屏请修复该版本。"))
 
 
+def _global_mod_ids() -> set[str]:
+    """全局 Mod 池（shared/mods）里启用的 jar 的模组 id。解析失败当没有，不另报项。"""
+    try:
+        from .ai.conflict import inspect_jar
+        from . import global_mods
+    except Exception:
+        return set()
+    gdir = global_mods.root()
+    if not gdir.is_dir():
+        return set()
+    try:
+        jars = [p for p in sorted(gdir.iterdir())
+                if p.is_file() and p.name.lower().endswith(".jar")]
+    except OSError:
+        return set()
+    ids: set[str] = set()
+    for p in jars[:_MAX_MOD_JARS]:
+        try:
+            mid = (inspect_jar(p).get("id") or "").lower()
+        except Exception:
+            continue
+        if mid:
+            ids.add(mid)
+    return ids
+
+
 def _check_mod_conflicts(inst: Instance, mods_path: Path, items: list[dict]) -> None:
     try:
         from .ai.conflict import inspect_jar
@@ -329,6 +356,9 @@ def _check_mod_conflicts(inst: Instance, mods_path: Path, items: list[dict]) -> 
             "同 id 装了多份会导致启动失败：\n - " + "\n - ".join(dups[:8])))
 
     present = set(by_id)
+    # 全局 Mod 池的 jar 启动时才链进 mods 目录，预检时还不在当前目录里：
+    # 共享池里装了 fabric-api 的用户会被误报，先到池子里找一遍再报缺失
+    fabric_present = bool({"fabric-api", "fabricapi"} & (present | _global_mod_ids()))
     breaks = []
     missing_deps = []
     skip = {
@@ -345,7 +375,7 @@ def _check_mod_conflicts(inst: Instance, mods_path: Path, items: list[dict]) -> 
             if not did or did in skip:
                 continue
             if did in ("fabric-api", "fabricapi", "fabric"):
-                if "fabric-api" not in present and "fabricapi" not in present:
+                if not fabric_present:
                     missing_deps.append(f"{m.get('name') or m.get('file')} 需要 Fabric API")
                 continue
             if did not in present:

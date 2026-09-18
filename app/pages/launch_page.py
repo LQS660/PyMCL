@@ -612,25 +612,49 @@ class LaunchPage(QWidget):
         items = list((pf or {}).get("items") or [])
         errors = [i for i in items if i.get("level") == "error"]
         warns = [i for i in items if i.get("level") == "warn"]
-        if errors:
-            body = "\n\n".join(
-                f"· {e.get('title')}\n{e.get('detail')}" for e in errors)
-            MessageBox(tr("启动预检未通过"), body, self).exec()
-            return
-        if warns:
-            body = "\n\n".join(
-                f"· {w.get('title')}\n{w.get('detail')}" for w in warns)
-            box = MessageBox(
-                tr("启动预检有警告"),
-                body + "\n\n" + tr("是否仍要继续启动？"),
-                self,
-            )
-            box.yesButton.setText(tr("继续启动"))
-            box.cancelButton.setText(tr("取消"))
-            if not box.exec():
-                return
+        force = False
+        if errors or warns:
+            # errors / warns 并存时合成一个框、一次拍板，不连弹两个
+            parts = []
+            if errors:
+                parts.append("\n\n".join(
+                    f"· {e.get('title')}\n{e.get('detail')}" for e in errors))
+            if warns:
+                parts.append("\n\n".join(
+                    f"· {w.get('title')}\n{w.get('detail')}" for w in warns))
+            body = "\n\n".join(parts)
+            if errors:
+                box = MessageBox(
+                    tr("启动预检未通过"),
+                    body + "\n\n" + tr("这些问题可能导致启动失败。仍要强制启动？"),
+                    self,
+                )
+                box.yesButton.setText(tr("仍要启动"))
+                box.cancelButton.setText(tr("取消"))
+                # 回车默认要落在「取消」上：qfluentwidgets 的 MessageBox 默认 yes，
+                # 不改回去一个回车就变成强启了
+                box.yesButton.setDefault(False)
+                box.cancelButton.setDefault(True)
+                box.cancelButton.setFocus()
+                if not box.exec():
+                    return
+                force = True
+            else:
+                box = MessageBox(
+                    tr("启动预检有警告"),
+                    body + "\n\n" + tr("是否仍要继续启动？"),
+                    self,
+                )
+                box.yesButton.setText(tr("继续启动"))
+                box.cancelButton.setText(tr("取消"))
+                if not box.exec():
+                    return
 
         self.log_edit.clear()
+        if force:
+            for e in errors:
+                self.log_edit.appendPlainText(
+                    f"[预检:error] {e.get('title')}: {e.get('detail')}")
         for w in warns:
             self.log_edit.appendPlainText(
                 f"[预检:warn] {w.get('title')}: {w.get('detail')}")
@@ -658,6 +682,7 @@ class LaunchPage(QWidget):
             height=self.height_spin.value(),
             java=java,
             extra_game_args=extra or None,
+            force=force,
         )
 
     def _on_stop(self):
