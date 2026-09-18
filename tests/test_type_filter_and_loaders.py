@@ -111,7 +111,7 @@ class NeoforgeVersionFilterTests(unittest.TestCase):
         self.assertEqual(set(rows), {"21.4.10", "21.4.140"})
 
     def test_unknown_version_returns_empty_not_everything(self):
-        """以前 prefix=None 会退化成「不过滤」，把所有 MC 的构建都列出来。"""
+        """prefix=None 不得退化成「不过滤」把所有 MC 的构建都列出来。"""
         rows = loader_meta.filter_neoforge_versions(self.VERSIONS, "1.19.2")
         self.assertEqual(rows, [])
 

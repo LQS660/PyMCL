@@ -16,8 +16,8 @@ from mclauncher import mod_update, utils
 class BomJsonTests(unittest.TestCase):
     """记事本 / VSCode / PowerShell 存出来的 BOM 文件必须能读回来。
 
-    read_json 以前用 encoding='utf-8'，遇到 BOM 抛 JSONDecodeError 后返回
-    default —— Config.load() 因此把整份 config.json 当成不存在并重置默认值。
+    read_json 若用不带 -sig 的 encoding='utf-8'，遇到 BOM 会抛 JSONDecodeError 后返回
+    default —— Config.load() 就会把整份 config.json 当成不存在并重置默认值。
     """
 
     def test_utf8_bom_config_is_readable(self):

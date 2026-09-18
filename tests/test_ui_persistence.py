@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from mclauncher.config import DEFAULT_CONFIG
+from mclauncher import config as config_mod
 from mclauncher import servers as servers_mod
 from mclauncher import terracotta as terracotta_mod
 from mclauncher import worlds as worlds_mod
@@ -73,6 +74,52 @@ class ConfigWhitelistTests(unittest.TestCase):
         self.assertEqual(data["ui_nav_order"], ["tasks", "launch"])
         self.assertEqual(data["ui_layout"]["grid"], 16)
         self.assertTrue(data["future_feature_flag"])
+
+
+class BackgroundHistoryTests(unittest.TestCase):
+    """壁纸撤销栈。两个栈必须等长成对，且只能装得下真路径。"""
+
+    def setUp(self):
+        self.saved = {k: config_mod.CONFIG.get(k)
+                      for k in ("ui_background_history", "ui_background_folder_history")}
+
+    def tearDown(self):
+        for key, value in self.saved.items():
+            config_mod.CONFIG.set(key, value)
+
+    def _stacks(self, images, folders):
+        config_mod.CONFIG.set("ui_background_history", images)
+        config_mod.CONFIG.set("ui_background_folder_history", folders)
+        return config_mod.background_history()
+
+    def test_non_string_entries_are_dropped(self):
+        """整个栈被塞进某一格时，别把它 str() 成一条假路径再拿去加载。"""
+        images, folders = self._stacks(
+            [["C:/a.png", "C:/b.png"], None, 7, "C:/real.png"], [])
+        self.assertEqual(images, ["C:/real.png"])
+        self.assertEqual(folders, [""])
+
+    def test_stacks_stay_paired(self):
+        images, folders = self._stacks(["C:/a.png", "C:/b.png"], ["D:/walls"])
+        self.assertEqual(len(images), len(folders))
+        self.assertEqual(folders, ["D:/walls", ""])
+
+    def test_push_pairs_and_caps(self):
+        self._stacks([], [])
+        images, folders = config_mod.push_background_history("C:/a.png", "D:/walls")
+        self.assertEqual((images, folders), (["C:/a.png"], ["D:/walls"]))
+        for i in range(config_mod.BG_HISTORY_MAX + 5):
+            config_mod.CONFIG.set("ui_background_history", images)
+            config_mod.CONFIG.set("ui_background_folder_history", folders)
+            images, folders = config_mod.push_background_history(f"C:/{i}.png", "")
+        self.assertEqual(len(images), config_mod.BG_HISTORY_MAX)
+        self.assertEqual(len(folders), config_mod.BG_HISTORY_MAX)
+
+    def test_same_pair_is_not_pushed_twice(self):
+        """连点两次同一张，撤销不该要按两下才动。"""
+        self._stacks(["C:/a.png"], ["D:/walls"])
+        images, folders = config_mod.push_background_history("C:/a.png", "D:/walls")
+        self.assertEqual((images, folders), (["C:/a.png"], ["D:/walls"]))
 
 
 class ServersDatTests(unittest.TestCase):
