@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import json
 
+from . import trace
 from .client import AIClientError, chat_once, chat_stream
 from .defaults import DANGEROUS_TOOLS, LONG_TOOLS, MAX_HISTORY, MAX_TOOL_ROUNDS
 from .prompt import system_prompt
+from .result import AgentResult, StopReason
 from .tools import (
     TOOL_SCHEMAS, confirm_label, is_ask_tool, is_write_tool,
     normalize_ask_args, parse_args, run_tool, runtime_context,
@@ -71,26 +73,45 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
     confirm_fn(tool_name, args, label) -> bool
     ask_fn(questions, title) -> dict | None
     cancelled() -> bool
-    返回最终助手文本。
+    返回 AgentResult（str 子类，可直接当文本用；额外带 stop_reason 等元数据）。
     """
     def _check():
         if cancelled and cancelled():
             raise AgentCancelled()
 
+    round_no = [0]
+
+    def _status(kind, payload):
+        if not on_status:
+            return
+        try:
+            on_status(kind, payload or {})
+        except Exception as exc:  # noqa: BLE001
+            trace.record("on_status_error", round_=round_no[0], exc=exc, kind=kind)
+
+    def _delta(piece):
+        if not on_delta or not piece:
+            return
+        try:
+            on_delta(piece)
+        except Exception as exc:  # noqa: BLE001
+            trace.record("on_delta_error", round_=round_no[0], exc=exc)
+
     messages = _system_messages(backend, settings) + _trim_history(history)
     messages.append({"role": "user", "content": user_text})
 
     final = ""
+    acted = False
+    pending: list = []
     need_followup = False
     followup_used = False
     search_done: dict = {}
     need_pick = False
     pick_nudged = False
     for _round in range(MAX_TOOL_ROUNDS):
+        round_no[0] = _round + 1
         _check()
-        if on_status:
-            after = any(m.get("role") == "tool" for m in messages)
-            on_status("think", {"after_tools": after})
+        _status("think", {"after_tools": any(m.get("role") == "tool" for m in messages)})
         tool_calls = []
         text_parts = []
         truncated = False
@@ -102,8 +123,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 if kind == "delta":
                     piece = ev.get("text") or ""
                     text_parts.append(piece)
-                    if on_delta and piece:
-                        on_delta(piece)
+                    _delta(piece)
                 elif kind == "tool_calls":
                     tool_calls = ev.get("tool_calls") or []
                     break
@@ -116,24 +136,29 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             if exc.fatal():
                 raise
             stream_failed = True
-        except Exception:
+            trace.record("stream_error", round_=round_no[0], exc=exc, stream_failed=True)
+        except Exception as exc:  # noqa: BLE001
             stream_failed = True
+            trace.record("stream_exception", round_=round_no[0], exc=exc, stream_failed=True)
 
         if not tool_calls and (stream_failed or not "".join(text_parts)):
             _check()
             data = chat_once(settings, messages, TOOL_SCHEMAS, http_cancel=http_cancel)
             if not text_parts and data.get("content"):
                 text_parts.append(data["content"])
-                if on_delta:
-                    on_delta(data["content"])
+                _delta(data["content"])
             if not tool_calls:
                 tool_calls = data.get("tool_calls") or []
             truncated = truncated or data.get("finish_reason") == "length"
+            if not tool_calls and not data.get("content"):
+                trace.record("empty_fallback", round_=round_no[0],
+                             stream_failed=stream_failed, text_len=0)
 
         content = "".join(text_parts)
         if truncated and content:
             content += "\n\n（回复被长度限制截断了，需要的话让我继续。）"
-        final = content or final
+        if content:
+            final = content
         if not tool_calls:
             if need_followup and not followup_used:
                 followup_used = True
@@ -158,7 +183,26 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     ),
                 })
                 continue
-            return content or final or "我这边没有更多要做的了。"
+            rounds_used = _round + 1
+            if truncated:
+                return AgentResult(content, stop_reason=StopReason.TRUNCATED,
+                                   rounds_used=rounds_used)
+            if stream_failed and not content:
+                return AgentResult("", stop_reason=StopReason.STREAM_FAILED,
+                                   detail="流式与非流式兜底都没有返回内容",
+                                   rounds_used=rounds_used)
+            if pending:
+                return AgentResult(content, stop_reason=StopReason.PENDING_TASK,
+                                   pending_tasks=pending, rounds_used=rounds_used)
+            if not content:
+                return AgentResult("", stop_reason=StopReason.EMPTY_RESPONSE,
+                                   detail="上游返回了空内容", rounds_used=rounds_used)
+            if acted:
+                return AgentResult(content, stop_reason=StopReason.COMPLETED,
+                                   rounds_used=rounds_used)
+            return AgentResult(content, stop_reason=StopReason.NO_TOOL_CALL,
+                               detail="模型只回了文字，没有调用任何工具",
+                               rounds_used=rounds_used)
 
         assistant_msg = {"role": "assistant", "content": content or None, "tool_calls": tool_calls}
         messages.append(assistant_msg)
@@ -175,8 +219,8 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             tname = fn.get("name") or ""
             args = parse_args(fn.get("arguments"))
             label = confirm_label(tname, args)
-            if on_status:
-                on_status("tool", {"name": tname, "args": args, "label": label})
+            _status("tool", {"name": tname, "args": args, "label": label})
+            acted = True
             if is_ask_tool(tname):
                 questions = normalize_ask_args(args)
                 title = args.get("title") or ""
@@ -186,8 +230,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     answered = None
                 if not answered:
                     result = "用户取消了选择"
-                    if on_status:
-                        on_status("tool_skip", {"name": tname, "label": label})
+                    _status("tool_skip", {"name": tname, "label": label})
                 else:
                     asked = True
                     result = answered if isinstance(answered, str) else json.dumps(
@@ -197,8 +240,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                         "[系统] 用户已选完。下一步必须调用对应工具："
                         "装游戏 → install_game（纯原版 loader=无）。不要结束对话。"
                     )
-                    if on_status:
-                        on_status("tool_done", {"name": tname, "label": "已选择", "result": str(result)[:400]})
+                    _status("tool_done", {"name": tname, "label": "已选择", "result": str(result)[:400]})
             elif tname in SEARCH_TOOLS:
                 qkey = (tname, str(args.get("query") or "").strip().lower())
                 if qkey in search_done:
@@ -207,12 +249,10 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                         "[系统] 这一轮已经用相同关键词搜过，结果就是上面这些。"
                         "禁止再搜同一词。立刻 ask_user 让用户选，或说明没找到。"
                     )
-                    if on_status:
-                        on_status("tool_skip", {"name": tname, "label": "拦截重复搜索"})
+                    _status("tool_skip", {"name": tname, "label": "拦截重复搜索"})
                     need_pick = True
                 else:
-                    if on_status:
-                        on_status("tool_run", {"name": tname, "label": label})
+                    _status("tool_run", {"name": tname, "label": label})
                     result = run_tool(backend, tname, args, wait=False, cancelled=cancelled)
                     hint = (
                         "\n[系统] 搜索结束。下一动作必须是 ask_user 让用户从上述结果里选。"
@@ -221,20 +261,17 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     result = f"{result}{hint}"
                     search_done[qkey] = result
                     need_pick = True
-                    if on_status:
-                        on_status("tool_done", {"name": tname, "label": label, "result": str(result)[:400]})
+                    _status("tool_done", {"name": tname, "label": label, "result": str(result)[:400]})
             elif is_write_tool(tname):
                 ok = True
                 if confirm_fn and _confirm_policy(settings, tname):
                     ok = bool(confirm_fn(tname, args, label))
                 if not ok:
                     result = "用户取消了这次操作"
-                    if on_status:
-                        on_status("tool_skip", {"name": tname, "label": label})
+                    _status("tool_skip", {"name": tname, "label": label})
                 else:
                     wrote = True
-                    if on_status:
-                        on_status("tool_run", {"name": tname, "label": label})
+                    _status("tool_run", {"name": tname, "label": label})
                     wait = tname not in LONG_TOOLS and tname != "launch_game"
                     result = run_tool(backend, tname, args, wait=wait, cancelled=cancelled)
                     extra = {}
@@ -242,18 +279,15 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                         parsed = json.loads(result) if isinstance(result, str) and result.startswith("{") else {}
                         if isinstance(parsed, dict) and parsed.get("task_id"):
                             extra["task_id"] = parsed["task_id"]
+                            if parsed.get("queued"):
+                                pending.append({"task_id": parsed["task_id"], "name": tname})
                     except Exception:
                         extra = {}
-                    if on_status:
-                        payload = {"name": tname, "label": label, "result": result[:400]}
-                        payload.update(extra)
-                        on_status("tool_done", payload)
+                    _status("tool_done", {"name": tname, "label": label, "result": result[:400], **extra})
             else:
-                if on_status:
-                    on_status("tool_run", {"name": tname, "label": label})
+                _status("tool_run", {"name": tname, "label": label})
                 result = run_tool(backend, tname, args, wait=False, cancelled=cancelled)
-                if on_status:
-                    on_status("tool_done", {"name": tname, "label": label, "result": str(result)[:400]})
+                _status("tool_done", {"name": tname, "label": label, "result": str(result)[:400]})
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id") or "",
@@ -262,4 +296,11 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             })
         need_followup = asked and not wrote
 
-    return final or "步骤有点多，先停在这里。你再说一下接下来要哪一步。"
+    trace.record("max_rounds", round_=MAX_TOOL_ROUNDS, text_len=len(final))
+    return AgentResult(
+        final or "步骤有点多，先停在这里。你再说一下接下来要哪一步。",
+        stop_reason=StopReason.MAX_ROUNDS,
+        detail=f"已用 {MAX_TOOL_ROUNDS}/{MAX_TOOL_ROUNDS} 回合",
+        pending_tasks=pending,
+        rounds_used=MAX_TOOL_ROUNDS,
+    )

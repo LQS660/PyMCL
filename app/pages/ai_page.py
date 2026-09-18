@@ -25,6 +25,7 @@ from mclauncher.ai.agent import AgentCancelled, run_agent
 from mclauncher.ai.client import AIClientError, HttpCancel
 from mclauncher.ai import store as chat_store
 from mclauncher.ai.defaults import DEFAULT_MODEL
+from mclauncher.ai.result import AgentResult, StopReason
 from ..pcl_chrome import Theme, prestyle_page
 from mclauncher.i18n import tr
 
@@ -75,7 +76,7 @@ class AgentThread(QThread):
     status = Signal(str, dict)
     need_confirm = Signal(str, dict, str)
     need_ask = Signal(list, str)
-    done = Signal(str)
+    done = Signal(object)
     failed = Signal(str)
 
     def __init__(self, backend, settings, history, user_text, parent=None):
@@ -129,7 +130,7 @@ class AgentThread(QThread):
             return self._cancel
 
         try:
-            text = run_agent(
+            result = run_agent(
                 self.backend, self.settings, self.history, self.user_text,
                 on_delta=on_delta, on_status=on_status,
                 confirm_fn=confirm_fn, ask_fn=ask_fn, cancelled=cancelled,
@@ -138,7 +139,8 @@ class AgentThread(QThread):
             if self._cancel:
                 self.failed.emit(tr("已停止"))
                 return
-            self.done.emit(text or "")
+            self.done.emit(result if isinstance(result, AgentResult)
+                           else AgentResult(result or ""))
         except AgentCancelled:
             self.failed.emit(tr("已停止"))
         except AIClientError as exc:
@@ -1000,7 +1002,42 @@ class AiPage(QWidget):
                 body = (body + "\n\n" + extra).strip()
         return body
 
-    def _finish(self, assistant_text: str, ok: bool):
+    @staticmethod
+    def _stop_note(result) -> str:
+        """把「为什么停」拼进气泡，别再让回合静默结束。"""
+        reason = getattr(result, "stop_reason", None)
+        if reason is None or reason == StopReason.COMPLETED:
+            return ""
+        detail = (getattr(result, "detail", "") or "").strip()
+        notes = {
+            StopReason.NO_TOOL_CALL: tr("它没有真的开始执行：模型只回了文字，没有调用任何工具。"),
+            StopReason.MAX_ROUNDS: tr("步骤太多，先停在这里。你可以让我继续。"),
+            StopReason.PENDING_TASK: tr("下载/安装还在后台跑，可以在「下载任务」里看进度。"),
+            StopReason.STREAM_FAILED: tr("接口这轮没有返回内容，已停止。"),
+            StopReason.EMPTY_RESPONSE: tr("接口返回了空回复。"),
+        }
+        note = notes.get(reason)
+        if not note:
+            return ""
+        if detail and detail not in note:
+            note += "（" + detail + "）"
+        return tr("（提示：") + note + tr("）")
+
+    def _notify_stop(self, result):
+        reason = getattr(result, "stop_reason", None)
+        if reason is None or reason == StopReason.COMPLETED:
+            return
+        win = self.window() or self
+        if reason == StopReason.NO_TOOL_CALL:
+            InfoBar.warning(
+                tr("它没有真的开始执行"),
+                tr("模型只回了文字，没有调用任何工具。可以点「重试」再催它一次。"),
+                parent=win, position=InfoBarPosition.TOP, duration=6000)
+        elif reason == StopReason.PENDING_TASK:
+            InfoBar.info(tr("任务还在后台跑"), tr("可以在「下载任务」里查看进度。"),
+                         parent=win, position=InfoBarPosition.TOP, duration=4000)
+
+    def _finish(self, assistant_text: str, ok: bool, result=None):
         self._flush_timer.stop()
         shown = self._compose_assistant(assistant_text if ok else (assistant_text or tr("已停止")))
         if self._assistant_bubble:
@@ -1017,12 +1054,20 @@ class AiPage(QWidget):
         self._busy(False)
         self.input.setFocus()
         self._scroll_bottom()
+        if result is not None:
+            self._notify_stop(result)
         if self._queue:
             nxt = self._queue.pop(0)
             QTimer.singleShot(30, self, lambda: self._send(nxt, echo=False))
 
-    def _on_done(self, text: str):
-        self._finish(text or self._stream, True)
+    def _on_done(self, result):
+        if not isinstance(result, AgentResult):
+            result = AgentResult(str(result or ""))
+        text = str(result) or self._stream
+        note = self._stop_note(result)
+        if note and note not in text:
+            text = (text + "\n\n" + note).strip()
+        self._finish(text, True, result=result)
 
     def _on_fail(self, msg: str):
         self._flush_timer.stop()

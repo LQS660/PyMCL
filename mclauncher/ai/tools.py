@@ -16,6 +16,7 @@ from mclauncher.mods import detect_loader, detect_mc_version
 from . import conflict as conflict_mod
 from . import diagnose as diagnose_mod
 from . import modconfig as modconfig_mod
+from . import trace
 from .defaults import MAX_TOOL_RESULT, WRITE_TOOLS
 
 
@@ -610,6 +611,7 @@ def run_tool(backend, name: str, raw_args, wait=True, cancelled=None) -> str:
         result = execute_tool(backend, name, args, wait=wait, cancelled=cancelled)
         return _clip(result)
     except Exception as exc:  # noqa: BLE001
+        trace.record("tool_exception", tool_name=name, exc=exc)
         return f"工具失败: {exc}"
 
 
