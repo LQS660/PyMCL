@@ -4,6 +4,16 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!--
+      陶瓦联机要建 TUN；系统只把 BIND_VPN_SERVICE 授给声明了它的服务。
+      targetSdk 34（Android 14）起，前台服务除了 FOREGROUND_SERVICE
+      还要按 foregroundServiceType 再要一个对应的权限——少了下面这条，
+      服务能起、但 startForeground 会直接抛 SecurityException。
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Android 13+ 不给这个权限就发不出前台服务的常驻通知 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <queries>
         <intent>
@@ -48,6 +58,39 @@
             android:launchMode="standard"
             android:screenOrientation="sensorLandscape"
             android:theme="@style/Theme.PyMCL.Game" />
+        <!--
+          安装器 / Jar 执行器的 JVM 宿主。
+          configChanges 把转屏吃掉：重建 Activity 会把 Surface 一起重建，
+          而 JVM 已经拿着上一个 Surface 在跑了，重来一次就是两个 JVM。
+          singleTask：装到一半再点一次安装，应该回到这一个界面而不是叠一层。
+        -->
+        <activity
+            android:name=".JvmHostActivity"
+            android:configChanges="keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|keyboard|navigation"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:screenOrientation="sensorPortrait"
+            android:theme="@style/Theme.PyMCL" />
+        <!--
+          陶瓦联机的 VpnService。
+          全限定名跟 data/TerracottaVpnService.kt 的注释里那条约定对死，改名两边就对不上。
+          android:permission 必须是 BIND_VPN_SERVICE 且 intent-filter 必须是
+          android.net.VpnService——两者缺一个系统都不会把这个服务当 VPN 起，
+          表现是「授权弹窗过了、TUN 建不出来」，看上去像内核的问题。
+          exported=false：只由我们自己按 TerracottaVpnGate 的状态机拉起。
+        -->
+        <service
+            android:name=".data.TerracottaVpnService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Minecraft LAN over EasyTier tunnel" />
+        </service>
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.provider"

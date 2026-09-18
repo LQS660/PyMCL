@@ -1,81 +1,110 @@
 package com.pymcl.mobile.data
 
-import android.content.Context
-import com.pymcl.mobile.model.GameInstance
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import com.pymcl.mobile.model.InstanceInfo
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.util.UUID
 
-class InstanceStore(private val context: Context) {
-    suspend fun listInstances(): List<GameInstance> = withContext(Dispatchers.IO) {
-        val root = Paths.minecraftRoot(context)
-        if (!root.isDirectory) return@withContext emptyList()
-        root.listFiles()
+object InstanceStore {
+    private val dirs = listOf(
+        "mods", "config", "saves", "resourcepacks", "shaderpacks",
+        "datapacks", "screenshots", "crash-reports", "logs",
+        "versions", "libraries", "backups",
+    )
+
+    fun list(): List<InstanceInfo> = listIn(Paths.instancesRoot)
+
+    fun listIn(root: File): List<InstanceInfo> {
+        if (!root.isDirectory) return emptyList()
+        return root.listFiles()
             ?.filter { it.isDirectory && File(it, ".instance.json").isFile }
-            ?.mapNotNull { dir -> readInstance(dir.name) }
-            .orEmpty()
-            .sortedBy { it.name.lowercase() }
+            ?.map { infoOf(it) }
+            ?.sortedBy { it.name.lowercase() }
+            ?: emptyList()
     }
 
-    suspend fun readInstance(instanceId: String): GameInstance? = withContext(Dispatchers.IO) {
-        val meta = Paths.instanceMeta(context, instanceId)
-        if (!meta.isFile) return@withContext null
-        val json = JSONObject(meta.readText())
-        GameInstance(
-            id = json.optString("id", instanceId),
-            name = json.getString("name"),
-            versionId = json.getString("versionId"),
-            gameDir = Paths.instanceDir(context, instanceId),
-            createdAt = json.optLong("createdAt", meta.lastModified()),
+    fun ensureDefault() {
+        if (list().isEmpty()) create("default")
+    }
+
+    fun create(raw: String): InstanceInfo = createIn(Paths.instancesRoot, raw)
+
+    fun createIn(root: File, raw: String): InstanceInfo {
+        val name = unique(root, raw)
+        val dir = File(root, name)
+        dir.mkdirs()
+        dirs.forEach { File(dir, it).mkdirs() }
+        Paths.writeJson(
+            File(dir, ".instance.json"),
+            JSONObject().put("name", name).put("java", "自动选择"),
         )
+        return infoOf(dir)
     }
 
-    suspend fun createInstance(name: String, versionId: String): GameInstance =
-        withContext(Dispatchers.IO) {
-            val id = UUID.randomUUID().toString().take(8)
-            val dir = Paths.instanceDir(context, id)
-            dir.mkdirs()
-            val instance = GameInstance(
-                id = id,
-                name = name,
-                versionId = versionId,
-                gameDir = dir,
-            )
-            writeInstance(instance)
-            instance
-        }
-
-    suspend fun deleteInstance(instanceId: String): Boolean = withContext(Dispatchers.IO) {
-        val dir = Paths.instanceDir(context, instanceId)
-        dir.exists() && dir.deleteRecursively()
+    fun delete(name: String) {
+        Paths.instanceDir(name).deleteRecursively()
     }
 
-    private fun writeInstance(instance: GameInstance) {
-        val json = JSONObject()
-            .put("id", instance.id)
-            .put("name", instance.name)
-            .put("versionId", instance.versionId)
-            .put("createdAt", instance.createdAt)
-        Paths.instanceMeta(context, instance.id).writeText(json.toString(2))
+    fun rename(name: String, newRaw: String) {
+        val destName = Names.sanitize(newRaw)
+        val src = Paths.instanceDir(name)
+        val dest = Paths.instanceDir(destName)
+        if (dest.exists()) throw IllegalStateException("实例已存在: $destName")
+        if (!src.renameTo(dest)) throw IllegalStateException("重命名失败")
+        val meta = File(dest, ".instance.json")
+        val obj = Paths.readJson(meta)
+        obj.put("name", destName)
+        Paths.writeJson(meta, obj)
     }
 
-    fun readConfig(): JSONObject {
-        val file = Paths.config(context)
-        if (!file.isFile) return JSONObject()
-        return runCatching { JSONObject(file.readText()) }.getOrDefault(JSONObject())
+    fun installedVersions(name: String): List<String> = installedVersionsIn(Paths.instanceDir(name))
+
+    /** 只认 `versions/<id>/<id>.json` 齐全的目录：半个下载留下的空壳不该出现在版本列表里。 */
+    fun installedVersionsIn(instDir: File): List<String> {
+        val vdir = File(instDir, "versions")
+        if (!vdir.isDirectory) return emptyList()
+        return vdir.listFiles()
+            ?.filter { it.isDirectory && File(it, "${it.name}.json").isFile }
+            ?.map { it.name }
+            ?.sorted()
+            ?: emptyList()
     }
 
-    fun writeConfig(json: JSONObject) {
-        Paths.ensureLayout(context)
-        Paths.config(context).writeText(json.toString(2))
+    fun info(name: String): InstanceInfo = infoOf(Paths.instanceDir(name))
+
+    fun infoOf(dir: File): InstanceInfo =
+        InstanceInfo(dir.name, installedVersionsIn(dir), dir.absolutePath)
+
+    private fun unique(root: File, raw: String): String {
+        val base = Names.sanitize(raw)
+        if (!File(root, base).exists()) return base
+        var n = 2
+        while (File(root, "$base-$n").exists()) n++
+        return "$base-$n"
     }
 
-    fun readAccounts(): JSONArray {
-        val file = Paths.accounts(context)
-        if (!file.isFile) return JSONArray()
-        return runCatching { JSONArray(file.readText()) }.getOrDefault(JSONArray())
+    fun loadConfig(): JSONObject = withDefaults(Paths.readJson(Paths.configFile, JSONObject()))
+
+    fun withDefaults(obj: JSONObject): JSONObject {
+        if (!obj.has("memory_mb")) obj.put("memory_mb", 2048)
+        if (!obj.has("username")) obj.put("username", "Player")
+        if (!obj.has("download_source")) obj.put("download_source", "bmclapi")
+        if (!obj.has("ai_url")) obj.put("ai_url", "")
+        if (!obj.has("show_hidden_versions")) obj.put("show_hidden_versions", false)
+        return obj
+    }
+
+    fun saveConfig(obj: JSONObject) = Paths.writeJson(Paths.configFile, obj)
+
+    fun loadAccounts(): List<JSONObject> {
+        val root = Paths.readJson(Paths.accountsFile, JSONObject().put("accounts", JSONArray()))
+        val arr = root.optJSONArray("accounts") ?: JSONArray()
+        return (0 until arr.length()).map { arr.getJSONObject(it) }
+    }
+
+    fun saveAccounts(list: List<JSONObject>) {
+        val arr = JSONArray()
+        list.forEach { arr.put(it) }
+        Paths.writeJson(Paths.accountsFile, JSONObject().put("accounts", arr))
     }
 }

@@ -16,6 +16,7 @@ object McLaunch {
     var bridge: FCLBridge? = null
         private set
 
+    /** @param server 直连地址，空 = 正常启动到主菜单。 */
     fun prepare(
         context: Context,
         instance: String,
@@ -23,6 +24,7 @@ object McLaunch {
         username: String,
         memoryMb: Int,
         onLog: (String) -> Unit,
+        server: String = "",
     ) {
         val app = context.applicationContext
         FCLPath.loadPaths(app)
@@ -36,7 +38,7 @@ object McLaunch {
             throw IllegalStateException("当前包只带 JRE 17/21，版本 $version 需要 $jre")
         }
         RuntimeInstaller.ensure(app, jre, onLog)
-        val plan = LaunchPlanner.plan(instance, version, username, memoryMb)
+        val plan = LaunchPlanner.plan(instance, version, username, memoryMb, inst, server)
         if (plan.missing.isNotEmpty()) {
             throw IllegalStateException("仍缺 ${plan.missing.size} 个文件：${plan.missing.first()}")
         }

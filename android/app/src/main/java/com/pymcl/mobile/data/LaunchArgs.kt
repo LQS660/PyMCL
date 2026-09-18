@@ -223,23 +223,29 @@ object LaunchArgs {
     ) {
         val game = json.optJSONObject("arguments")?.optJSONArray("game")
         val old = json.optString("minecraftArguments")
-        if (game != null) {
-            extractGameArgs(json).forEach { out += fill(it, vars) }
-            out += "--width"
-            out += width.toString()
-            out += "--height"
-            out += height.toString()
-            return
+        when {
+            game != null -> {
+                extractGameArgs(json).forEach { out += fill(it, vars) }
+                out += "--width"
+                out += width.toString()
+                out += "--height"
+                out += height.toString()
+            }
+
+            old.isNotBlank() ->
+                old.split(Regex("\\s+")).filter { it.isNotBlank() }.forEach { out += fill(it, vars) }
+
+            else -> {
+                out.addAll(plan.gameArgs)
+                out += "--width"
+                out += width.toString()
+                out += "--height"
+                out += height.toString()
+            }
         }
-        if (old.isNotBlank()) {
-            old.split(Regex("\\s+")).filter { it.isNotBlank() }.forEach { out += fill(it, vars) }
-            return
-        }
-        out.addAll(plan.gameArgs)
-        out += "--width"
-        out += width.toString()
-        out += "--height"
-        out += height.toString()
+        // 直连那一对参数三条路都得带上：上面两条是照版本 json 现算的，
+        // 只把 --server 塞进 plan.gameArgs 的话它们根本不会看一眼
+        out.addAll(plan.serverArgs)
     }
 
     fun extractGameArgs(json: JSONObject, enabled: Set<String> = FEATURES): List<String> {

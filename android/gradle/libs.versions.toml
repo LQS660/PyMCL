@@ -2,7 +2,10 @@
 compileSdk = "35"
 minSdk = "26"
 targetSdk = "34"
-agp = "8.6.1"
+# 跟 FoldCraftLauncher 对齐：:FCLauncher / :FCLCore / :Terracotta / :ZipFileSystem
+# 都是按 8.13.2 构建过的，我们低一档的话它们四个的 build.gradle.kts 未必配置得起来。
+# 这台机器出不了 APK（见 d-240），所以这一改**没有经过 Gradle 验证**。
+agp = "8.13.2"
 kotlin = "2.3.20"
 commonsCompress = "1.26.0"
 xz = "1.9"
@@ -11,6 +14,20 @@ material = "1.12.0"
 bytehook = "1.0.10"
 androidxTestExtJunit = "1.1.5"
 androidxTestRunner = "1.5.2"
+# 下面这批是 :FCLCore 的依赖。它作为源码子工程参与我们这次构建，
+# `libs.*` 解析的是**我们这份**目录，所以上游要的别名必须在这儿也有一份。
+# 版本号跟 FoldCraftLauncher/gradle/libs.versions.toml 逐条对齐，别擅自升。
+nanohttpd = "2.3.1"
+opennbt = "1.5"
+gson = "2.10.1"
+commonsIo = "2.15.1"
+tomlj = "1.1.1"
+constantPoolScanner = "1.2"
+jsoup = "1.18.3"
+chardet = "2.5.0"
+junrar = "7.5.5"
+jelf = "0.9.0"
+jspecify = "1.0.0"
 
 [libraries]
 commons-compress = { group = "org.apache.commons", name = "commons-compress", version.ref = "commonsCompress" }
@@ -20,6 +37,18 @@ material = { group = "com.google.android.material", name = "material", version.r
 bytehook = { group = "com.bytedance", name = "bytehook", version.ref = "bytehook" }
 androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestExtJunit" }
 androidx-test-runner = { group = "androidx.test", name = "runner", version.ref = "androidxTestRunner" }
+# :FCLCore 用到的
+nanohttpd = { group = "org.nanohttpd", name = "nanohttpd", version.ref = "nanohttpd" }
+opennbt = { group = "com.github.steveice10", name = "opennbt", version.ref = "opennbt" }
+gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
+commons-io = { group = "commons-io", name = "commons-io", version.ref = "commonsIo" }
+tomlj = { group = "org.tomlj", name = "tomlj", version.ref = "tomlj" }
+constant-pool-scanner = { group = "org.jenkins-ci", name = "constant-pool-scanner", version.ref = "constantPoolScanner" }
+jsoup = { group = "org.jsoup", name = "jsoup", version.ref = "jsoup" }
+chardet = { module = "org.glavo:chardet", version.ref = "chardet" }
+junrar = { group = "com.github.junrar", name = "junrar", version.ref = "junrar" }
+jelf = { group = "net.fornwall", name = "jelf", version.ref = "jelf" }
+jspecify = { module = "org.jspecify:jspecify", version.ref = "jspecify" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
