@@ -218,7 +218,10 @@ public static class Motion
             new DoubleAnimation(value, D(Math.Abs(value - bar.Value) > 40 ? 320 : 200)) { EasingFunction = EaseOut });
     }
 
-    /// <summary>数字滚动。</summary>
+    /// <summary>
+    /// 数字滚动。跟着合成器的渲染节拍走（CompositionTarget.Rendering），不自己开 16ms 的
+    /// DispatcherTimer——那种定时器和真实刷新率对不齐，既会多跑帧也会掉帧，页面一多还各跑各的。
+    /// </summary>
     public static void CountUp(TextBlock tb, double from, double to, string fmt = "0", double ms = 620)
     {
         if (!Enabled)
@@ -227,18 +230,17 @@ public static class Motion
             return;
         }
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        var timer = new System.Windows.Threading.DispatcherTimer(System.Windows.Threading.DispatcherPriority.Render)
+        var total = Math.Max(1, ms * Scale);
+        EventHandler? tick = null;
+        tick = (_, _) =>
         {
-            Interval = TimeSpan.FromMilliseconds(16),
-        };
-        timer.Tick += (_, _) =>
-        {
-            var t = Math.Min(1, sw.Elapsed.TotalMilliseconds / (ms * Scale));
+            var t = Math.Min(1, sw.Elapsed.TotalMilliseconds / total);
             var e = 1 - Math.Pow(1 - t, 3);
             tb.Text = (from + (to - from) * e).ToString(fmt);
-            if (t >= 1) timer.Stop();
+            // 文本块被换掉 / 页面已卸载就别再占着渲染回调。
+            if (t >= 1 || !tb.IsLoaded && tb.Parent is null) CompositionTarget.Rendering -= tick;
         };
-        timer.Start();
+        CompositionTarget.Rendering += tick;
     }
 
     /// <summary>宽/高的平滑变化（用于侧栏折叠、面板展开）。</summary>

@@ -6,7 +6,7 @@ public sealed class TaskRow
 {
     public string Id { get; init; } = "";
     public string Title { get; set; } = "";
-    public string Status { get; set; } = "排队中…";
+    public string Status { get; set; } = L("排队中…");
     public string Speed { get; set; } = "";
     public double Progress { get; set; }
     public bool Indeterminate { get; set; } = true;
@@ -34,6 +34,9 @@ public sealed class TaskRow
 /// <summary>任务总线。下载坞、任务页、侧栏徽章都读这一份。</summary>
 public static class TaskStore
 {
+    /// <summary>task_added 没带标题时的占位。界面看到它会去问桥要真标题（task_title）。</summary>
+    public static string PlaceholderTitle => L("任务");
+
     private static readonly List<TaskRow> _rows = new();
 
     public static IReadOnlyList<TaskRow> Rows => _rows;
@@ -54,7 +57,7 @@ public static class TaskStore
             case "task_added":
             {
                 if (string.IsNullOrEmpty(ev.TaskId) || Get(ev.TaskId) != null) return;
-                var row = new TaskRow { Id = ev.TaskId, Title = string.IsNullOrEmpty(ev.Title) ? "任务" : ev.Title };
+                var row = new TaskRow { Id = ev.TaskId, Title = string.IsNullOrEmpty(ev.Title) ? PlaceholderTitle : ev.Title };
                 _rows.Add(row);
                 if (_rows.Count > 60) _rows.RemoveRange(0, _rows.Count - 60);
                 Added?.Invoke(row);
@@ -88,7 +91,7 @@ public static class TaskStore
                 row.Success = ev.Success;
                 row.Indeterminate = false;
                 row.Progress = ev.Success ? 100 : row.Progress;
-                row.Status = string.IsNullOrEmpty(ev.Message) ? (ev.Success ? "已完成" : "失败") : ev.Message;
+                row.Status = string.IsNullOrEmpty(ev.Message) ? (ev.Success ? L("已完成") : L("失败")) : ev.Message;
                 row.Speed = "";
                 Updated?.Invoke(row);
                 break;

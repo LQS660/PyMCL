@@ -26,17 +26,49 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        // XAML 里不写死中文：这几处文案在这里按当前语言取
+        Title = L("PyMCL 启动器");
+        PageTitle.Text = L("启动");
+        BridgeText.Text = L("连接中");
+        ThemeBtn.ToolTip = L("切换深色 / 浅色");
+        DropVeilTitle.Text = L("松手就装");
+        DropVeilHint.Text = L("整合包、模组、资源包、光影、数据包、存档、皮肤、壁纸都认；认不准会问你一句。");
         AppServices.Window = this;
         Dlg.Host = DialogHost;
+
+        Wallpaper.Attach(WallHost, ChromeBar, SideBar, PageWash);
 
         MinBtn.Click += (_, _) => WindowState = WindowState.Minimized;
         MaxBtn.Click += (_, _) => ToggleMax();
         CloseBtn.Click += (_, _) => Close();
         ThemeBtn.Click += (_, _) => ToggleTheme();
-        StateChanged += (_, _) => SyncMaxGlyph();
+        StateChanged += (_, _) =>
+        {
+            SyncMaxGlyph();
+            // 最小化时动态壁纸一帧也不用解：屏幕上看不见，解了也是白烧 CPU
+            Wallpaper.SetWindowActive(WindowState != WindowState.Minimized);
+        };
+        Activated += (_, _) => Wallpaper.SetWindowActive(WindowState != WindowState.Minimized);
+        Deactivated += (_, _) => Wallpaper.SetWindowActive(false);
+
+        // 用 Preview 只为了亮提示罩：页面那一层也走隧道，亮罩不能被它们截掉。
+        // 真正的落地仍挂在冒泡上（见 OnDrop），页面先接得住就轮不到主窗口。
+        PreviewDragEnter += (_, e) => ShowDropVeil(e.Data.GetDataPresent(DataFormats.FileDrop));
+        PreviewDragOver += (_, e) => ShowDropVeil(e.Data.GetDataPresent(DataFormats.FileDrop));
+        PreviewDragLeave += (_, _) => ShowDropVeil(false);
+        PreviewDrop += (_, _) => ShowDropVeil(false);
+        DragEnter += OnDragOver;
+        DragOver += OnDragOver;
+        Drop += OnDrop;
         SideGrip.DragDelta += SideGrip_DragDelta;
+        SideGrip.DragCompleted += SideGrip_DragCompleted;
         PreviewKeyDown += OnShortcut;
-        Closed += (_, _) => AppServices.Host?.Dispose();
+        Closing += OnClosing;
+        Closed += (_, _) =>
+        {
+            Wallpaper.Shutdown();
+            AppServices.Host?.Dispose();
+        };
 
         TaskStore.Added += _ => Dispatcher.Invoke(SyncTasks);
         TaskStore.Updated += _ => Dispatcher.Invoke(SyncDock);
@@ -46,13 +78,41 @@ public partial class MainWindow : Window
         BuildNav();
         BuildDock();
         Navigate("launch", instant: true);
-        Loaded += async (_, _) => await ConnectAsync();
+        Loaded += (_, _) => Run(ConnectAsync);
     }
 
     // ==================== 桥接 ====================
+    private bool _drained;
+
+    /// <summary>
+    /// 关窗先让桥收拢后台任务（shutdown，预算 800ms），再杀进程；直接 Kill 会把下载砍在半截。
+    /// e.Cancel 得在同步段就置好（事件返回后 WPF 立刻读它），异步的收拢走统一的 Run。
+    /// </summary>
+    private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        if (_drained || !_bridgeReady) return;
+        e.Cancel = true;
+        _drained = true;
+        Run(async () =>
+        {
+            try
+            {
+                var drain = AppServices.Client.TryCallAsync<object>("shutdown", new { timeout_ms = 800 });
+                await Task.WhenAny(drain, Task.Delay(1500));
+            }
+            catch { }
+            Close();
+        });
+    }
+
+    private readonly TaskCompletionSource _bridgeSettled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>连桥这件事有结果了（连上或确定连不上）。冒烟脚本靠它决定什么时候开始逐页走。</summary>
+    public Task BridgeSettled => _bridgeSettled.Task;
+
     private async Task ConnectAsync()
     {
-        SetBridgeState("连接中", "B.Warn");
+        SetBridgeState(L("连接中"), "B.Warn");
         try
         {
             var host = await BridgeHost.StartAsync();
@@ -61,22 +121,39 @@ public partial class MainWindow : Window
             host.Client.EventReceived += OnBridgeEvent;
             host.Client.StreamStateChanged += (_, ok) => Dispatcher.BeginInvoke(() =>
             {
-                SetBridgeState(ok ? host.Backend : "重连中", ok ? "B.Accent" : "B.Warn");
+                SetBridgeState(ok ? host.Backend : L("重连中"), ok ? "B.Accent" : "B.Warn");
                 BridgePill.ToolTip = ok
                     ? $"{host.Backend} · 127.0.0.1:{host.Port}"
-                    : "事件流断开：" + host.Client.LastStreamError;
+                    : L("事件流断开：") + host.Client.LastStreamError;
             });
             _bridgeReady = true;
             SetBridgeState(host.Backend, "B.Accent");
+            // 侧栏排法跟 Qt / 网页版共用 config.json 里的 ui_nav_*，连上桥才知道用户排成了什么样
+            await LoadNavFromBridgeAsync();
+            // 壁纸配置也在 config.json 里（ui_background*），跟 Qt / 网页版是同一份
+            await Wallpaper.ReloadAsync();
             await ReloadCurrentAsync();
+            _bridgeSettled.TrySetResult();
+            // 第一次开：先把目录 / 下载源问清楚，顺带指一遍容易错过的功能。
+            // 冒烟模式跳过——它是个等人点的框，无人值守时会把整轮挂死。
+            if (!Smoke.Active) await FirstRunWizard.MaybeShowAsync();
+            // 再问一次「是否上传诊断数据」（对齐 Qt _boot_extras 的顺序：向导 → 同意提示）；选过就不再弹
+            if (!Smoke.Active) await FeedbackConsent.MaybeAskAsync();
             _ = WarmUpAsync();
         }
         catch (Exception ex)
         {
-            SetBridgeState("未连接", "B.Danger");
-            var retry = await Dlg.Confirm("连接后端失败",
-                ex.Message + "\n\n需要仓库根目录下的 bridge/server.py 或 native/build/pymcl-bridge.exe。",
-                "重试", "退出");
+            SetBridgeState(L("未连接"), "B.Danger");
+            _bridgeSettled.TrySetResult();
+            if (Smoke.Active)
+            {
+                // 冒烟要的就是「桥没起来会不会崩」这条降级路径，不能在这儿停下来等人选
+                Smoke.Note("bridge", ex.ToString());
+                return;
+            }
+            var retry = await Dlg.Confirm(L("连接后端失败"),
+                ex.Message + L("\n\n需要仓库根目录下的 bridge/server.py 或 native/build/pymcl-bridge.exe。"),
+                L("重试"), L("退出"));
             if (retry) await ConnectAsync();
             else Close();
         }
@@ -117,13 +194,13 @@ public partial class MainWindow : Window
             case "ui_changed":
                 ScheduleRefresh();
                 break;
-            case "finished" when !ev.Success && ev.Message is { Length: > 0 } && ev.Message != "已取消":
-                Toast(TaskStore.Get(ev.TaskId)?.Title ?? "任务失败", ev.Message, ToastKind.Error);
+            case "finished" when !ev.Success && ev.Message is { Length: > 0 } && ev.Message != "已取消": // i18n:ignore 桥返回的原文，不是界面词
+                Toast(TaskStore.Get(ev.TaskId)?.Title ?? L("任务失败"), ev.Message, ToastKind.Error);
                 break;
             case "finished" when ev.Success:
                 var t = TaskStore.Get(ev.TaskId);
-                if (t != null && !t.Title.StartsWith("启动游戏", StringComparison.Ordinal))
-                    Toast(t.Title, string.IsNullOrEmpty(ev.Message) ? "已完成" : ev.Message, ToastKind.Success);
+                if (t != null && !t.Title.StartsWith("启动游戏", StringComparison.Ordinal)) // i18n:ignore 桥起的任务标题原文
+                    Toast(t.Title, string.IsNullOrEmpty(ev.Message) ? L("已完成") : ev.Message, ToastKind.Success);
                 break;
         }
         foreach (var p in _pages.Values) p.OnEvent(ev);
@@ -142,14 +219,10 @@ public partial class MainWindow : Window
         _refreshTimer.Start();
     }
 
-    private async void RefreshTick(object? sender, EventArgs e)
+    private void RefreshTick(object? sender, EventArgs e)
     {
         _refreshTimer?.Stop();
-        if (_current != null)
-        {
-            try { await _current.RefreshAsync(); }
-            catch { }
-        }
+        if (_current is { } page) Run(page.RefreshAsync);
     }
 
     private async Task ReloadCurrentAsync()
@@ -181,11 +254,8 @@ public partial class MainWindow : Window
         });
     }
 
-    private static async void Run(Func<Task> work)
-    {
-        try { await work(); }
-        catch (Exception ex) { AppServices.Toast("出错", ex.Message, ToastKind.Error); }
-    }
+    /// <summary>主窗口的异步处理器也走 PageBase.Run 这一个口子（异常兜底 + 冒烟计数），只是提示标题不同。</summary>
+    private static void Run(Func<Task> work) => PageBase.Run(work, L("出错"));
 
     public PageBase? GetPage(string id)
     {
@@ -297,6 +367,41 @@ public partial class MainWindow : Window
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, int flags);
     [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO info);
 
+    // ==================== 拖拽安装 ====================
+    /// <summary>
+    /// 拖文件进窗口：整合包 / 模组 / 资源包 / 光影 / 数据包 / 存档 / 皮肤 / 壁纸都认，
+    /// 认不准的弹一次框让用户指。判定口径与 Qt 端 app/file_kinds.py 同一套。
+    /// </summary>
+    /// <summary>拖着文件在窗口上方时亮一层提示罩，松手或拖走就收掉。</summary>
+    private void ShowDropVeil(bool on)
+    {
+        if (!_bridgeReady) on = false;
+        if (on == (DropVeil.Visibility == Visibility.Visible)) return;
+        if (on)
+        {
+            DropVeil.Visibility = Visibility.Visible;
+            Motion.Fade(DropVeil, 1, 120);
+        }
+        else Motion.FadeOut(DropVeil, 110, () => DropVeil.Visibility = Visibility.Collapsed);
+    }
+
+    private void OnDragOver(object sender, DragEventArgs e)
+    {
+        e.Effects = _bridgeReady && e.Data.GetDataPresent(DataFormats.FileDrop)
+            ? DragDropEffects.Copy
+            : DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    private void OnDrop(object sender, DragEventArgs e)
+    {
+        e.Handled = true;
+        if (!_bridgeReady || !e.Data.GetDataPresent(DataFormats.FileDrop)) return;
+        if (e.Data.GetData(DataFormats.FileDrop) is not string[] paths || paths.Length == 0) return;
+        Activate();
+        Run(() => FileDrop.HandleAsync(this, paths));
+    }
+
     // ==================== 通知 ====================
     public void Toast(string title, string body = "", ToastKind kind = ToastKind.Info)
     {
@@ -355,7 +460,7 @@ public partial class MainWindow : Window
         _dockStatus = Ui.Small("");
         _dockBar = Ui.Prog();
         _dockBar.Height = 4;
-        var openBtn = Ui.Btn("查看", BtnKind.Soft, (_, _) => Navigate("tasks"));
+        var openBtn = Ui.Btn(L("查看"), BtnKind.Soft, (_, _) => Navigate("tasks"));
         openBtn.Padding = new Thickness(11, 4, 11, 5);
         var grid = Ui.G(null, "Auto,*,Auto");
         grid.Add(Ui.Glyph(Ico.Download, 15, "B.Accent").M(0, 0, 10, 0), 0, 0);
@@ -376,7 +481,9 @@ public partial class MainWindow : Window
 
     private void SyncDock()
     {
-        var running = TaskStore.Rows.LastOrDefault(r => !r.Finished);
+        // 下载坞只报下载类任务。启动游戏 / 登录那几条有自己的界面在管，
+        // 归类口径问后端（is_download_title），别在前端各写一套。
+        var running = TaskStore.Rows.LastOrDefault(r => !r.Finished && IsDownloadTitle(r.Title));
         var show = running != null && _currentId != "tasks";
         if (!show)
         {
@@ -395,13 +502,35 @@ public partial class MainWindow : Window
         if (!running.Indeterminate) Motion.Progress(_dockBar, running.Progress);
     }
 
+    private readonly Dictionary<string, bool> _downloadTitle = new();
+
+    /// <summary>
+    /// 这个任务标题算不算「下载」。后端 is_download_title 说了算，问过的标题记下来——
+    /// SyncDock 每条进度事件都会跑一遍，不能每次都发一次 RPC。
+    /// 还没问到答案时先当下载显示，答案回来再纠正，不会闪。
+    /// </summary>
+    private bool IsDownloadTitle(string title)
+    {
+        if (string.IsNullOrEmpty(title)) return true;
+        if (_downloadTitle.TryGetValue(title, out var hit)) return hit;
+        _downloadTitle[title] = true;
+        Run(async () =>
+        {
+            var ok = await AppServices.Client.TryCallAsync<bool>("is_download_title", new { title }, true);
+            if (_downloadTitle.TryGetValue(title, out var was) && was == ok) return;
+            _downloadTitle[title] = ok;
+            SyncDock();
+        });
+        return true;
+    }
+
     // ==================== 飞入动画 ====================
     /// <summary>从来源控件飞一个小球到侧栏「下载任务」，告诉用户任务已经进队列了。</summary>
     public void FlyToTasks(FrameworkElement source, string text = "", string? colorKey = null)
     {
         if (!Motion.Enabled || !IsLoaded) return;
-        var target = _navRows.TryGetValue("tasks", out var row) ? row : null;
-        if (target is null || !source.IsVisible) return;
+        var target = _navRows.TryGetValue("tasks", out var row) ? row.Button : null;
+        if (target is null || !source.IsVisible || !target.IsVisible) return;
         Point from, to;
         try
         {
@@ -414,7 +543,7 @@ public partial class MainWindow : Window
         {
             CornerRadius = new CornerRadius(999),
             Padding = new Thickness(10, 4, 10, 5),
-            Child = Ui.Txt(string.IsNullOrEmpty(text) ? "已加入队列" : text, 11.5, true, "B.OnAccent"),
+            Child = Ui.Txt(string.IsNullOrEmpty(text) ? L("已加入队列") : text, 11.5, true, "B.OnAccent"),
         };
         chip.SetResourceReference(Border.BackgroundProperty, colorKey ?? "B.Accent");
         Motion.Shadow(chip, 16, 0.3, 3);

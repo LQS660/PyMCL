@@ -56,9 +56,9 @@ public sealed class BridgeClient : IDisposable
     public BridgeClient(Uri baseUri, string token)
     {
         if (baseUri.Scheme != Uri.UriSchemeHttp || baseUri.Host != "127.0.0.1" || baseUri.Port is < 1 or > 65535)
-            throw new ArgumentException("仅允许回环地址", nameof(baseUri));
+            throw new ArgumentException(L("仅允许回环地址"), nameof(baseUri));
         if (string.IsNullOrWhiteSpace(token) || token.Length < 32)
-            throw new ArgumentException("令牌无效", nameof(token));
+            throw new ArgumentException(L("令牌无效"), nameof(token));
         BaseUri = baseUri;
         _token = token;
         _http = new HttpClient { BaseAddress = baseUri, Timeout = TimeSpan.FromMinutes(20) };
@@ -90,7 +90,7 @@ public sealed class BridgeClient : IDisposable
         if (root.TryGetProperty("error", out var err) && err.ValueKind != JsonValueKind.Null)
         {
             var msg = err.TryGetProperty("message", out var m) ? m.GetString() : err.ToString();
-            throw new BridgeCallException(method, msg ?? "调用失败");
+            throw new BridgeCallException(method, msg ?? L("调用失败"));
         }
         return root.TryGetProperty("result", out var result) ? result.Clone() : default;
     }
@@ -127,7 +127,7 @@ public sealed class BridgeClient : IDisposable
             {
                 await ReadSseOnceAsync().ConfigureAwait(false);
                 attempt = 0;
-                LastStreamError = "事件流被服务端关闭";
+                LastStreamError = L("事件流被服务端关闭");
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex) { LastStreamError = ex.GetType().Name + ": " + ex.Message; }

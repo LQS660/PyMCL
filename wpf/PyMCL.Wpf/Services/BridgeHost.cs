@@ -43,7 +43,7 @@ public sealed partial class BridgeHost : IDisposable
         string backend;
         if (native != null && !forcePython)
         {
-            backend = "C 桥";
+            backend = L("C 桥");
             psi.FileName = native;
             psi.ArgumentList.Add("--root");
             psi.ArgumentList.Add(root);
@@ -54,7 +54,7 @@ public sealed partial class BridgeHost : IDisposable
         }
         else if (File.Exists(server))
         {
-            backend = "Python 桥";
+            backend = L("Python 桥");
             psi.FileName = FindPython();
             psi.ArgumentList.Add("-u");
             psi.ArgumentList.Add(server);
@@ -64,14 +64,14 @@ public sealed partial class BridgeHost : IDisposable
             psi.Environment["PYTHONUNBUFFERED"] = "1";
         }
         else
-            throw new FileNotFoundException("找不到 pymcl-bridge.exe 或 bridge/server.py");
+            throw new FileNotFoundException(L("找不到 pymcl-bridge.exe 或 bridge/server.py"));
 
         psi.Environment["PYMCL_HOME"] = root;
         psi.Environment["PYMCL_BRIDGE_TOKEN"] = token;
 
         var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
         var err = new System.Text.StringBuilder();
-        if (!proc.Start()) throw new InvalidOperationException("无法启动桥进程");
+        if (!proc.Start()) throw new InvalidOperationException(L("无法启动桥进程"));
         proc.ErrorDataReceived += (_, e) =>
         {
             if (e.Data is { Length: > 0 } && err.Length < 4000) err.AppendLine(e.Data);
@@ -99,10 +99,10 @@ public sealed partial class BridgeHost : IDisposable
         {
             try { proc.Kill(true); } catch { }
             var tail = err.ToString().Trim();
-            throw new InvalidOperationException("桥进程未输出端口" + (tail.Length > 0 ? "：\n" + Tail(tail, 600) : ""));
+            throw new InvalidOperationException(L("桥进程未输出端口") + (tail.Length > 0 ? L("：\n") + Tail(tail, 600) : ""));
         }
         var m = PortRegex().Match(line);
-        if (!m.Success) throw new InvalidOperationException("无法解析桥端口: " + line);
+        if (!m.Success) throw new InvalidOperationException(L("无法解析桥端口: ") + line);
         var port = int.Parse(m.Groups[1].Value);
         var client = new BridgeClient(new Uri($"http://127.0.0.1:{port}/"), token);
         for (var i = 0; i < 60; i++)
@@ -120,7 +120,7 @@ public sealed partial class BridgeHost : IDisposable
         }
         client.Dispose();
         try { proc.Kill(true); } catch { }
-        throw new InvalidOperationException("桥已启动但 /health 无响应");
+        throw new InvalidOperationException(L("桥已启动但 /health 无响应"));
     }
 
     private static string Tail(string text, int max) =>
@@ -135,7 +135,7 @@ public sealed partial class BridgeHost : IDisposable
             var hit = WalkUp(start);
             if (hit != null) return hit;
         }
-        throw new DirectoryNotFoundException("找不到启动器根目录（需要包含 mclauncher/ 与 bridge/server.py）");
+        throw new DirectoryNotFoundException(L("找不到启动器根目录（需要包含 mclauncher/ 与 bridge/server.py）"));
     }
 
     public static string FindPython()

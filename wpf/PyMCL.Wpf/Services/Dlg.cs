@@ -21,9 +21,10 @@ public static class Dlg
 
     public static bool AnyOpen => Host is { Children.Count: > 0 };
 
-    private static Layer Push(UIElement card, Action? onDismiss, bool dismissable = true)
+    private static Layer Push(UIElement card, Action? onDismiss, bool dismissable = true,
+        bool smokeAutoAnswer = true)
     {
-        var host = Host ?? throw new InvalidOperationException("对话层未初始化");
+        var host = Host ?? throw new InvalidOperationException(L("对话层未初始化"));
         var mask = new Border { Opacity = 0 };
         mask.SetResourceReference(Border.BackgroundProperty, "B.Mask");
         var wrap = new Grid();
@@ -67,7 +68,10 @@ public static class Dlg
             Close();
             e.Handled = true;
         };
-        wrap.Loaded += (_, _) => wrap.Focus();
+        if (!Smoke.Active) wrap.Loaded += (_, _) => wrap.Focus();
+        // 冒烟模式下替用户把它点掉：这些框返回的都是「没人点就永远不完成」的 Task，
+        // 无人值守里开一个就挂死一轮。钩子只在 Smoke.Active 时生效，生产路径一行行为不变。
+        if (Smoke.Active && smokeAutoAnswer) Smoke.AutoAnswerDialog(card, () => { onDismiss?.Invoke(); Close(); });
         return new Layer { Root = wrap, Card = card as Border ?? new Border(), Close = Close };
     }
 
@@ -92,15 +96,16 @@ public static class Dlg
         return card;
     }
 
-    public static Task<bool> Confirm(string title, string body, string ok = "确定", string cancel = "取消", bool danger = false)
+    // 默认按钮文案不能写成常量默认值（L() 不是编译期常量），null 表示「用本语言的确定 / 取消」。
+    public static Task<bool> Confirm(string title, string body, string? ok = null, string? cancel = null, bool danger = false)
         => Ask(title, Ui.Muted(body).Wrap().MinW(320), ok, cancel, danger);
 
-    public static Task<bool> Ask(string title, UIElement body, string ok = "确定", string cancel = "取消",
+    public static Task<bool> Ask(string title, UIElement body, string? ok = null, string? cancel = null,
         bool danger = false, double width = 520)
     {
         var tcs = new TaskCompletionSource<bool>();
-        var okBtn = Ui.Btn(ok, danger ? BtnKind.Danger : BtnKind.Primary);
-        var cancelBtn = Ui.Btn(cancel);
+        var okBtn = Ui.Btn(ok ?? L("确定"), danger ? BtnKind.Danger : BtnKind.Primary);
+        var cancelBtn = Ui.Btn(cancel ?? L("取消"));
         var footer = Ui.H(8, cancelBtn, okBtn).Right();
         var card = Shell(title, body, footer, width);
         Layer? layer = null;
@@ -121,7 +126,7 @@ public static class Dlg
     public static Task Alert(string title, string body, double width = 520)
     {
         var tcs = new TaskCompletionSource<bool>();
-        var okBtn = Ui.Btn("知道了", BtnKind.Primary);
+        var okBtn = Ui.Btn(L("知道了"), BtnKind.Primary);
         var text = new TextBox
         {
             Text = body,
@@ -149,8 +154,8 @@ public static class Dlg
         var tcs = new TaskCompletionSource<string?>();
         var input = Ui.Input(placeholder, initial).MinW(340);
         var body = Ui.V(6, Ui.Muted(label), input);
-        var okBtn = Ui.Btn("确定", BtnKind.Primary);
-        var cancelBtn = Ui.Btn("取消");
+        var okBtn = Ui.Btn(L("确定"), BtnKind.Primary);
+        var cancelBtn = Ui.Btn(L("取消"));
         var card = Shell(title, body, Ui.H(8, cancelBtn, okBtn).Right(), 460);
         Layer? layer = null;
         layer = Push(card, () => tcs.TrySetResult(null));
@@ -201,12 +206,12 @@ public static class Dlg
 
     /// <summary>表单式弹窗：内容自定，点确定时用 collect 取值；返回 null 表示取消。</summary>
     public static async Task<T?> Form<T>(string title, UIElement body, Func<T> collect,
-        string ok = "保存", double width = 560) where T : class
+        string? ok = null, double width = 560) where T : class
     {
         T? result = null;
         var tcs = new TaskCompletionSource<bool>();
-        var okBtn = Ui.Btn(ok, BtnKind.Primary);
-        var cancelBtn = Ui.Btn("取消");
+        var okBtn = Ui.Btn(ok ?? L("保存"), BtnKind.Primary);
+        var cancelBtn = Ui.Btn(L("取消"));
         var card = Shell(title, body, Ui.H(8, cancelBtn, okBtn).Right(), width);
         Layer? layer = null;
         layer = Push(card, () => tcs.TrySetResult(false));
@@ -215,7 +220,7 @@ public static class Dlg
             try { result = collect(); }
             catch (Exception ex)
             {
-                AppServices.Toast("填写有误", ex.Message, ToastKind.Warning);
+                AppServices.Toast(L("填写有误"), ex.Message, ToastKind.Warning);
                 Motion.Shake(card);
                 return;
             }
@@ -234,7 +239,7 @@ public static class Dlg
     /// <summary>无按钮的大内容弹窗（日志/详情/管理器）。</summary>
     public static Layer Panel(string title, UIElement body, double width = 720, Action? onClose = null)
     {
-        var closeBtn = Ui.IconBtn(Ico.Close, "关闭");
+        var closeBtn = Ui.IconBtn(Ico.Close, L("关闭"));
         var head = Ui.G(null, "*,Auto");
         head.Add(Ui.H2(title).VCenter(), 0, 0);
         head.Add(closeBtn, 0, 1);
@@ -260,8 +265,9 @@ public static class Dlg
     }
 
     /// <summary>阻塞式忙碌遮罩，using 作用域结束自动关。</summary>
-    public static IDisposable Busy(string text = "处理中…")
+    public static IDisposable Busy(string? text = null)
     {
+        text ??= L("处理中…");
         var ring = Ui.Prog();
         ring.IsIndeterminate = true;
         ring.Width = 220;
@@ -273,7 +279,7 @@ public static class Dlg
         };
         card.SetResourceReference(Border.BackgroundProperty, "B.Paper");
         Motion.Shadow(card, 30, 0.22, 6);
-        var layer = Push(card, null, dismissable: false);
+        var layer = Push(card, null, dismissable: false, smokeAutoAnswer: false);
         return new Scope(layer.Close);
     }
 
@@ -287,26 +293,34 @@ public static class Dlg
     }
 
     // ---------------- 系统文件对话框 ----------------
-    public static string? PickFile(string filter, string title = "选择文件")
+    public static string? PickFile(string filter, string? title = null)
     {
+        title ??= L("选择文件");
+        if (Smoke.Active) { Smoke.AutoCancelSystemDialog(title); return null; }
         var d = new Microsoft.Win32.OpenFileDialog { Filter = filter, Title = title, CheckFileExists = true };
         return d.ShowDialog() == true ? d.FileName : null;
     }
 
-    public static string[]? PickFiles(string filter, string title = "选择文件")
+    public static string[]? PickFiles(string filter, string? title = null)
     {
+        title ??= L("选择文件");
+        if (Smoke.Active) { Smoke.AutoCancelSystemDialog(title); return null; }
         var d = new Microsoft.Win32.OpenFileDialog { Filter = filter, Title = title, Multiselect = true };
         return d.ShowDialog() == true ? d.FileNames : null;
     }
 
-    public static string? SaveFile(string filter, string name, string title = "保存到")
+    public static string? SaveFile(string filter, string name, string? title = null)
     {
+        title ??= L("保存到");
+        if (Smoke.Active) { Smoke.AutoCancelSystemDialog(title); return null; }
         var d = new Microsoft.Win32.SaveFileDialog { Filter = filter, FileName = name, Title = title };
         return d.ShowDialog() == true ? d.FileName : null;
     }
 
-    public static string? PickFolder(string title = "选择文件夹")
+    public static string? PickFolder(string? title = null)
     {
+        title ??= L("选择文件夹");
+        if (Smoke.Active) { Smoke.AutoCancelSystemDialog(title); return null; }
         var d = new Microsoft.Win32.OpenFolderDialog { Title = title };
         return d.ShowDialog() == true ? d.FolderName : null;
     }
