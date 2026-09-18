@@ -203,6 +203,14 @@ class BackendWorker(QThread):
             self.task_finished.emit(self.task_id, False, str(exc))
 
 
+# AI 权限档位全集：新值 + 旧值（standard/full 读取时归一化，见 ai.permission）
+_PERM_MODES = {
+    "default", "plan", "edit", "acceptEdits", "auto", "dontAsk", "autoEdit",
+    "yolo", "bypassPermissions", "build", "custom",
+    "standard", "full",
+}
+
+
 class BackendAPI(QObject):
     """后端门面。UI 层只跟它打交道。"""
 
@@ -1052,6 +1060,7 @@ class BackendAPI(QObject):
 
     def get_settings(self) -> dict:
         from mclauncher.ai.defaults import DEFAULT_GATEWAY_URL, DEFAULT_MODEL
+        from mclauncher.ai.permission import normalize_permission_mode
         from mclauncher.feedback_defaults import DEFAULT_FEEDBACK_URL
         return {
             "share_libraries": bool(CONFIG.get("shared_libraries", False)),
@@ -1067,7 +1076,11 @@ class BackendAPI(QObject):
             "ai_api_key": CONFIG.get("ai_api_key") or "",
             "ai_model": CONFIG.get("ai_model") or DEFAULT_MODEL,
             "ai_confirm_writes": bool(CONFIG.get("ai_confirm_writes", True)),
-            "ai_permission_mode": CONFIG.get("ai_permission_mode") or "standard",
+            "ai_permission_mode": normalize_permission_mode(
+                CONFIG.get("ai_permission_mode"),
+                bool(CONFIG.get("ai_confirm_writes", True))),
+            "ai_permission_rules": list(CONFIG.get("ai_permission_rules") or []),
+            "ai_permission_dont_ask": bool(CONFIG.get("ai_permission_dont_ask", False)),
             "download_source": CONFIG.get("download_source") or "auto",
             "community_source": CONFIG.get("community_source") or "auto",
             "use_system_proxy": bool(CONFIG.get("use_system_proxy", True)),
@@ -1135,9 +1148,11 @@ class BackendAPI(QObject):
             return CONFIG.get(cfg_key or key, default)
 
         perm_mode = (data.get("ai_permission_mode") if "ai_permission_mode" in data
-                     else CONFIG.get("ai_permission_mode") or "standard")
-        if perm_mode not in ("standard", "full"):
-            perm_mode = "standard"
+                     else CONFIG.get("ai_permission_mode") or "default")
+        if perm_mode not in _PERM_MODES:
+            confirm = bool(data["ai_confirm_writes"]) if "ai_confirm_writes" in data \
+                else bool(CONFIG.get("ai_confirm_writes", True))
+            perm_mode = "default" if confirm else "yolo"
 
         # 壁纸每换一次就把旧的那一组压进历史栈，「撤销上一张」才有东西可退。
         # 必须赶在下面 CONFIG.update 之前算：那一步一落，旧值就找不回来了。
@@ -1169,6 +1184,10 @@ class BackendAPI(QObject):
             "ai_confirm_writes": bool(data["ai_confirm_writes"]) if "ai_confirm_writes" in data
                                   else bool(CONFIG.get("ai_confirm_writes", True)),
             "ai_permission_mode": perm_mode,
+            "ai_permission_rules": list(data["ai_permission_rules"]) if "ai_permission_rules" in data
+                                   else list(CONFIG.get("ai_permission_rules") or []),
+            "ai_permission_dont_ask": bool(data["ai_permission_dont_ask"]) if "ai_permission_dont_ask" in data
+                                      else bool(CONFIG.get("ai_permission_dont_ask", False)),
             "download_source": (data.get("download_source") or CONFIG.get("download_source") or "auto"),
             "community_source": (data.get("community_source") or CONFIG.get("community_source") or "auto"),
             "use_system_proxy": bool(data.get("use_system_proxy", CONFIG.get("use_system_proxy", True))),

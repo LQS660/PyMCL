@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass
 
 from mclauncher import mods as mods_mod
 from mclauncher.config import CONFIG
@@ -17,10 +18,30 @@ from . import conflict as conflict_mod
 from . import diagnose as diagnose_mod
 from . import modconfig as modconfig_mod
 from . import trace
-from .defaults import MAX_TOOL_RESULT, WRITE_TOOLS
+from .defaults import MAX_TOOL_RESULT
 
 
-def _schema(name, desc, props, required=None):
+@dataclass(frozen=True)
+class ToolMeta:
+    name: str
+    readonly: bool
+    # none | read | network | write_local | write_external | delete | launch
+    side_effect: str
+    risk: str = "low"          # low | medium | high
+    long_running: bool = False
+
+
+# 并行依据：readonly and side_effect in ("none", "read", "network")
+# 独占依据：side_effect in ("delete", "launch") 或 name == "ask_user"
+TOOL_META: dict = {}
+
+
+def _schema(name, desc, props, required=None, *,
+            readonly: bool, side_effect: str, risk: str = "low",
+            long_running: bool = False):
+    TOOL_META[name] = ToolMeta(name=name, readonly=readonly,
+                               side_effect=side_effect, risk=risk,
+                               long_running=long_running)
     params = {
         "type": "object",
         "properties": props,
@@ -62,29 +83,32 @@ TOOL_SCHEMAS = [
                     "description": "多题时用。每题 {id, prompt, allow_multiple, options:[{id,label}]}，至少 2 个选项",
                     "items": {"type": "object"},
                 },
-            }),
-    _schema("get_launcher_state", "查看实例、已装版本、Java、模组数量等当前状态", {}),
-    _schema("list_instances", "列出全部实例", {}),
+            },
+            readonly=True, side_effect="none"),
+    _schema("get_launcher_state", "查看实例、已装版本、Java、模组数量等当前状态", {},
+            readonly=True, side_effect="none"),
+    _schema("list_instances", "列出全部实例", {},
+            readonly=True, side_effect="none"),
     _schema("list_installed_versions", "列出某实例已安装的游戏版本", {
         "instance": {"type": "string", "description": "实例名，空则用默认"},
-    }),
+    }, readonly=True, side_effect="none"),
     _schema("search_versions", "搜索可下载的 Minecraft 版本号", {
         "query": {"type": "string", "description": "如 1.20.1 或 25w"},
         "kind": {"type": "string", "description": "release / snapshot / all"},
-    }, ["query"]),
+    }, ["query"], readonly=True, side_effect="network"),
     _schema("search_mods",
             "搜索模组（支持中文名）。同一轮用户请求只调用一次；搜完必须 ask_user 让用户选，禁止换词再搜。", {
         "query": {"type": "string"},
         "source": {"type": "string", "description": "全部 / Modrinth / CurseForge"},
-    }, ["query"]),
+    }, ["query"], readonly=True, side_effect="network"),
     _schema("search_modpacks",
             "搜索整合包（支持中文名）。同一轮只调用一次，搜完 ask_user，禁止换词再搜。", {
         "query": {"type": "string"},
         "source": {"type": "string", "description": "全部 / Modrinth / CurseForge"},
-    }, ["query"]),
+    }, ["query"], readonly=True, side_effect="network"),
     _schema("list_mods", "列出实例已装模组（含禁用）", {
         "instance": {"type": "string"},
-    }),
+    }, readonly=True, side_effect="read"),
     _schema("install_game",
             "真正开始下载/安装 Minecraft。用户已选定版本后必须调用这个，否则不会下载。"
             "纯原版 loader 填「无」。", {
@@ -92,106 +116,116 @@ TOOL_SCHEMAS = [
         "loader": {"type": "string", "description": "无 / Fabric / Forge / Quilt / NeoForge。纯原版必须填 无"},
         "loader_version": {"type": "string"},
         "instance": {"type": "string"},
-    }, ["version"]),
+    }, ["version"], readonly=False, side_effect="write_local", risk="high",
+        long_running=True),
     _schema("install_mod", "安装模组。优先传搜索结果里的 slug 或 id", {
         "name": {"type": "string", "description": "显示名或 slug"},
         "instance": {"type": "string"},
         "source": {"type": "string"},
         "slug": {"type": "string"},
         "id": {"type": "string", "description": "CurseForge 数字 id"},
-    }, ["name"]),
+    }, ["name"], readonly=False, side_effect="write_local", risk="medium",
+        long_running=True),
     _schema("install_modpack", "安装整合包。建议先 create_instance", {
         "name": {"type": "string"},
         "instance": {"type": "string"},
         "source": {"type": "string"},
         "slug": {"type": "string"},
         "id": {"type": "string"},
-    }, ["name"]),
+    }, ["name"], readonly=False, side_effect="write_local", risk="high",
+        long_running=True),
     _schema("install_shader", "安装光影包", {
         "name": {"type": "string"}, "instance": {"type": "string"},
         "source": {"type": "string"}, "slug": {"type": "string"},
-    }, ["name"]),
+    }, ["name"], readonly=False, side_effect="write_local", risk="low",
+        long_running=True),
     _schema("install_resourcepack", "安装资源包", {
         "name": {"type": "string"}, "instance": {"type": "string"},
         "source": {"type": "string"}, "slug": {"type": "string"},
-    }, ["name"]),
+    }, ["name"], readonly=False, side_effect="write_local", risk="low",
+        long_running=True),
     _schema("install_datapack", "安装数据包", {
         "name": {"type": "string"}, "instance": {"type": "string"},
         "source": {"type": "string"}, "slug": {"type": "string"},
-    }, ["name"]),
+    }, ["name"], readonly=False, side_effect="write_local", risk="low",
+        long_running=True),
     _schema("search_content",
             "搜索光影 / 资源包 / 数据包（支持中文名）。装之前先用它拿 slug 或 id。", {
         "kind": {"type": "string", "description": "shader / resourcepack / datapack"},
         "query": {"type": "string"},
         "source": {"type": "string", "description": "全部 / Modrinth / CurseForge"},
-    }, ["kind", "query"]),
+    }, ["kind", "query"], readonly=True, side_effect="network"),
     _schema("search_worlds", "搜索地图存档（CurseForge 世界）", {
         "query": {"type": "string"},
         "source": {"type": "string"},
-    }, ["query"]),
+    }, ["query"], readonly=True, side_effect="network"),
     _schema("install_world", "安装地图存档到实例的 saves", {
         "name": {"type": "string"}, "instance": {"type": "string"},
         "source": {"type": "string"}, "slug": {"type": "string"},
         "id": {"type": "string", "description": "CurseForge 数字 id"},
-    }, ["name"]),
+    }, ["name"], readonly=False, side_effect="write_local", risk="medium",
+        long_running=True),
     _schema("create_instance", "新建隔离实例，装整合包前建议先建", {
         "name": {"type": "string"},
-    }, ["name"]),
+    }, ["name"], readonly=False, side_effect="write_local", risk="medium"),
     _schema("delete_instance", "删除整个实例（危险）", {
         "name": {"type": "string"},
-    }, ["name"]),
+    }, ["name"], readonly=False, side_effect="delete", risk="high"),
     _schema("delete_mod", "删除模组文件", {
         "filename": {"type": "string"}, "instance": {"type": "string"},
-    }, ["filename"]),
+    }, ["filename"], readonly=False, side_effect="delete", risk="high"),
     _schema("disable_mod", "禁用模组（改名为 .disabled，可恢复）", {
         "filename": {"type": "string"}, "instance": {"type": "string"},
-    }, ["filename"]),
+    }, ["filename"], readonly=False, side_effect="write_local", risk="medium"),
     _schema("enable_mod", "重新启用已禁用模组", {
         "filename": {"type": "string"}, "instance": {"type": "string"},
-    }, ["filename"]),
-    _schema("get_java_list", "列出已安装 Java", {}),
+    }, ["filename"], readonly=False, side_effect="write_local", risk="medium"),
+    _schema("get_java_list", "列出已安装 Java", {},
+            readonly=True, side_effect="none"),
     _schema("download_java", "下载 Adoptium Java", {
         "major": {"type": "string", "description": "8 / 11 / 17 / 21"},
-    }, ["major"]),
+    }, ["major"], readonly=False, side_effect="write_local", risk="medium",
+        long_running=True),
     _schema("launch_game", "启动游戏。不填则用默认实例和已装版本", {
         "instance": {"type": "string"},
         "version": {"type": "string"},
         "username": {"type": "string"},
         "memory_mb": {"type": "integer"},
-    }),
+    }, readonly=False, side_effect="launch", risk="high"),
     _schema("diagnose_launch", "分析启动失败：规则扫 latest.log 和崩溃报告", {
         "instance": {"type": "string"},
-    }),
+    }, readonly=True, side_effect="read"),
     _schema("get_latest_log", "读取 latest.log 末尾", {
         "instance": {"type": "string"},
-    }),
+    }, readonly=True, side_effect="read"),
     _schema("get_crash_report", "读取最新崩溃报告", {
         "instance": {"type": "string"},
-    }),
+    }, readonly=True, side_effect="read"),
     _schema("scan_mod_conflicts", "扫描模组冲突、缺依赖、加载器不匹配", {
         "instance": {"type": "string"},
-    }),
+    }, readonly=True, side_effect="read"),
     _schema("inspect_mod", "解析单个模组 jar 的元数据", {
         "filename": {"type": "string"}, "instance": {"type": "string"},
-    }, ["filename"]),
+    }, ["filename"], readonly=True, side_effect="read"),
     _schema("list_mod_configs", "列出实例 config 下的配置文件", {
         "instance": {"type": "string"},
         "prefix": {"type": "string", "description": "子目录或文件名前缀"},
-    }),
+    }, readonly=True, side_effect="read"),
     _schema("read_mod_config", "读取某个配置文件", {
         "path": {"type": "string", "description": "相对 config/ 的路径"},
         "instance": {"type": "string"},
-    }, ["path"]),
+    }, ["path"], readonly=True, side_effect="read"),
     _schema("write_mod_config", "写入配置文件（会先备份 .bak）", {
         "path": {"type": "string"},
         "content": {"type": "string", "description": "完整文件内容"},
         "instance": {"type": "string"},
-    }, ["path", "content"]),
+    }, ["path", "content"], readonly=False, side_effect="write_local", risk="high"),
 ]
 
 
 def is_write_tool(name: str) -> bool:
-    return name in WRITE_TOOLS
+    meta = TOOL_META.get(name)
+    return not (meta and meta.readonly) if name in TOOL_META else False
 
 
 def is_ask_tool(name: str) -> bool:

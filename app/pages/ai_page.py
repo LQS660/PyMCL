@@ -18,14 +18,17 @@ from qfluentwidgets import (
     BodyLabel, CaptionLabel, CheckBox, ComboBox, FluentIcon as FIF, InfoBar,
     InfoBarPosition, LineEdit, MessageBoxBase, PlainTextEdit, PrimaryPushButton,
     ProgressBar, PushButton, RadioButton, ScrollArea, SettingCard, SubtitleLabel,
-    SwitchButton, TransparentPushButton, TransparentToolButton,
+    TransparentPushButton, TransparentToolButton,
 )
 
 from mclauncher.ai.agent import AgentCancelled, run_agent
 from mclauncher.ai.client import AIClientError, HttpCancel
+from mclauncher.ai import permission as ai_perm
 from mclauncher.ai import store as chat_store
 from mclauncher.ai.defaults import DEFAULT_MODEL
+from mclauncher.ai.permission import Behavior, Rule, rule_content_from_input
 from mclauncher.ai.result import AgentResult, StopReason
+from mclauncher.ai.tools import TOOL_META
 from ..pcl_chrome import Theme, prestyle_page
 from mclauncher.i18n import tr
 
@@ -74,7 +77,7 @@ def _md_inline(text: str) -> str:
 class AgentThread(QThread):
     delta = Signal(str)
     status = Signal(str, dict)
-    need_confirm = Signal(str, dict, str)
+    need_confirm = Signal(str, dict, str, str)
     need_ask = Signal(list, str)
     done = Signal(object)
     failed = Signal(str)
@@ -98,8 +101,9 @@ class AgentThread(QThread):
         self.answer_confirm(False)
         self.answer_ask(None)
 
-    def answer_confirm(self, ok: bool):
-        self._confirm_ok = bool(ok)
+    def answer_confirm(self, ok):
+        # bool 或 Rule（返回 Rule 表示「以后都允许这类操作」）
+        self._confirm_ok = ok
         self._confirm_ev.set()
 
     def answer_ask(self, result):
@@ -113,9 +117,9 @@ class AgentThread(QThread):
         def on_status(kind, payload):
             self.status.emit(kind, payload or {})
 
-        def confirm_fn(name, args, label):
+        def confirm_fn(name, args, label, reason=""):
             self._confirm_ev.clear()
-            self.need_confirm.emit(name, args, label)
+            self.need_confirm.emit(name, args, label, str(reason or ""))
             self._confirm_ev.wait()
             return self._confirm_ok
 
@@ -269,6 +273,8 @@ class ConfirmCard(QFrame):
             box.setPlainText(detail)
             box.setFixedHeight(min(160, 40 + detail.count("\n") * 16))
             lay.addWidget(box)
+        self.allow_always = CheckBox(tr("以后都允许这类操作（按当前实例记忆）"))
+        lay.addWidget(self.allow_always)
         row = QHBoxLayout()
         yes = PrimaryPushButton(tr("确认执行"))
         no = PushButton(tr("取消"))
@@ -416,11 +422,15 @@ class _AskBlock(QWidget):
 
 
 class PermissionDialog(MessageBoxBase):
-    """AI 助手权限管理：变更前确认（开关）+ 完全访问（下拉）。
+    """AI 助手权限管理：档位下拉 + 自定义规则列表。
 
     两个控件改完立即落盘，不用点额外保存；on_changed 用来让 AI 页
-    同步输入框旁的状态标签和快捷下拉。
+    同步输入框旁的状态标签和快捷下拉。旧的「变更前确认」开关由档位
+    取代（「全自动」即原开关关闭的语义）。
     """
+
+    _MODES = ("default", "acceptEdits", "plan", "yolo", "custom")
+    _BEHAVIORS = (Behavior.ALLOW, Behavior.DENY, Behavior.ASK)
 
     def __init__(self, backend, on_changed=None, parent=None):
         super().__init__(parent)
@@ -431,20 +441,13 @@ class PermissionDialog(MessageBoxBase):
         self.viewLayout.addSpacing(8)
 
         s = backend.get_settings()
-        confirm_on = bool(s.get("ai_confirm_writes", True))
-        mode = s.get("ai_permission_mode") or "standard"
+        mode = s.get("ai_permission_mode") or "default"
 
-        self.confirm_card = SettingCard(FIF.INFO, tr("变更前确认"), tr("改文件前先问我"))
-        self.confirm_sw = SwitchButton(self.confirm_card)
-        self.confirm_sw.setChecked(confirm_on)
-        self.confirm_card.hBoxLayout.addWidget(self.confirm_sw, 0, Qt.AlignRight)
-        self.confirm_card.hBoxLayout.addSpacing(16)
-        self.viewLayout.addWidget(self.confirm_card)
-
-        self.mode_card = SettingCard(FIF.FINGERPRINT, tr("完全访问"), tr("减少确认次数"))
+        self.mode_card = SettingCard(FIF.FINGERPRINT, tr("权限档位"), tr("写操作要确认到什么程度"))
         self.mode_box = ComboBox(self.mode_card)
-        self.mode_box.addItems([tr("标准"), tr("完全访问")])
-        self.mode_box.setCurrentIndex(1 if mode == "full" else 0)
+        self.mode_box.addItems([tr("每次确认"), tr("写直接执行"), tr("只看不动"),
+                                tr("全自动"), tr("自定义规则")])
+        self.mode_box.setCurrentIndex(self._MODES.index(mode) if mode in self._MODES else 0)
         self.mode_box.setFixedWidth(150)
         self.mode_card.hBoxLayout.addWidget(self.mode_box, 0, Qt.AlignRight)
         self.mode_card.hBoxLayout.addSpacing(16)
@@ -452,23 +455,84 @@ class PermissionDialog(MessageBoxBase):
 
         self.viewLayout.addSpacing(4)
         tip = CaptionLabel(tr(
-            "关掉「变更前确认」后写操作全部直接执行；「完全访问」仍会在删除版本、"
-            "删除模组、改配置前询问。"))
+            "「只看不动」下 AI 不能安装/删除/改配置；「写直接执行」下删除前仍会问；"
+            "「自定义规则」配合下面的规则列表生效。"))
         tip.setWordWrap(True)
         self.viewLayout.addWidget(tip)
 
-        self.confirm_sw.checkedChanged.connect(self._save)
+        self.viewLayout.addSpacing(8)
+        self.viewLayout.addWidget(SubtitleLabel(tr("自定义规则"), self))
+        self.rule_list = QListWidget(self)
+        self.rule_list.setMinimumHeight(120)
+        self.viewLayout.addWidget(self.rule_list)
+
+        add_row = QHBoxLayout()
+        self.rule_tool = ComboBox(self)
+        self.rule_tool.addItems(sorted(TOOL_META))
+        self.rule_tool.setFixedWidth(170)
+        self.rule_behavior = ComboBox(self)
+        self.rule_behavior.addItems([tr("允许"), tr("禁止"), tr("每次问")])
+        self.rule_content = LineEdit(self)
+        self.rule_content.setPlaceholderText(tr("限定参数（留空 = 整个工具）"))
+        add_btn = PushButton(tr("添加"), self)
+        add_btn.clicked.connect(self._add_rule)
+        add_row.addWidget(self.rule_tool)
+        add_row.addWidget(self.rule_behavior)
+        add_row.addWidget(self.rule_content, 1)
+        add_row.addWidget(add_btn)
+        self.viewLayout.addLayout(add_row)
+
+        del_row = QHBoxLayout()
+        del_btn = PushButton(tr("删除选中规则"), self)
+        del_btn.clicked.connect(self._del_rule)
+        del_row.addWidget(del_btn)
+        del_row.addStretch(1)
+        self.viewLayout.addLayout(del_row)
+
+        self._reload_rules()
         self.mode_box.currentIndexChanged.connect(self._save)
 
         self.yesButton.setText(tr("关闭"))
         self.cancelButton.hide()
-        self.widget.setMinimumWidth(480)
+        self.widget.setMinimumWidth(520)
+
+    def _reload_rules(self):
+        self.rule_list.clear()
+        for row in ai_perm.list_stored_rules():
+            label = f"[{row['scope']}] {row['behavior_label']} {row['toolName']}"
+            if row.get("ruleContent"):
+                label += f" · {row['ruleContent']}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, row["key"])
+            self.rule_list.addItem(item)
+
+    def _add_rule(self):
+        tool = self.rule_tool.currentText()
+        if not tool:
+            return
+        behavior = self._BEHAVIORS[self.rule_behavior.currentIndex()]
+        content = self.rule_content.text().strip() or None
+        try:
+            ai_perm.append_rule(Rule(tool, content, behavior), instance=None)
+        except Exception as exc:  # noqa: BLE001
+            InfoBar.error(tr("保存失败"), str(exc), parent=self,
+                          position=InfoBarPosition.TOP, duration=4000)
+            return
+        self.rule_content.clear()
+        self._reload_rules()
+
+    def _del_rule(self):
+        item = self.rule_list.currentItem()
+        if not item:
+            return
+        ai_perm.remove_rule(item.data(Qt.UserRole))
+        self._reload_rules()
 
     def _save(self, *_a):
-        mode = "full" if self.mode_box.currentIndex() == 1 else "standard"
+        mode = self._MODES[self.mode_box.currentIndex()]
         try:
             self.backend.save_settings({
-                "ai_confirm_writes": bool(self.confirm_sw.isChecked()),
+                "ai_confirm_writes": mode != "yolo",
                 "ai_permission_mode": mode,
             })
         except Exception as exc:  # noqa: BLE001
@@ -601,12 +665,13 @@ class AiPage(QWidget):
         row = QHBoxLayout(self._input_box)
         row.setContentsMargins(10, 8, 10, 8)
         self.input = ChatInput()
-        # 输入框旁的权限快捷区：下拉直接切三档，齿轮开完整说明面板
+        # 输入框旁的权限快捷区：下拉直接切档，齿轮开完整说明面板
         self.perm_combo = ComboBox()
         self.perm_combo.setFixedHeight(34)
-        self.perm_combo.setFixedWidth(112)
+        self.perm_combo.setFixedWidth(120)
         self.perm_combo.setToolTip(tr("AI 权限等级"))
-        self.perm_combo.addItems([tr("标准"), tr("完全访问"), tr("免确认")])
+        self.perm_combo.addItems([tr("每次确认"), tr("写直接执行"), tr("只看不动"),
+                                  tr("全自动"), tr("自定义")])
         self.perm_combo.currentIndexChanged.connect(self._on_perm_level)
         self.perm_btn = TransparentToolButton(FIF.SETTING)
         self.perm_btn.setFixedSize(34, 34)
@@ -669,23 +734,28 @@ class AiPage(QWidget):
             label = f"公益接口 · {DEFAULT_MODEL}"
         self.status.setText(label)
 
+    _PERM_LEVELS = ("default", "acceptEdits", "plan", "yolo", "custom")
+
     def _perm_level(self) -> str:
         s = self.backend.get_settings()
-        if not bool(s.get("ai_confirm_writes", True)):
-            return "noconfirm"
-        return "full" if (s.get("ai_permission_mode") or "standard") == "full" else "standard"
+        mode = s.get("ai_permission_mode") or "default"  # backend 已做旧值归一化
+        if mode not in self._PERM_LEVELS:
+            mode = "default" if bool(s.get("ai_confirm_writes", True)) else "yolo"
+        return mode
 
     def _refresh_perm_ui(self):
         level = self._perm_level()
         self.perm_combo.blockSignals(True)
-        self.perm_combo.setCurrentIndex({"standard": 0, "full": 1, "noconfirm": 2}[level])
+        self.perm_combo.setCurrentIndex(self._PERM_LEVELS.index(level))
         self.perm_combo.blockSignals(False)
 
     def _on_perm_level(self, index: int):
         data = {
-            0: {"ai_confirm_writes": True, "ai_permission_mode": "standard"},
-            1: {"ai_confirm_writes": True, "ai_permission_mode": "full"},
-            2: {"ai_confirm_writes": False},
+            0: {"ai_confirm_writes": True, "ai_permission_mode": "default"},
+            1: {"ai_confirm_writes": True, "ai_permission_mode": "acceptEdits"},
+            2: {"ai_confirm_writes": True, "ai_permission_mode": "plan"},
+            3: {"ai_confirm_writes": False, "ai_permission_mode": "yolo"},
+            4: {"ai_confirm_writes": True, "ai_permission_mode": "custom"},
         }.get(index)
         if not data:
             return
@@ -944,19 +1014,25 @@ class AiPage(QWidget):
                 self._add_widget(ToolLine(tr("已跳过：") + label))
         self._scroll_bottom()
 
-    def _on_confirm(self, name: str, args: dict, label: str):
+    def _on_confirm(self, name: str, args: dict, label: str, reason: str = ""):
         detail = ""
         if name == "write_mod_config":
             detail = str((args or {}).get("content") or "")[:4000]
         elif name == "delete_instance":
             detail = tr("删掉后文件找不回来。")
+        if reason:
+            detail = (detail + "\n" + reason).strip()
         card = ConfirmCard(label, detail)
         worker = self._worker
 
         def yes():
             card.setEnabled(False)
             if worker:
-                worker.answer_confirm(True)
+                if card.allow_always.isChecked():
+                    worker.answer_confirm(Rule(
+                        name, rule_content_from_input(args or {}), Behavior.ALLOW))
+                else:
+                    worker.answer_confirm(True)
 
         def no():
             card.setEnabled(False)

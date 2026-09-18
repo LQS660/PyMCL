@@ -3,15 +3,18 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 
+from . import permission
 from . import trace
 from .client import AIClientError, chat_once, chat_stream
-from .defaults import DANGEROUS_TOOLS, LONG_TOOLS, MAX_HISTORY, MAX_TOOL_ROUNDS
+from .defaults import MAX_HISTORY, MAX_TOOL_ROUNDS
+from .permission import Behavior, Decision, Rule
 from .prompt import system_prompt
 from .result import AgentResult, StopReason
 from .tools import (
-    TOOL_SCHEMAS, confirm_label, is_ask_tool, is_write_tool,
+    TOOL_META, TOOL_SCHEMAS, confirm_label, is_ask_tool, is_write_tool,
     normalize_ask_args, parse_args, run_tool, runtime_context,
 )
 
@@ -28,40 +31,40 @@ def _trim_history(history: list) -> list:
     return list(history[-MAX_HISTORY:])
 
 
+def _current_instance() -> str:
+    try:
+        from mclauncher.config import CONFIG
+        return CONFIG.get("default_instance", "default") or "default"
+    except Exception:  # noqa: BLE001
+        return "default"
+
+
 def _system_messages(backend, settings: dict) -> list:
     ctx = runtime_context(backend)
     msgs = [
         {"role": "system", "content": system_prompt()},
         {"role": "system", "content": "当前启动器状态：\n" + ctx},
     ]
-    note = _permission_note(settings or {})
+    note = permission.permission_note(settings or {})
     if note:
         msgs.append({"role": "system", "content": note})
     return msgs
 
 
-def _permission_note(settings: dict) -> str:
-    """把用户权限设置同步给模型，避免它在免确认模式下还嘴上说「会弹确认」。"""
-    if not bool(settings.get("ai_confirm_writes", True)):
-        return (
-            "[权限设置] 用户关闭了「变更前确认」：写操作会直接执行，不会弹确认。"
-            "你仍要先用一句话说明将要做什么。"
-        )
-    if (settings.get("ai_permission_mode") or "standard") == "full":
-        return (
-            "[权限设置] 用户开启了「完全访问」：多数写操作直接执行；"
-            "删除实例、删除模组、改配置仍会弹确认，要等用户点了才执行。"
-        )
-    return ""
+def _call_confirm(confirm_fn, tname: str, args: dict, label: str, reason: str):
+    """confirm_fn 兼容两种签名：旧三参（bridge 端）与新四参（带拒绝原因）。
 
-
-def _confirm_policy(settings: dict, tname: str) -> bool:
-    """写操作要不要弹确认：开关关了全不弹；完全访问只保破坏性操作。"""
-    if not bool((settings or {}).get("ai_confirm_writes", True)):
-        return False
-    if ((settings or {}).get("ai_permission_mode") or "standard") == "full":
-        return tname in DANGEROUS_TOOLS
-    return True
+    返回 bool 或 Rule（Rule = 用户选了「以后都允许」）。
+    """
+    if confirm_fn is None:
+        return True
+    try:
+        nparams = len(inspect.signature(confirm_fn).parameters)
+    except (TypeError, ValueError):  # noqa: BLE001
+        nparams = 3
+    if nparams >= 4:
+        return confirm_fn(tname, args, label, reason)
+    return confirm_fn(tname, args, label)
 
 
 def run_agent(backend, settings: dict, history: list, user_text: str,
@@ -99,6 +102,15 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
 
     messages = _system_messages(backend, settings) + _trim_history(history)
     messages.append({"role": "user", "content": user_text})
+
+    instance_name = _current_instance()
+    mode = permission.normalize_permission_mode(
+        (settings or {}).get("ai_permission_mode"),
+        bool((settings or {}).get("ai_confirm_writes", True)))
+    dont_ask = bool((settings or {}).get("ai_permission_dont_ask", False))
+    rules = permission.dedupe_rules(
+        list(permission.load_rules(instance_name))
+        + list((settings or {}).get("ai_permission_rules") or []))
 
     final = ""
     acted = False
@@ -241,53 +253,67 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                         "装游戏 → install_game（纯原版 loader=无）。不要结束对话。"
                     )
                     _status("tool_done", {"name": tname, "label": "已选择", "result": str(result)[:400]})
-            elif tname in SEARCH_TOOLS:
-                qkey = (tname, str(args.get("query") or "").strip().lower())
-                if qkey in search_done:
-                    result = (
-                        f"{search_done[qkey]}\n"
-                        "[系统] 这一轮已经用相同关键词搜过，结果就是上面这些。"
-                        "禁止再搜同一词。立刻 ask_user 让用户选，或说明没找到。"
-                    )
-                    _status("tool_skip", {"name": tname, "label": "拦截重复搜索"})
-                    need_pick = True
-                else:
-                    _status("tool_run", {"name": tname, "label": label})
-                    result = run_tool(backend, tname, args, wait=False, cancelled=cancelled)
-                    hint = (
-                        "\n[系统] 搜索结束。下一动作必须是 ask_user 让用户从上述结果里选。"
-                        "禁止用相同关键词再次调用该搜索。"
-                    )
-                    result = f"{result}{hint}"
-                    search_done[qkey] = result
-                    need_pick = True
-                    _status("tool_done", {"name": tname, "label": label, "result": str(result)[:400]})
-            elif is_write_tool(tname):
-                ok = True
-                if confirm_fn and _confirm_policy(settings, tname):
-                    ok = bool(confirm_fn(tname, args, label))
-                if not ok:
-                    result = "用户取消了这次操作"
-                    _status("tool_skip", {"name": tname, "label": label})
-                else:
-                    wrote = True
-                    _status("tool_run", {"name": tname, "label": label})
-                    wait = tname not in LONG_TOOLS and tname != "launch_game"
-                    result = run_tool(backend, tname, args, wait=wait, cancelled=cancelled)
-                    extra = {}
-                    try:
-                        parsed = json.loads(result) if isinstance(result, str) and result.startswith("{") else {}
-                        if isinstance(parsed, dict) and parsed.get("task_id"):
-                            extra["task_id"] = parsed["task_id"]
-                            if parsed.get("queued"):
-                                pending.append({"task_id": parsed["task_id"], "name": tname})
-                    except Exception:
-                        extra = {}
-                    _status("tool_done", {"name": tname, "label": label, "result": result[:400], **extra})
             else:
-                _status("tool_run", {"name": tname, "label": label})
-                result = run_tool(backend, tname, args, wait=False, cancelled=cancelled)
-                _status("tool_done", {"name": tname, "label": label, "result": str(result)[:400]})
+                result = None
+                meta = TOOL_META.get(tname)
+                res = permission.decide(meta, args, mode, rules)
+                if res.decision == Decision.MODIFY and res.modified_input:
+                    args = res.modified_input
+                if res.decision == Decision.DENY:
+                    result = f"[权限] 已拒绝：{res.reason}"
+                    _status("tool_skip", {"name": tname, "label": label})
+                elif res.decision == Decision.ASK and dont_ask:
+                    result = "[权限] 已拒绝：用户开启了「不询问」模式"
+                    _status("tool_skip", {"name": tname, "label": label})
+                elif res.decision == Decision.ASK:
+                    rv = _call_confirm(confirm_fn, tname, args, label, res.reason)
+                    if isinstance(rv, Rule):
+                        rules = permission.apply_updates(rules, [rv])
+                        permission.append_rule(rv, instance_name)
+                    if not isinstance(rv, Rule) and not rv:
+                        result = "用户拒绝了这次操作"
+                        _status("tool_skip", {"name": tname, "label": label})
+                if result is None:
+                    if tname in SEARCH_TOOLS:
+                        qkey = (tname, str(args.get("query") or "").strip().lower())
+                        if qkey in search_done:
+                            result = (
+                                f"{search_done[qkey]}\n"
+                                "[系统] 这一轮已经用相同关键词搜过，结果就是上面这些。"
+                                "禁止再搜同一词。立刻 ask_user 让用户选，或说明没找到。"
+                            )
+                            _status("tool_skip", {"name": tname, "label": "拦截重复搜索"})
+                            need_pick = True
+                        else:
+                            _status("tool_run", {"name": tname, "label": label})
+                            result = run_tool(backend, tname, args, wait=False, cancelled=cancelled)
+                            hint = (
+                                "\n[系统] 搜索结束。下一动作必须是 ask_user 让用户从上述结果里选。"
+                                "禁止用相同关键词再次调用该搜索。"
+                            )
+                            result = f"{result}{hint}"
+                            search_done[qkey] = result
+                            need_pick = True
+                            _status("tool_done", {"name": tname, "label": label, "result": str(result)[:400]})
+                    elif is_write_tool(tname):
+                        wrote = True
+                        _status("tool_run", {"name": tname, "label": label})
+                        wait = not (meta and (meta.long_running or meta.side_effect == "launch"))
+                        result = run_tool(backend, tname, args, wait=wait, cancelled=cancelled)
+                        extra = {}
+                        try:
+                            parsed = json.loads(result) if isinstance(result, str) and result.startswith("{") else {}
+                            if isinstance(parsed, dict) and parsed.get("task_id"):
+                                extra["task_id"] = parsed["task_id"]
+                                if parsed.get("queued"):
+                                    pending.append({"task_id": parsed["task_id"], "name": tname})
+                        except Exception:
+                            extra = {}
+                        _status("tool_done", {"name": tname, "label": label, "result": result[:400], **extra})
+                    else:
+                        _status("tool_run", {"name": tname, "label": label})
+                        result = run_tool(backend, tname, args, wait=False, cancelled=cancelled)
+                        _status("tool_done", {"name": tname, "label": label, "result": str(result)[:400]})
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id") or "",

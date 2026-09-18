@@ -8,47 +8,9 @@ DEFAULT_GATEWAY_URL = ""
 DEFAULT_MODEL = "deepseek-v4-flash"
 CLIENT_HEADER = f"PyMCL/{APP_VERSION}"
 
-# 写操作必须二次确认
-WRITE_TOOLS = {
-    "install_game",
-    "install_mod",
-    "install_modpack",
-    "install_shader",
-    "install_resourcepack",
-    "install_datapack",
-    "install_world",
-    "download_java",
-    "launch_game",
-    "create_instance",
-    "delete_instance",
-    "delete_mod",
-    "disable_mod",
-    "enable_mod",
-    "write_mod_config",
-}
-
-# 「完全访问」下仍然必须确认的破坏性操作：删了就找不回来或会覆盖用户手改的内容
-DANGEROUS_TOOLS = {
-    "delete_instance",
-    "delete_mod",
-    "write_mod_config",
-}
-
 MAX_TOOL_ROUNDS = 10
 MAX_HISTORY = 24
 MAX_TOOL_RESULT = 8000
-
-# 这些会进下载任务栏，对话里不要卡到结束
-LONG_TOOLS = {
-    "install_game",
-    "install_mod",
-    "install_modpack",
-    "install_shader",
-    "install_resourcepack",
-    "install_datapack",
-    "install_world",
-    "download_java",
-}
 
 STREAM_CONNECT_TIMEOUT = 15
 STREAM_READ_TIMEOUT = 90

@@ -17,7 +17,6 @@ from mclauncher import official_migrate as om
 from mclauncher import updater
 from mclauncher import worlds as worlds_mod
 from mclauncher.ai import tools as ai_tools
-from mclauncher.ai.defaults import LONG_TOOLS, WRITE_TOOLS
 
 
 def _fake_instance(root: Path) -> SimpleNamespace:
@@ -203,8 +202,11 @@ class AiToolTableTests(unittest.TestCase):
             self.assertIn(tool, names)
 
     def test_install_world_is_gated_and_backgrounded(self):
-        self.assertIn("install_world", WRITE_TOOLS)
-        self.assertIn("install_world", LONG_TOOLS)
+        # 契约变了：WRITE_TOOLS/LONG_TOOLS 两个 set 已被 TOOL_META 元数据取代
+        meta = ai_tools.TOOL_META["install_world"]
+        self.assertFalse(meta.readonly)
+        self.assertEqual(meta.side_effect, "write_local")
+        self.assertTrue(meta.long_running)
         self.assertIn("安装地图", ai_tools.confirm_label("install_world", {"name": "X"}))
 
     def test_search_content_dispatches_by_kind(self):
