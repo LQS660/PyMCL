@@ -187,11 +187,14 @@ class ConfigBody(QWidget):
         setup_btn.clicked.connect(page._version_setup)
         news_btn = TransparentPushButton(FIF.SYNC, tr("刷新新闻"))
         news_btn.clicked.connect(page._load_news)
-        cfg.addRow("", setup_btn)
-        cfg.addRow("", news_btn)
         ms_btn = TransparentPushButton(FIF.PEOPLE, tr("使用微软账户登录…"))
         ms_btn.clicked.connect(page._login)
-        cfg.addRow("", ms_btn)
+        # 三个动作按钮跨两列，不挤在字段列里：英文文案（"Sign in with a
+        # Microsoft account…"）比字段列宽，塞字段列会把整张表单撑出 330 的卡。
+        # 再给一个显式下限兜底，极窄时宁可按钮里裁字，也别让表单横向溢出。
+        for btn in (setup_btn, news_btn, ms_btn):
+            _shrinkable(btn, 140)
+            cfg.addRow(btn)
 
         # 卡片的下限是三端共用的 CARD_MIN_SIZE（330 宽），而这张表单按控件
         # 自带的最小尺寸算要 468：账号下拉被当前账号名撑到 226，分辨率那行
