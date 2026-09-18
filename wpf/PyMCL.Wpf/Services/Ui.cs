@@ -185,13 +185,27 @@ public sealed class SmoothScroll : ScrollViewer
 
 public static class Fmt
 {
-    public static string Downloads(long n) => n switch
+    /// <summary>下载量。中文按万 / 亿，其它语言按 K / M / B——数量单位不是翻一个词的事，进位都不一样。</summary>
+    public static string Downloads(long n)
     {
-        >= 100_000_000 => (n / 100_000_000.0).ToString("0.#", CultureInfo.InvariantCulture) + " 亿",
-        >= 10_000 => (n / 10_000.0).ToString("0.#", CultureInfo.InvariantCulture) + " 万",
-        > 0 => n.ToString(CultureInfo.InvariantCulture),
-        _ => "—",
-    };
+        var inv = CultureInfo.InvariantCulture;
+        if (I18n.Current != I18n.DefaultLang)
+            return n switch
+            {
+                >= 1_000_000_000 => (n / 1_000_000_000.0).ToString("0.#", inv) + "B",
+                >= 1_000_000 => (n / 1_000_000.0).ToString("0.#", inv) + "M",
+                >= 1_000 => (n / 1_000.0).ToString("0.#", inv) + "K",
+                > 0 => n.ToString(inv),
+                _ => "—",
+            };
+        return n switch
+        {
+            >= 100_000_000 => (n / 100_000_000.0).ToString("0.#", inv) + " 亿", // i18n:ignore 中文数量单位，只走 zh_CN 这条分支
+            >= 10_000 => (n / 10_000.0).ToString("0.#", inv) + " 万", // i18n:ignore 中文数量单位，只走 zh_CN 这条分支
+            > 0 => n.ToString(inv),
+            _ => "—",
+        };
+    }
 
     public static string Size(long bytes) => bytes switch
     {
@@ -203,12 +217,12 @@ public static class Fmt
 
     public static string Duration(long seconds)
     {
-        if (seconds <= 0) return "0 分钟";
+        if (seconds <= 0) return L("0 分钟");
         var h = seconds / 3600;
         var m = seconds % 3600 / 60;
-        if (h >= 24) return $"{h / 24} 天 {h % 24} 小时";
-        if (h > 0) return $"{h} 小时 {m} 分钟";
-        return $"{Math.Max(1, m)} 分钟";
+        if (h >= 24) return L("{0} 天 {1} 小时", h / 24, h % 24);
+        if (h > 0) return L("{0} 小时 {1} 分钟", h, m);
+        return L("{0} 分钟", Math.Max(1, m));
     }
 
     /// <summary>后端进度文案形如 "补全依赖库 (3/9)  |  12.4 MB/s"，拆成状态 + 速度。</summary>
@@ -313,6 +327,61 @@ public static class Ui
     {
         var s = new SmoothScroll { Content = content, Padding = new Thickness(padding) };
         return s;
+    }
+
+    /// <summary>
+    /// 用「行工厂」搭一个虚拟化列表。行照旧用代码拼，但只有滚进视口的那几行会真被构造出来——
+    /// 搜索结果、已安装清单动辄上百行，全量构造首屏就要等半秒还吃着内存。
+    /// 要生效必须给它一个有限高度（放进 Grid 的 * 行，别塞进外层 ScrollViewer）。
+    /// </summary>
+    public static ListBox VirtualList<T>(Func<T, UIElement> row, double rowSpacing = 10)
+    {
+        var list = new ListBox
+        {
+            Style = S("PlainList"),
+            Focusable = false,
+            ItemTemplate = RowTemplate(row),
+            ItemContainerStyle = BareContainer(rowSpacing),
+        };
+        ScrollViewer.SetCanContentScroll(list, true);
+        ScrollViewer.SetHorizontalScrollBarVisibility(list, ScrollBarVisibility.Disabled);
+        return list;
+    }
+
+    private static DataTemplate RowTemplate<T>(Func<T, UIElement> row)
+    {
+        var f = new FrameworkElementFactory(typeof(ContentPresenter));
+        // 不带 Path 的绑定就是「这一项本身」，容器复用时会重新过一遍转换器。
+        f.SetBinding(ContentPresenter.ContentProperty,
+            new System.Windows.Data.Binding { Converter = new RowFactory<T>(row) });
+        var tpl = new DataTemplate { VisualTree = f };
+        tpl.Seal();
+        return tpl;
+    }
+
+    /// <summary>列表项容器只留间距，不要选中高亮——行卡片自己有底色和边框。</summary>
+    private static Style BareContainer(double spacing)
+    {
+        var tpl = new ControlTemplate(typeof(ListBoxItem));
+        tpl.VisualTree = new FrameworkElementFactory(typeof(ContentPresenter));
+        var style = new Style(typeof(ListBoxItem));
+        style.Setters.Add(new Setter(Control.TemplateProperty, tpl));
+        style.Setters.Add(new Setter(FrameworkElement.MarginProperty, new Thickness(0, 0, 0, spacing)));
+        style.Setters.Add(new Setter(UIElement.FocusableProperty, false));
+        style.Seal();
+        return style;
+    }
+
+    private sealed class RowFactory<T> : System.Windows.Data.IValueConverter
+    {
+        private readonly Func<T, UIElement> _row;
+        public RowFactory(Func<T, UIElement> row) => _row = row;
+
+        public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture) =>
+            value is T item ? _row(item) : null;
+
+        public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) =>
+            System.Windows.Data.Binding.DoNothing;
     }
 
     public static Border Sep(bool vertical = false)
@@ -486,7 +555,15 @@ public static class Ui
     public static Grid Section(string title, string? sub = null, UIElement? right = null)
     {
         var g = G(null, "*,Auto");
-        var left = V(2, H2(title), sub is null ? null : Muted(sub));
+        // 右列（计数/搜索/按钮串）在窄窗口下会把左列挤到只剩一两百像素，副标题一旦换行
+        // 就和右列的计数撞在同一行，看着像文字重叠 —— 收成单行省略号，窄窗只丢尾巴不撞行。
+        var subTb = sub is null ? null : Muted(sub);
+        if (subTb != null)
+        {
+            subTb.TextWrapping = TextWrapping.NoWrap;
+            subTb.TextTrimming = TextTrimming.CharacterEllipsis;
+        }
+        var left = V(2, H2(title), subTb);
         g.Add(left, 0, 0);
         if (right != null)
         {
@@ -566,7 +643,7 @@ public static class Ui
         {
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
         }
-        catch (Exception ex) { AppServices.Toast("打不开链接", ex.Message, ToastKind.Warning); }
+        catch (Exception ex) { AppServices.Toast(L("打不开链接"), ex.Message, ToastKind.Warning); }
     }
 }
 
