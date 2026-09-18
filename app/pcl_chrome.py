@@ -5,9 +5,9 @@ from PySide6.QtCore import (
     QEasingCurve, QEvent, QParallelAnimationGroup, QPoint, QPropertyAnimation,
     Qt, Signal,
 )
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
-    QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton,
+    QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton, QStyle, QStyleOption,
     QToolButton, QVBoxLayout, QWidget, QGraphicsOpacityEffect,
 )
 from qframelesswindow import TitleBar
@@ -140,6 +140,25 @@ def mark_opaque(widget, opaque: bool) -> None:
             widget.update()
     except RuntimeError:
         pass
+
+
+def paint_opaque_styled_background(widget) -> None:
+    """被 mark_opaque 标成不透明的控件，在 paintEvent 开头自己把样式表底补上。
+
+    Qt 只给「没标 WA_OpaquePaintEvent」的控件走 paintBackground——样式表里的
+    background / border 就是在那一步（PE_Widget）画的。标上之后这一笔被整段
+    跳过，控件那块矩形从此没人清底：浅色主题下恰好是白底盖白底看不出来，
+    深色主题一开，侧栏和标题栏就成了两块白板，字是深色主题的浅灰、底却还是
+    白的；从顶上滑进来的 InfoBar 也会在标题栏留下一串没人擦的残影。
+    这里把 Qt 跳掉的那一笔按原样补回来：同一套 QSS、同一个 PE_Widget。
+    """
+    if widget is None or not widget.testAttribute(Qt.WA_OpaquePaintEvent):
+        return
+    opt = QStyleOption()
+    opt.initFrom(widget)
+    painter = QPainter(widget)
+    widget.style().drawPrimitive(QStyle.PE_Widget, opt, painter, widget)
+    painter.end()
 
 
 def _lend_wallpaper(root, transparent: bool) -> None:
@@ -471,6 +490,11 @@ class PclTitleBar(TitleBar):
         self.hBoxLayout.insertWidget(0, brand, 0, Qt.AlignVCenter)
         self.restyle()
 
+    def paintEvent(self, e):
+        # 标了不透明就得自己清底，见 paint_opaque_styled_background
+        paint_opaque_styled_background(self)
+        super().paintEvent(e)
+
     def restyle(self):
         # 跟侧栏共用一个不透明度，两条边框才不会一边实一边透
         mark_opaque(self, Theme.sidebar_opacity >= 100)
@@ -646,6 +670,11 @@ class PclSideBar(QFrame):
         super().resizeEvent(e)
         if getattr(self, "_resizer", None) is not None:
             self._resizer.setGeometry(self.width() - 5, 0, 5, self.height())
+
+    def paintEvent(self, e):
+        # 标了不透明就得自己清底，见 paint_opaque_styled_background
+        paint_opaque_styled_background(self)
+        super().paintEvent(e)
 
     def dragEnterEvent(self, e):
         if e.mimeData().hasFormat("application/x-pymcl-nav"):

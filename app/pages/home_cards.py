@@ -10,12 +10,12 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QFormLayout, QGridLayout, QHBoxLayout, QVBoxLayout, QWidget,
+    QFormLayout, QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
-    BodyLabel, CaptionLabel, CheckBox, ComboBox, FluentIcon as FIF, LineEdit,
-    MessageBoxBase, PlainTextEdit, PushButton,
-    Slider, SpinBox, StrongBodyLabel, SubtitleLabel, TransparentPushButton,
+    BodyLabel, CaptionLabel, CheckBox, ComboBox, CompactSpinBox, FluentIcon as FIF,
+    LineEdit, MessageBoxBase, PlainTextEdit, PushButton,
+    Slider, StrongBodyLabel, SubtitleLabel, TransparentPushButton,
 )
 
 from mclauncher.config import CONFIG
@@ -24,6 +24,18 @@ from mclauncher.i18n import tr
 from ..dashboard import CardSpec
 from ..pcl_chrome import form_label
 from ..widgets import BannerWidget
+
+
+def _shrinkable(widget, floor: int) -> None:
+    """表单字段的最小宽度改成显式下限，不再由内容（长账号名、四位数字）撑开。
+
+    QLayout 算最小尺寸时，控件自己 setMinimumWidth 过的值优先于 minimumSizeHint；
+    横向仍是 Expanding，有地方照样撑满整列，只是卡片被缩窄时跟着让。
+    """
+    widget.setMinimumWidth(floor)
+    pol = widget.sizePolicy()
+    pol.setHorizontalPolicy(QSizePolicy.Expanding)
+    widget.setSizePolicy(pol)
 
 # 快捷入口卡片可选的导航目标：(key, icon)
 QUICK_TARGETS: list[tuple[str, object]] = [
@@ -147,10 +159,11 @@ class ConfigBody(QWidget):
         mem_row.addWidget(page.memory_slider, 1)
         mem_row.addWidget(page.memory_label)
 
-        page.width_spin = SpinBox()
+        # 紧凑型：上下键收进一颗按钮里，330 宽的卡片上两个框并排还能看全四位数
+        page.width_spin = CompactSpinBox()
         page.width_spin.setRange(320, 7680)
         page.width_spin.setValue(int(CONFIG.get("width", 854)))
-        page.height_spin = SpinBox()
+        page.height_spin = CompactSpinBox()
         page.height_spin.setRange(240, 4320)
         page.height_spin.setValue(int(CONFIG.get("height", 480)))
         res_row = QHBoxLayout()
@@ -180,6 +193,16 @@ class ConfigBody(QWidget):
         ms_btn.clicked.connect(page._login)
         cfg.addRow("", ms_btn)
 
+        # 卡片的下限是三端共用的 CARD_MIN_SIZE（330 宽），而这张表单按控件
+        # 自带的最小尺寸算要 468：账号下拉被当前账号名撑到 226，分辨率那行
+        # 两个 SpinBox 各 170。宿主不会压着控件缩，于是表单从卡片右边伸出去
+        # 被裁掉一截（版本框、内存数值、分辨率高度全看不见）。
+        # 这里把「最小宽度由内容撑开」改成显式下限，字段跟着卡片一起变窄，
+        # 330 的默认卡里表单整张放得下。
+        for box in (page.version_box, page.account_box, page.java_box):
+            _shrinkable(box, 120)
+        for spin in (page.width_spin, page.height_spin):
+            _shrinkable(spin, 72)
         root.addWidget(host)
         root.addStretch(1)
 
