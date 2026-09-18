@@ -124,3 +124,7 @@ config.json.bak*
 /_android_audit/
 /_wpf_smoke/
 /smoke_*.txt
+
+# 整包旧备份与一次性提示词（2026-09-19 清理，git 历史可找回）
+/_app_backup_i18n/
+/WINUI3_AGENT_PROMPT.md
