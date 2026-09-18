@@ -1,0 +1,17 @@
+# 提交前的静态卡口。装一次就行：
+#     pip install pre-commit
+#     pre-commit install
+# 想手动跑全量：pre-commit run --all-files
+repos:
+  - repo: local
+    hooks:
+      - id: qt-parent
+        # 这行 name 用 ASCII：pre-commit 按字符数补点对齐，中日韩是双宽字符，
+        # 混进去在 GBK 控制台和 CI 日志里都会截成乱码。
+        name: qt parent check (app/)
+        entry: python scripts/check_qt_parent.py
+        language: system
+        # 扫的是整棵 app/ 而不是改动的那几个文件：对话框类定义在 A 文件、
+        # 构造点在 B 文件，只看 B 会把「A 改了参数顺序」这种漏掉。
+        pass_filenames: false
+        files: ^app/.*\.py$
