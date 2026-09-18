@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 import tempfile
 import time
 import unittest
@@ -19,9 +20,10 @@ from unittest import mock
 from mclauncher.ai import agent as agent_mod
 from mclauncher.ai import compact as compact_mod
 from mclauncher.ai import scheduler
+from mclauncher.ai import store as chat_store
 from mclauncher.ai import trace as trace_mod
 from mclauncher.ai import tools as ai_tools
-from mclauncher.ai.client import is_context_overflow
+from mclauncher.ai.client import AIClientError, is_context_overflow
 from mclauncher.ai.permission import Behavior, Rule
 from mclauncher.ai.result import StopReason
 from mclauncher.ai.state import (
@@ -393,6 +395,163 @@ class InterruptAndSteeringTests(unittest.TestCase):
         self.assertTrue(is_context_overflow("上下文长度超出限制"))
         self.assertFalse(is_context_overflow("接口超时"))
         self.assertFalse(is_context_overflow(""))
+
+
+class PersistAndHandoffTests(unittest.TestCase):
+    """批次 5：持久化、错误重试、后台任务回灌、会话事件。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old_dir = trace_mod.TRACE_DIR
+        self._old_sessions = chat_store.SESSIONS_DIR
+        trace_mod.TRACE_DIR = Path(self._tmp.name) / "trace"
+        chat_store.SESSIONS_DIR = Path(self._tmp.name) / "sessions"
+        self._seen = []
+
+    def tearDown(self):
+        trace_mod.TRACE_DIR = self._old_dir
+        chat_store.SESSIONS_DIR = self._old_sessions
+        self._tmp.cleanup()
+
+    def _fake_stream(self, streams):
+        holder = {"n": 0}
+
+        def fake(settings, messages, tools=None, http_cancel=None, **k):
+            self._seen.append([dict(m) for m in messages])
+            events = streams[holder["n"]]
+            holder["n"] += 1
+            for ev in events:
+                if isinstance(ev, BaseException):
+                    raise ev
+                yield ev
+        return fake
+
+    def _run(self, streams, backend=None, settings=None, run_tool="ok", **kw):
+        with mock.patch.object(agent_mod, "chat_stream",
+                               side_effect=self._fake_stream(streams)), \
+             mock.patch.object(agent_mod, "chat_once",
+                               return_value={"content": "", "tool_calls": [],
+                                             "finish_reason": "stop"}), \
+             mock.patch.object(agent_mod, "run_tool", return_value=run_tool):
+            res = agent_mod.run_agent(backend or SimpleNamespace(),
+                                      settings or {}, [], "干活", **kw)
+        return res, self._seen
+
+    def test_store_roundtrip_keeps_tool_trace(self):
+        """W5-1：工具轨迹入库，重开（load）后 api_messages 仍带 tool 角色。"""
+        old = chat_store.STORE_FILE
+        chat_store.STORE_FILE = Path(self._tmp.name) / "ai_chats.json"
+        try:
+            data = chat_store.load()
+            cid = data["active_id"]
+            msgs = [
+                {"role": "user", "content": "装钠"},
+                {"role": "assistant", "content": None,
+                 "tool_calls": [{"id": "c1", "type": "function",
+                                 "function": {"name": "install_mod",
+                                              "arguments": '{"name": "钠"}'}}]},
+                {"role": "tool", "tool_call_id": "c1", "name": "install_mod",
+                 "content": '{"task_id": "t1", "queued": true}'},
+                {"role": "assistant", "content": "已经在装了"},
+            ]
+            chat_store.upsert_messages(data, cid, msgs)
+            reloaded = chat_store.load()
+            chat = chat_store.get_chat(reloaded, cid)
+            self.assertEqual([m["role"] for m in chat["messages"]],
+                             ["user", "assistant", "tool", "assistant"])
+            api = chat_store.api_messages(chat["messages"])
+            self.assertEqual(api[1]["tool_calls"][0]["function"]["name"], "install_mod")
+            self.assertEqual(api[2]["tool_call_id"], "c1")
+        finally:
+            chat_store.STORE_FILE = old
+
+    def test_max_messages_raised(self):
+        self.assertEqual(chat_store.MAX_MESSAGES, 200)
+
+    def test_trim_history_drops_orphan_tool_head(self):
+        """切片不能从孤立的 tool 消息开始。"""
+        history = [{"role": "user", "content": "旧"},
+                   {"role": "assistant", "content": None, "tool_calls": [{"id": "c"}]},
+                   {"role": "tool", "tool_call_id": "c", "name": "x", "content": "r"},
+                   {"role": "assistant", "content": "完"},
+                   {"role": "user", "content": "新"}]
+        for cut in (2, 3):   # 切到 tool 消息开头时必须再往前丢
+            trimmed = agent_mod._trim_history(history[-cut:])
+            self.assertNotEqual(trimmed[0].get("role"), "tool")
+
+    def test_error_classification(self):
+        """W5-3：429 不再致命、可重试；401 致命。"""
+        e429 = AIClientError("网络繁忙", 429)
+        self.assertFalse(e429.fatal())
+        self.assertTrue(e429.retryable())
+        e401 = AIClientError("令牌无效", 401)
+        self.assertTrue(e401.fatal())
+        self.assertFalse(e401.retryable())
+        e_timeout = AIClientError("connect timed out", 0)
+        self.assertEqual(e_timeout.category, "provider_timeout")
+        self.assertTrue(e_timeout.retryable())
+
+    def test_retry_with_backoff(self):
+        """可重试错误退避重试，恢复后对话继续。"""
+        streams = [
+            [AIClientError("HTTP 429 too many requests", 429)],
+            [AIClientError("connect ECONNRESET", 0)],
+            [{"type": "delta", "text": "恢复了"}, {"type": "done"}],
+        ]
+        sleeps = []
+        with mock.patch.object(agent_mod.time, "sleep", side_effect=sleeps.append):
+            res, _ = self._run(streams)
+        self.assertEqual(len(sleeps), 2, "两次重试各退避一次")
+        self.assertEqual(res.stop_reason, StopReason.NO_TOOL_CALL)
+        self.assertEqual(str(res), "恢复了")
+
+    def test_pending_task_waited_in_turn(self):
+        """W5-2 回合内：后台任务短超时内完成 → 结果回灌，模型来汇报。"""
+        streams = [
+            [{"type": "tool_calls",
+              "tool_calls": [_tc("a", "install_mod", '{"name": "钠"}')]}],
+            [{"type": "delta", "text": "在装了。"}, {"type": "done"}],
+            [{"type": "delta", "text": "钠已经装好了。"}, {"type": "done"}],
+        ]
+
+        backend = SimpleNamespace()
+        backend.wait_task = lambda task_id, timeout=1800, cancelled=None: {
+            "ok": True, "message": "安装完成", "task_id": task_id}
+
+        res, seen = self._run(streams, backend=backend,
+                              run_tool='{"task_id": "t9", "queued": true}')
+        self.assertEqual(res.stop_reason, StopReason.COMPLETED)
+        self.assertEqual(res.pending_tasks, [])
+        report = [m for m in seen[2] if m.get("role") == "user"
+                  and "后台任务回报" in str(m.get("content") or "")]
+        self.assertEqual(len(report), 1)
+        self.assertIn("安装完成", report[0]["content"])
+
+    def test_result_carries_message_trace(self):
+        """W5-1：AgentResult 带本回合轨迹，UI 据此持久化工具痕迹。"""
+        streams = [
+            [{"type": "tool_calls", "tool_calls": [_tc("a", "list_mods")]}],
+            [{"type": "delta", "text": "好了"}, {"type": "done"}],
+        ]
+        res, _ = self._run(streams)
+        roles = [m["role"] for m in res.messages]
+        self.assertIn("tool", roles)
+        self.assertEqual(roles[-1], "assistant")
+        self.assertNotIn("system", roles)
+
+    def test_session_events_logged(self):
+        streams = [
+            [{"type": "tool_calls", "tool_calls": [_tc("a", "list_mods")]}],
+            [{"type": "delta", "text": "好了"}, {"type": "done"}],
+        ]
+        self._run(streams, settings={"ai_session_id": "sessX"})
+        log = (chat_store.SESSIONS_DIR / "sessX.jsonl").read_text(encoding="utf-8")
+        events = [json.loads(line)["event"] for line in log.splitlines() if line.strip()]
+        self.assertIn("TurnStarted", events)
+        self.assertIn("ModelRequest", events)
+        self.assertIn("ToolStarted", events)
+        self.assertIn("ToolCompleted", events)
+        self.assertIn("TurnCompleted", events)
 
 
 if __name__ == "__main__":

@@ -16,16 +16,38 @@ from .defaults import (
 )
 
 
+def _categorize(message: str, status: int) -> str:
+    """错误分类（关键词集照抄 ZCode 的超时/网络/流错误三类）。"""
+    msg = (message or "").lower()
+    if status in (401, 403) or "令牌无效" in msg or "unauthorized" in msg:
+        return "auth"
+    if status == 429 or "rate limit" in msg or "限制" in msg or "额度" in msg:
+        return "rate_limited"
+    if "timed out" in msg or "timeout" in msg or "超时" in msg:
+        return "provider_timeout"
+    if any(key in msg for key in ("econnreset", "epipe", "etimedout", "connection",
+                                  "连不上", "network", "getaddrinfo", "网络")):
+        return "provider_network_error"
+    if "stream" in msg or "stalled" in msg or "sse" in msg:
+        return "provider_stream_error"
+    return "unknown"
+
+
 class AIClientError(Exception):
     def __init__(self, message: str, status: int = 0):
         super().__init__(message)
         self.status = int(status or 0)
+        self.category = _categorize(message, self.status)
 
     def fatal(self) -> bool:
-        if self.status in (401, 403, 429):
+        # 只有认证/权限类才致命；429 是限流，走退避重试而不是终止对话
+        return self.status in (401, 403) or self.category == "auth"
+
+    def retryable(self) -> bool:
+        if self.status in (429, 500, 502, 503, 504):
             return True
-        msg = str(self)
-        return any(key in msg for key in ("限制", "rate limit", "额度", "令牌无效", "unauthorized"))
+        return self.category in ("provider_timeout", "provider_network_error",
+                                 "provider_stream_error", "rate_limited")
 
 
 class HttpCancel:

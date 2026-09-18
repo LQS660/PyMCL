@@ -643,8 +643,14 @@ class AiPage(QWidget):
         self.stop_btn.setEnabled(False)
         self.retry_btn = TransparentPushButton(FIF.SYNC, tr("重试"))
         self.retry_btn.setEnabled(False)
+        self.rewind_btn = TransparentPushButton(getattr(FIF, "RETURN", FIF.SYNC),
+                                                tr("回到上一步"))
+        self.rewind_btn.setEnabled(False)
+        self.rewind_btn.setToolTip(tr("撤回最近一轮对话和它的工具操作痕迹"))
+        self.rewind_btn.clicked.connect(self._rewind)
         head.addWidget(self.stop_btn)
         head.addWidget(self.retry_btn)
+        head.addWidget(self.rewind_btn)
         main.addLayout(head)
 
         chips = QHBoxLayout()
@@ -906,6 +912,27 @@ class AiPage(QWidget):
         self.send_btn.setEnabled(not on)
         self.stop_btn.setEnabled(on)
         self.retry_btn.setEnabled(not on and bool(self._history))
+        self._refresh_rewind()
+
+    def _refresh_rewind(self):
+        self.rewind_btn.setEnabled(
+            not self._worker and any(m.get("role") == "user" for m in self._history))
+
+    def _rewind(self):
+        """W5-5 续跑/rewind：撤回最近一轮对话（含工具痕迹），回到它之前。"""
+        if self._worker:
+            return
+        idx = None
+        for i in range(len(self._history) - 1, -1, -1):
+            if self._history[i].get("role") == "user":
+                idx = i
+                break
+        if idx is None:
+            return
+        self._history = self._history[:idx]
+        self._persist()
+        self._load_active()
+        self._busy(False)
 
     def _send_text(self, text: str):
         text = (text or "").strip()
@@ -939,10 +966,13 @@ class AiPage(QWidget):
         self._task_lines = {}
         self._assistant_bubble = self._add_bubble("assistant", tr("正在想…"))
         settings = self.backend.get_settings()
+        settings["ai_session_id"] = str(self._store.get("active_id") or "active")
         self.backend._ui_launch = self._launch_prefs()
-        # 只截取最近 24 条喂给模型；完整历史留在 self._history 里，不能跟着截
+        # 工具轨迹也在历史里（批次 5），截取上限交给 store.MAX_MESSAGES；
+        # agent 侧 _trim_history 保证不从孤立的 tool 消息开切
         worker = AgentThread(
-            self.backend, settings, chat_store.api_messages(self._history[-24:]), text,
+            self.backend, settings, chat_store.api_messages(
+                self._history[-chat_store.MAX_MESSAGES:]), text,
             self, queue_fn=self._drain_queue)
         self._worker = worker
         worker.delta.connect(self._on_delta, Qt.QueuedConnection)
@@ -1139,6 +1169,11 @@ class AiPage(QWidget):
         user = getattr(self, "_pending_user", None)
         if user:
             self._history.append({"role": "user", "content": user})
+            # 本回合的工具轨迹一并入库（W5-1）：重开程序模型才知道上次做到哪
+            for m in (getattr(result, "messages", None) or []):
+                role = m.get("role") if isinstance(m, dict) else None
+                if role == "tool" or (role == "assistant" and m.get("tool_calls")):
+                    self._history.append(dict(m))
             self._history.append({"role": "assistant" if ok else "error", "content": shown or ""})
             self._persist()
         self._pending_user = None
@@ -1149,6 +1184,14 @@ class AiPage(QWidget):
         self.input.setFocus()
         self._scroll_bottom()
         if result is not None:
+            # 后台任务登记：完成时 _on_task_finished 主动回来汇报（W5-2）
+            if getattr(result, "stop_reason", None) == StopReason.PENDING_TASK:
+                tasks = getattr(self, "_ai_pending_tasks", None)
+                if tasks is None:
+                    tasks = self._ai_pending_tasks = {}
+                for t in (result.pending_tasks or []):
+                    if t.get("task_id"):
+                        tasks[t["task_id"]] = t.get("name") or "任务"
             self._notify_stop(result)
         if self._queue:
             nxt = self._queue.pop(0)
@@ -1190,9 +1233,24 @@ class AiPage(QWidget):
             line.set_progress(current, total, message or "")
 
     def _on_task_finished(self, task_id, success, message):
+        pending_name = None
+        tasks = getattr(self, "_ai_pending_tasks", None) or {}
+        if task_id in tasks:
+            pending_name = tasks.pop(task_id)
         line = self._task_lines.get(task_id)
-        if not line:
+        if line:
+            line.set_text((tr("完成：") if success else tr("失败：")) + (message or ""))
+            if hasattr(line, "bar"):
+                line.bar.setValue(100 if success else line.bar.value())
+        if pending_name is None:
             return
-        line.set_text((tr("完成：") if success else tr("失败：")) + (message or ""))
-        if hasattr(line, "bar"):
-            line.bar.setValue(100 if success else line.bar.value())
+        # W5-2：AI 之前说「完成后我回来汇报」——结果到了主动发起新回合
+        mark = tr("成功") if success else tr("失败")
+        report = f"[后台任务回报] {pending_name} {mark}：{message or ''}"
+        if self._worker:
+            self._queue.append(report)
+            return
+        InfoBar.info(tr("后台任务完成"), tr("助手回来汇报结果"),
+                     parent=self.window() or self,
+                     position=InfoBarPosition.TOP, duration=3000)
+        QTimer.singleShot(50, self, lambda: self._send(report, echo=False))

@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
-"""多对话持久化：重启后还在。"""
+"""多对话持久化：重启后还在。工具调用轨迹与压缩摘要一并保留（批次 5）。"""
 
 from __future__ import annotations
 
+import datetime
+import json
+import threading
 import time
 import uuid
 
@@ -10,7 +13,14 @@ from mclauncher import utils
 
 STORE_FILE = utils.ROOT / "ai_chats.json"
 MAX_CHATS = 40
-MAX_MESSAGES = 24
+# 200 条 + 批次 3 的压缩共同控制真实体积；24 条会丢光工具上下文
+MAX_MESSAGES = 200
+
+_KEEP_FIELDS = ("tool_calls", "tool_call_id", "name", "id")
+
+# 会话事件日志目录；测试可覆盖。None = 默认 utils.ROOT/cache/ai_sessions
+SESSIONS_DIR = None
+_EVENT_LOCK = threading.Lock()
 
 
 def _empty():
@@ -35,6 +45,15 @@ def _blank_chat(cid: str | None = None) -> dict:
     }
 
 
+def _load_message(m: dict) -> dict:
+    """保留工具轨迹字段（tool_calls / tool_call_id / name / id）。"""
+    out = {"role": m.get("role"), "content": m.get("content") or ""}
+    for key in _KEEP_FIELDS:
+        if m.get(key) is not None:
+            out[key] = m[key]
+    return out
+
+
 def load() -> dict:
     data = utils.read_json(STORE_FILE, None)
     if not isinstance(data, dict) or not isinstance(data.get("chats"), list) or not data["chats"]:
@@ -50,9 +69,10 @@ def load() -> dict:
             "title": str(raw.get("title") or "对话")[:40],
             "updated": int(raw.get("updated") or 0),
             "messages": [
-                {"role": m.get("role"), "content": m.get("content") or ""}
+                _load_message(m)
                 for m in (raw.get("messages") or [])
-                if isinstance(m, dict) and m.get("role") in ("user", "assistant", "error")
+                if isinstance(m, dict)
+                and m.get("role") in ("user", "assistant", "error", "tool")
             ][-MAX_MESSAGES:],
         })
     if not chats:
@@ -99,6 +119,7 @@ def set_active(data: dict, cid: str) -> dict | None:
 
 
 def api_messages(messages: list) -> list:
+    """UI 历史 → 请求 messages。保留 assistant.tool_calls 与 tool 轨迹。"""
     out = []
     for m in messages or []:
         if not isinstance(m, dict):
@@ -106,9 +127,23 @@ def api_messages(messages: list) -> list:
         role = m.get("role")
         if role == "error":
             role = "assistant"
-        if role not in ("user", "assistant"):
-            continue
-        out.append({"role": role, "content": m.get("content") or ""})
+        if role == "tool":
+            entry = {"role": "tool", "content": m.get("content") or ""}
+            if m.get("tool_call_id"):
+                entry["tool_call_id"] = m["tool_call_id"]
+            if m.get("name"):
+                entry["name"] = m["name"]
+            out.append(entry)
+        elif role == "assistant":
+            entry = {"role": "assistant", "content": m.get("content") or ""}
+            if m.get("tool_calls"):
+                entry["tool_calls"] = m["tool_calls"]
+            out.append(entry)
+        elif role == "user":
+            out.append({"role": "user", "content": m.get("content") or ""})
+    # 切片可能把 tool 消息切到它前面的 assistant.tool_calls 之前，补丁在这里兜住
+    while out and out[0].get("role") == "tool":
+        out.pop(0)
     return out
 
 
@@ -116,7 +151,8 @@ def upsert_messages(data: dict, cid: str, messages: list, title: str | None = No
     chat = get_chat(data, cid)
     if not chat:
         return
-    chat["messages"] = list(messages or [])[-MAX_MESSAGES:]
+    chat["messages"] = [_load_message(m) if isinstance(m, dict) else m
+                        for m in list(messages or [])][-MAX_MESSAGES:]
     chat["updated"] = int(time.time())
     if title:
         chat["title"] = str(title)[:40]
@@ -139,3 +175,27 @@ def delete_chat(data: dict, cid: str) -> dict:
         data["active_id"] = data["chats"][0]["id"]
     save(data)
     return get_chat(data, data["active_id"])
+
+
+# ---------------------------------------------------------------- 会话事件日志
+
+def log_event(session_id: str, event: str, **fields) -> None:
+    """cache/ai_sessions/<session_id>.jsonl：正常流程骨架，与 trace 分工。
+
+    绝不抛异常——日志坏了不能影响对话。
+    """
+    try:
+        d = SESSIONS_DIR if SESSIONS_DIR is not None \
+            else utils.ROOT / "cache" / "ai_sessions"
+        utils.ensure_dir(d)
+        entry = {
+            "ts": datetime.datetime.now().isoformat(timespec="milliseconds"),
+            "event": str(event or ""),
+        }
+        entry.update(fields)
+        path = d / f"{str(session_id or 'active')}.jsonl"
+        with _EVENT_LOCK:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001
+        pass

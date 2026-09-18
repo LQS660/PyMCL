@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import inspect
 import json
+import random
+import time
 import uuid
 
 from . import compact
 from . import permission
 from . import scheduler
+from . import store as chat_store
 from . import tokens as tokens_mod
 from . import trace
 from .client import AIClientError, chat_once, chat_stream, is_context_overflow
@@ -30,8 +33,15 @@ class AgentCancelled(Exception):
 
 def _trim_history(history: list) -> list:
     if len(history) <= MAX_HISTORY:
-        return list(history)
-    return list(history[-MAX_HISTORY:])
+        trimmed = list(history)
+    else:
+        trimmed = list(history[-MAX_HISTORY:])
+    # 切片不能从孤立的 tool 消息开始（它前面的 assistant.tool_calls 被切掉了）
+    i = 0
+    while i < len(trimmed) and isinstance(trimmed[i], dict) \
+            and trimmed[i].get("role") == "tool":
+        i += 1
+    return trimmed[i:]
 
 
 def _current_instance() -> str:
@@ -182,6 +192,56 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             return text
         return "".join(continuation_parts) + text
 
+    def _await_pending(timeout: float) -> list:
+        """回合内短超时等后台任务；拿到结果的从 pending 里摘掉。"""
+        got = []
+        deadline = time.monotonic() + timeout
+        for task in list(pending):
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            _check()
+            try:
+                res = backend.wait_task(task["task_id"], timeout=left,
+                                        cancelled=cancelled)
+            except Exception as exc:  # noqa: BLE001
+                trace.record("wait_task_error", tool_name=task["name"], exc=exc)
+                continue
+            msg = str(res.get("message") or "")
+            if res.get("ok") is None or msg == "等待任务超时":
+                continue   # 还在跑
+            pending.remove(task)
+            got.append({"name": task["name"], "ok": bool(res.get("ok")), "message": msg})
+        return got
+
+    def _sleep_backoff(attempt: int) -> None:
+        """指数退避 1s / 2s / 4s + 抖动；期间保持可取消。"""
+        base = min(4.0, 2 ** (attempt - 1))
+        _check()
+        time.sleep(base * (0.8 + 0.4 * random.random()))
+        _check()
+
+    def _result(text, reason, **kw):
+        res = AgentResult(text, stop_reason=reason, **kw)
+        try:
+            # 本回合完整轨迹（不含 system 头），供 UI 持久化（W5-1）
+            export = [dict(m) for m in messages
+                      if isinstance(m, dict) and m.get("role") != "system"]
+            # 最终 assistant 正文没有进 messages（只有带 tool_calls 的才进），
+            # 导出时补上，重开程序后模型才知道上一轮说了什么
+            if text and (not export
+                         or export[-1].get("role") != "assistant"
+                         or export[-1].get("tool_calls")):
+                export.append({"role": "assistant", "content": str(text)})
+            res.messages = export
+        except Exception:  # noqa: BLE001
+            res.messages = []
+        return res
+
+    session_id = str((settings or {}).get("ai_session_id") or "active")
+    chat_store.log_event(session_id, "TurnStarted", turn_id=turn.id,
+                         user_len=len(user_text or ""))
+
     try:
         turn.transition(TurnPhase.PROCESSING_INPUT)
         for _round in range(MAX_TOOL_ROUNDS):
@@ -229,8 +289,8 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 except compact.RapidRefillBlocked as exc:
                     _to_phase(turn, TurnPhase.COMPLETING)
                     trace.record("compact_rapid_refill_blocked", round_=round_no[0], exc=exc)
-                    return AgentResult(
-                        final or "", stop_reason=StopReason.ERROR,
+                    return _result(
+                        final or "", StopReason.ERROR,
                         detail="上下文反复逼近窗口上限，已中断本轮以保护额度",
                         pending_tasks=pending, rounds_used=round_no[0])
                 try:
@@ -243,6 +303,10 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                                         "summarized": cres.summarized_message_count})
                     trace.record("autocompact", round_=round_no[0],
                                  pre=cres.pre_token_count, post=cres.post_token_count)
+                    chat_store.log_event(session_id, "CompactBoundary",
+                                         turn_id=turn.id, round=round_no[0],
+                                         trigger="auto", pre=cres.pre_token_count,
+                                         post=cres.post_token_count)
                 except AgentCancelled:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -259,11 +323,12 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                                         "saved": mres.tokens_saved})
 
             reactive_attempted = False
+            retry_no = 0
             tool_calls: list = []
             text_parts: list = []
             truncated = False
             stream_failed = False
-            for _attempt in range(2):
+            for _attempt in range(6):
                 tool_calls = []
                 text_parts = []
                 truncated = False
@@ -271,6 +336,9 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 n_req = len(messages)
                 usage_info = None
                 stream_err = ""
+                chat_store.log_event(session_id, "ModelRequest",
+                                     turn_id=turn.id, round=round_no[0],
+                                     attempt=_attempt, msg_count=n_req)
                 try:
                     for ev in chat_stream(settings, messages, TOOL_SCHEMAS, http_cancel=http_cancel):
                         _check()
@@ -292,6 +360,14 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 except AIClientError as exc:
                     if exc.fatal():
                         raise
+                    if exc.retryable() and not text_parts and not tool_calls \
+                            and retry_no < 3:
+                        # 429/超时/网络抖动：退避重试，而不是终止对话（W5-3）
+                        retry_no += 1
+                        _status("retry", {"attempt": retry_no, "error": str(exc)[:160]})
+                        trace.record("retry", round_=round_no[0], attempt=retry_no, exc=exc)
+                        _sleep_backoff(retry_no)
+                        continue
                     stream_failed = True
                     stream_err = str(exc)
                     trace.record("stream_error", round_=round_no[0], exc=exc, stream_failed=True)
@@ -306,6 +382,9 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 if is_context_overflow(stream_err) and not reactive_attempted:
                     reactive_attempted = True
                     if _force_compact(round_no[0]):
+                        chat_store.log_event(session_id, "CompactBoundary",
+                                             turn_id=turn.id, round=round_no[0],
+                                             trigger="reactive")
                         continue
 
                 if not tool_calls and (stream_failed or not "".join(text_parts)):
@@ -362,30 +441,42 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                         turn.transition(TurnPhase.AWAITING_MODEL)
                         continue
                     _to_phase(turn, TurnPhase.COMPLETING)
-                    return AgentResult(
+                    return _result(
                         _full(content) + "\n\n（回复被长度限制截断了，需要的话让我继续。）",
-                        stop_reason=StopReason.TRUNCATED, rounds_used=rounds_used)
+                        StopReason.TRUNCATED, rounds_used=rounds_used)
                 if stream_failed and not content:
                     _to_phase(turn, TurnPhase.COMPLETING)
-                    return AgentResult("", stop_reason=StopReason.STREAM_FAILED,
-                                       detail="流式与非流式兜底都没有返回内容",
-                                       rounds_used=rounds_used)
+                    return _result("", StopReason.STREAM_FAILED,
+                                   detail="流式与非流式兜底都没有返回内容",
+                                   rounds_used=rounds_used)
                 if pending:
+                    # 回合内短超时等一等（W5-2）：拿到结果就回灌，模型来汇报
+                    waited = _await_pending(20)
+                    if waited:
+                        for w in waited:
+                            mark = "成功" if w["ok"] else "失败"
+                            messages.append({"role": "user", "content":
+                                             f"[后台任务回报] {w['name']} {mark}：{w['message']}"})
+                        acted = True
+                        turn.transition(TurnPhase.SCHEDULING_TOOLS)
+                        turn.transition(TurnPhase.EXECUTING_TOOLS)
+                        turn.transition(TurnPhase.AWAITING_MODEL)
+                        continue
                     _to_phase(turn, TurnPhase.COMPLETING)
-                    return AgentResult(_full(content), stop_reason=StopReason.PENDING_TASK,
-                                       pending_tasks=pending, rounds_used=rounds_used)
+                    return _result(_full(content), StopReason.PENDING_TASK,
+                                   pending_tasks=pending, rounds_used=rounds_used)
                 if not content and not continuation_parts:
                     _to_phase(turn, TurnPhase.COMPLETING)
-                    return AgentResult("", stop_reason=StopReason.EMPTY_RESPONSE,
-                                       detail="上游返回了空内容", rounds_used=rounds_used)
+                    return _result("", StopReason.EMPTY_RESPONSE,
+                                   detail="上游返回了空内容", rounds_used=rounds_used)
                 if acted or continuation_parts:
                     _to_phase(turn, TurnPhase.COMPLETING)
-                    return AgentResult(_full(content), stop_reason=StopReason.COMPLETED,
-                                       rounds_used=rounds_used)
-                _to_phase(turn, TurnPhase.COMPLETING)
-                return AgentResult(_full(content), stop_reason=StopReason.NO_TOOL_CALL,
-                                   detail="模型只回了文字，没有调用任何工具",
+                    return _result(_full(content), StopReason.COMPLETED,
                                    rounds_used=rounds_used)
+                _to_phase(turn, TurnPhase.COMPLETING)
+                return _result(_full(content), StopReason.NO_TOOL_CALL,
+                               detail="模型只回了文字，没有调用任何工具",
+                               rounds_used=rounds_used)
 
             # ---- 工具阶段 ----
             turn.transition(TurnPhase.SCHEDULING_TOOLS)
@@ -475,6 +566,9 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 try:
                     _check()
                     turn.set_tool_status(obj.id, ToolCallStatus.RUNNING)
+                    chat_store.log_event(session_id, "ToolStarted",
+                                         turn_id=turn.id, round=round_no[0],
+                                         tool=obj.name, tool_call_id=obj.id)
                     meta = TOOL_META.get(obj.name)
                     label = confirm_label(obj.name, obj.args)
                     _status("tool_run", {"name": obj.name, "label": label})
@@ -495,12 +589,19 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                                           "result": str(result)[:400]})
                     turn.set_tool_status(obj.id, ToolCallStatus.COMPLETED,
                                          result=str(result))
+                    chat_store.log_event(session_id, "ToolCompleted",
+                                         turn_id=turn.id, round=round_no[0],
+                                         tool=obj.name, tool_call_id=obj.id,
+                                         result_len=len(str(result)))
                     return str(result)
                 except ToolCancelled:
                     turn.set_tool_status(obj.id, ToolCallStatus.FAILED, error="已停止")
                     raise
                 except Exception as exc:  # noqa: BLE001
                     turn.set_tool_status(obj.id, ToolCallStatus.FAILED, error=str(exc))
+                    chat_store.log_event(session_id, "ToolFailed",
+                                         turn_id=turn.id, round=round_no[0],
+                                         tool=obj.name, error=str(exc)[:200])
                     return f"工具失败: {exc}"
 
             runnable = [obj for obj in tool_objs if decisions[obj.id][0] == "allow"]
@@ -519,23 +620,32 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             cstate.tool_turns_since_compact += 1
     except AgentCancelled:
         _to_phase(turn, TurnPhase.COMPLETING)
+        chat_store.log_event(session_id, "TurnFailed", turn_id=turn.id,
+                             rounds=turn.rounds_used, reason="cancelled")
         raise
     except ToolCancelled as exc:
         # 工具中途被打断：对 UI 而言就是用户点了停止
         _to_phase(turn, TurnPhase.COMPLETING)
+        chat_store.log_event(session_id, "TurnFailed", turn_id=turn.id,
+                             rounds=turn.rounds_used, reason="cancelled")
         raise AgentCancelled() from exc
     except AIClientError:
         _to_phase(turn, TurnPhase.ERROR)
+        chat_store.log_event(session_id, "TurnFailed", turn_id=turn.id,
+                             rounds=turn.rounds_used, reason="error")
         raise
     finally:
         trace.record("turn_end", round_=turn.rounds_used, phase=turn.phase.value,
                      text_len=len(final))
+        if turn.phase == TurnPhase.COMPLETING:
+            chat_store.log_event(session_id, "TurnCompleted", turn_id=turn.id,
+                                 rounds=turn.rounds_used)
 
     trace.record("max_rounds", round_=MAX_TOOL_ROUNDS, text_len=len(final))
     _to_phase(turn, TurnPhase.COMPLETING)
-    return AgentResult(
+    return _result(
         _full(final) or "步骤有点多，先停在这里。你再说一下接下来要哪一步。",
-        stop_reason=StopReason.MAX_ROUNDS,
+        StopReason.MAX_ROUNDS,
         detail=f"已用 {turn.rounds_used}/{MAX_TOOL_ROUNDS} 回合",
         pending_tasks=pending,
         rounds_used=turn.rounds_used,
