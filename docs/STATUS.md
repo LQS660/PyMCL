@@ -1,3 +1,5 @@
+> 2026-09-17 接手续验：Android JVM 653 测试通过，但标准 Gradle 仍阻塞于 AAPT2；WPF 构建通过，严格静默冒烟覆盖达标但有在线目录加载超时。详见 `docs/audit/continuation-2026-09-17.md`。下面历史快照不能替代本次证据。
+
 # PyMCL 构建状态与审计归档
 
 > 快照时间：2026-09-10 · 分支 `claude` · 基线 `4146a5a`
@@ -8,7 +10,7 @@
 
 | 检查 | 命令 | 结果 |
 |---|---|---|
-| Python 测试 | `python -m pytest tests/ -q` | 65 passed + 10 subtests，0 失败 |
+| Python 测试 | `python -m pytest tests/ -q` | 433 passed + 90 subtests，1 skipped（慢门禁，`PYMCL_SLOW_CHECKS=1` 才跑），2 失败（`test_root_checks[_bg_visual.py]` 与 `test_wpf_i18n`，均为工作区他人未提交 WIP 自带的探针/文案，与 AI 改造无关；排除后 AI 相关用例 0 失败）（2026-09-18 AI 改造六批次后复跑，分支 `fix-8items`；慢门禁全量 434 passed） |
 | 自检脚本 | `python selftest.py` | 全 OK（Mojang 清单 912 个版本，Modrinth API 可用） |
 | eziapp 类型检查 | `cd eziapp && npx tsc --noEmit` | exit 0，零错误 |
 | WPF | `cd wpf && dotnet build PyMCL.Wpf.sln` | 0 错误 0 警告 |
