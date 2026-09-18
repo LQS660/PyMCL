@@ -178,7 +178,9 @@ PyMCL/                      ← 启动器主目录（可用环境变量 PYMCL_HO
 
 ## 🔐 微软登录说明
 
-采用设备代码流（Device Code Flow）：点击“微软登录”后按提示打开 `microsoft.com/link` 输入代码即可，无需输入密码。默认使用公开的 Xbox 客户端 ID（`00000000402b5328`），如失效可在“设置”中替换为自己的 Azure 应用 ID。
+采用设备代码流（Device Code Flow）：点击“微软登录”后按提示打开 `microsoft.com/link` 输入代码即可，无需输入密码。默认使用公开的 Xbox 客户端 ID（`00000000402b5328`）走 `login.live.com` 老端点。
+
+想换成自己的 Azure 应用 ID 的话，只改“设置”里那一项是不够的——Azure 注册的 GUID 只在 `login.microsoftonline.com` 的 AAD v2 端点上有效，还得同时把 `mclauncher/auth.py` 里的 `MS_DEVICE_CODE_URL`、`MS_TOKEN_URL`、`MS_SCOPE` 换回 AAD 那一套，并且该应用要先获得 Mojang 批准才能访问 Minecraft 接口。
 
 ## ⚠️ 常见问题
 
