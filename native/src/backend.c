@@ -500,6 +500,17 @@ cJSON *backend_call(const char *method, cJSON *params) {
         cJSON_AddStringToObject(o, "ms_client_id", config_str("microsoft_client_id", ""));
         cJSON_AddStringToObject(o, "curseforge_api_key", config_str("curseforge_api_key", ""));
         cJSON_AddStringToObject(o, "root", g_root);
+        cJSON_AddStringToObject(o, "default_instance", config_str("default_instance", "default"));
+        /* 界面偏好（ui_*：侧栏排法、布局方案、深浅色…）原样带出去。
+           这些键 Qt 版一直在写，前端拿不到就只能画一套写死的侧栏。 */
+        {
+            cJSON *cfg = config_obj();
+            cJSON *it;
+            cJSON_ArrayForEach(it, cfg) {
+                if (it->string && strncmp(it->string, "ui_", 3) == 0 && !cJSON_GetObjectItem(o, it->string))
+                    cJSON_AddItemToObject(o, it->string, cJSON_Duplicate(it, 1));
+            }
+        }
         return o;
     }
     if (strcmp(method, "save_settings") == 0 || strcmp(method, "update_settings") == 0) {
@@ -507,8 +518,12 @@ cJSON *backend_call(const char *method, cJSON *params) {
         cJSON *inner = cJSON_GetObjectItem(d, "data");
         if (!cJSON_IsObject(inner)) inner = cJSON_GetObjectItem(d, "settings");
         if (cJSON_IsObject(inner)) d = inner;
-        config_set_bool("shared_libraries", cJSON_IsTrue(cJSON_GetObjectItem(d, "share_libraries")));
-        config_set_bool("shared_assets", cJSON_IsTrue(cJSON_GetObjectItem(d, "share_assets")));
+        /* 局部更新：只写提交里真带来的键。侧栏拖一下只发 ui_nav_*，不能顺手把
+           共享库 / 共享资源两个开关刷成 false。 */
+        if (cJSON_IsBool(cJSON_GetObjectItem(d, "share_libraries")))
+            config_set_bool("shared_libraries", cJSON_IsTrue(cJSON_GetObjectItem(d, "share_libraries")));
+        if (cJSON_IsBool(cJSON_GetObjectItem(d, "share_assets")))
+            config_set_bool("shared_assets", cJSON_IsTrue(cJSON_GetObjectItem(d, "share_assets")));
         if (cJSON_IsNumber(cJSON_GetObjectItem(d, "download_threads")))
             config_set_int("download_threads", (int)cJSON_GetObjectItem(d, "download_threads")->valuedouble);
         if (cJSON_IsNumber(cJSON_GetObjectItem(d, "default_memory_mb")))
@@ -522,8 +537,51 @@ cJSON *backend_call(const char *method, cJSON *params) {
             config_set_str("microsoft_client_id", cJSON_GetObjectItem(d, "ms_client_id")->valuestring);
         if (cJSON_IsString(cJSON_GetObjectItem(d, "curseforge_api_key")))
             config_set_str("curseforge_api_key", cJSON_GetObjectItem(d, "curseforge_api_key")->valuestring);
+        {
+            const char *inst = cJSON_GetStringValue(cJSON_GetObjectItem(d, "default_instance"));
+            if (inst && inst[0]) config_set_str("default_instance", inst);
+        }
+        /* ui_* 整键原样落盘：前端提交什么就存什么，读回去时各端自己做合法性过滤
+           （Qt nav_items_from_config / WPF NavModel / 网页版 nav_model.ts 都会滤）。
+           null 表示清掉（恢复默认侧栏就是把 ui_nav_groups / ui_section_members 置 null）。 */
+        {
+            cJSON *cfg = config_obj();
+            cJSON *it;
+            cJSON_ArrayForEach(it, d) {
+                if (!it->string || strncmp(it->string, "ui_", 3) != 0 || !cfg) continue;
+                cJSON_DeleteItemFromObject(cfg, it->string);
+                cJSON_AddItemToObject(cfg, it->string, cJSON_Duplicate(it, 1));
+            }
+        }
         config_save();
         return cJSON_CreateTrue();
+    }
+    if (strcmp(method, "shutdown") == 0) {
+        /* 关窗前收拢后台任务（对齐 bridge/api.py shutdown）：取消下载类任务、等一小会，
+           启动游戏那个不动——「关掉启动器但游戏继续跑」是既定行为。 */
+        int budget = pint(params, "timeout_ms", 800);
+        pthread_mutex_lock(&g_mu);
+        for (int i = 0; i < g_ntasks; i++)
+            if (g_tasks[i] && strcmp(g_tasks[i]->id, g_launch_id) != 0) g_tasks[i]->cancelled = 1;
+        pthread_mutex_unlock(&g_mu);
+        for (int waited = 0; waited < budget; waited += 20) {
+            int busy = 0;
+            pthread_mutex_lock(&g_mu);
+            for (int i = 0; i < g_ntasks; i++)
+                if (g_tasks[i] && strcmp(g_tasks[i]->id, g_launch_id) != 0) busy++;
+            pthread_mutex_unlock(&g_mu);
+            if (!busy) break;
+            Sleep(20);
+        }
+        cJSON *o = cJSON_CreateObject();
+        cJSON *pending = cJSON_CreateArray();
+        pthread_mutex_lock(&g_mu);
+        for (int i = 0; i < g_ntasks; i++)
+            if (g_tasks[i] && strcmp(g_tasks[i]->id, g_launch_id) != 0)
+                cJSON_AddItemToArray(pending, cJSON_CreateString(g_tasks[i]->id));
+        pthread_mutex_unlock(&g_mu);
+        cJSON_AddItemToObject(o, "pending", pending);
+        return o;
     }
     if (strcmp(method, "get_instances") == 0) return rpc_get_instances();
     if (strcmp(method, "create_instance") == 0) {
@@ -748,6 +806,13 @@ cJSON *backend_call(const char *method, cJSON *params) {
         return start_task("启动游戏", method, params);
     if (strcmp(method, "start_microsoft_login") == 0)
         return start_task("微软登录", method, params);
+
+    /* 启动页布局：原生实现，别为每一次拖拽起一个 python 进程 */
+    {
+        int handled = 0;
+        cJSON *lay = rpc_layout_call(method, params, &handled);
+        if (handled) return lay;
+    }
 
     /* Align remaining RPC with Python bridge/api.py (native first, then py_rpc). */
     {

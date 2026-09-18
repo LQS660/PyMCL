@@ -311,6 +311,27 @@ def _write_ready_file(path: Path, *, host: str, port: int, token: str):
             pass
 
 
+def _init_language(lang: str | None):
+    """把桥切到用户选的语言。
+
+    不做这一步，桥就永远停在 zh_CN：三个前端切到英文之后界面自己的词翻了，
+    桥吐回去的数据还是中文。优先级照 WPF `Services/I18n.Init` 那一套——
+    命令行 `--lang` → `PYMCL_LANG` → config.json 里的 `language`，这样前端用哪种方式
+    指定语言，桥都跟得上；`--lang` 只影响本进程，不会把用户存的语言覆盖掉。
+    """
+    from mclauncher import i18n  # noqa: WPS433
+
+    override = (lang or os.environ.get("PYMCL_LANG") or "").strip().replace("-", "_")
+    if not override:
+        i18n.init_language()
+        return
+    if override not in i18n.available_languages():
+        override = i18n.current_language()
+    # 走 set_language() 会把这个值回写进 config.json；显式指定的这一次只切本进程，
+    # 不动用户存的语言——前端用 --lang 试一把英文，不该把人家的设置改掉。
+    i18n._current_lang = override
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="PyMCL loopback JSON-RPC bridge")
     parser.add_argument("--root", required=True, help="启动器根目录，与 Qt 版共用 .minecraft/java/config.json")
@@ -319,6 +340,7 @@ def main(argv=None):
     parser.add_argument("--token", help="当前启动唯一的 Bridge 令牌；优先于 PYMCL_BRIDGE_TOKEN")
     parser.add_argument("--allowed-origin", action="append", default=[], help="允许访问 Bridge 的本机 UI Origin，可重复")
     parser.add_argument("--ready-file", type=Path, help="原子写入 {rpc_url, token} 的就绪文件")
+    parser.add_argument("--lang", help="只切本进程的界面语言；不填则看 PYMCL_LANG，再不填读 config.json")
     args = parser.parse_args(argv)
 
     try:
@@ -331,6 +353,7 @@ def main(argv=None):
     root = _prepare_root(Path(args.root))
     from mclauncher.guard import install as install_guard
     install_guard(root / "pymcl-error.log")
+    _init_language(args.lang)
     from bridge.api import BackendAPI, EventBus  # noqa: WPS433
 
     token = args.token or os.environ.get("PYMCL_BRIDGE_TOKEN") or secrets.token_urlsafe(32)

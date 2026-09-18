@@ -23,6 +23,8 @@ from mclauncher import manifest as manifest_mod
 from mclauncher import modpack as modpack_mod
 from mclauncher import mods as mods_mod
 from mclauncher.crash import GameCrashError, analyze_launch, export_report, open_path
+from mclauncher.i18n import tr
+from mclauncher.ai.result import StopReason
 from mclauncher.launcher import LaunchError, build_launch_command, GameProcess
 from mclauncher import terracotta as terracotta_mod
 
@@ -133,10 +135,11 @@ class BackendWorker(threading.Thread):
         _tls.worker = self
         try:
             result = self._target(self._progress, self._log, *self._args, **self._kwargs)
-            msg = result if isinstance(result, str) and result else "任务完成"
+            msg = result if isinstance(result, str) and result else tr("任务完成")
             self._emit("finished", {"task_id": self.task_id, "success": True, "message": msg})
         except TaskCancelled:
-            self._emit("finished", {"task_id": self.task_id, "success": False, "message": "已取消"})
+            # 协议值：WPF / WinUI 按 `ev.Message != "已取消"` 原文比对，翻了就把取消当失败弹
+            self._emit("finished", {"task_id": self.task_id, "success": False, "message": "已取消"})  # i18n:ignore
         except GameCrashError as exc:
             self._log(f"[错误] {exc}")
             payload = dict(exc.report or {})
@@ -150,6 +153,38 @@ class BackendWorker(threading.Thread):
             self._emit("finished", {"task_id": self.task_id, "success": False, "message": str(exc)})
         finally:
             _tls.worker = None
+
+
+_PERM_MODES = {
+    "default", "plan", "edit", "acceptEdits", "auto", "dontAsk", "autoEdit",
+    "yolo", "bypassPermissions", "build", "custom",
+    "standard", "full",
+}  # 与 app/backend.py 的 _PERM_MODES 保持同一份；旧值放行，交给 normalize 兜底
+
+
+def _stop_note(result) -> str:
+    """把「为什么停」拼成一句可以入库的提示，别再让回合静默结束。
+
+    文案逐条照抄 app/pages/ai_page.py 的 _stop_note——两端共用一份聊天记录，
+    同一个 stop_reason 在两边必须长一个样。
+    """
+    reason = getattr(result, "stop_reason", None)
+    if reason is None or reason == StopReason.COMPLETED:
+        return ""
+    detail = (getattr(result, "detail", "") or "").strip()
+    notes = {
+        StopReason.NO_TOOL_CALL: tr("它没有真的开始执行：模型只回了文字，没有调用任何工具。"),
+        StopReason.MAX_ROUNDS: tr("步骤太多，先停在这里。你可以让我继续。"),
+        StopReason.PENDING_TASK: tr("下载/安装还在后台跑，可以在「下载任务」里看进度。"),
+        StopReason.STREAM_FAILED: tr("接口这轮没有返回内容，已停止。"),
+        StopReason.EMPTY_RESPONSE: tr("接口返回了空回复。"),
+    }
+    note = notes.get(reason)
+    if not note:
+        return ""
+    if detail and detail not in note:
+        note += tr("（") + detail + tr("）")
+    return tr("（提示：") + note + tr("）")
 
 
 class BackendAPI:
@@ -248,6 +283,32 @@ class BackendAPI:
     def task_title(self, task_id: str) -> str:
         return self._titles.get(task_id, task_id)
 
+    def shutdown(self, timeout_ms: int = 800) -> dict:
+        """关窗前收拢后台任务（对齐 app.backend.BackendAPI.shutdown）。
+
+        前端退出时直接杀桥进程，正在跑的下载会在半截被砍、临时文件留在磁盘上；
+        先调这一下，让任务走 TaskCancelled 的正常收尾。预算只给 800ms——关窗是
+        用户动作，等不到就放手。启动游戏那个 worker 不动：它阻塞在 proc.wait()
+        上，「关掉启动器但游戏继续跑」是既定行为。返回还没收完的任务 id，
+        前端可以据此决定是再等一下还是直接杀。
+        """
+        import time as _time
+        deadline = _time.monotonic() + max(0, int(timeout_ms)) / 1000.0
+        with self._lock:
+            pending = [(tid, w) for tid, w in self._workers.items() if tid != self._launch_task_id]
+        for _tid, worker in pending:
+            worker.cancel()
+        for _tid, worker in pending:
+            remain = deadline - _time.monotonic()
+            if remain <= 0:
+                break
+            worker.join(remain)
+        try:
+            terracotta_mod.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        return {"pending": [tid for tid, w in pending if w.is_alive()]}
+
     def get_crash(self, task_id: str = "") -> dict:
         if task_id and task_id in self._crashes:
             return self._crashes[task_id]
@@ -258,15 +319,15 @@ class BackendAPI:
     def export_crash_report(self, task_id: str = "", dest: str = "") -> str:
         report = self.get_crash(task_id)
         if not report:
-            raise LaunchError("没有可导出的错误报告")
+            raise LaunchError(tr("没有可导出的错误报告"))
         return export_report(report, dest or None)
 
     def open_crash_file(self, path: str = "", task_id: str = "") -> str:
         target = path or (self.get_crash(task_id).get("direct_file") or "")
         if not target:
-            raise LaunchError("没有可打开的日志文件")
+            raise LaunchError(tr("没有可打开的日志文件"))
         if not open_path(target):
-            raise LaunchError(f"无法打开: {target}")
+            raise LaunchError(tr("无法打开: {0}").format(target))
         return target
 
     def _dm(self, progress, log) -> DownloadManager:
@@ -343,18 +404,18 @@ class BackendAPI:
         src = "curseforge" if source.lower().startswith("curse") else "modrinth"
         return {"name": name, "source": src, "slug": name}
 
-    def install_game(self, version: str, loader: str = "无", loader_version: str = "",
+    def install_game(self, version: str, loader: str = "无", loader_version: str = "",  # i18n:ignore 协议值：前端传「无」表示不装加载器
                      instance: str = "", extra: dict | None = None) -> str:
         inst = instance or CONFIG.get("default_instance", "default")
         extra = extra or {}
         bits = [version]
-        if loader and loader not in ("", "无"):
+        if loader and loader not in ("", "无"):  # i18n:ignore 协议值
             bits.append(loader)
         if extra.get("optifine"):
             bits.append("OptiFine")
         if extra.get("liteloader"):
             bits.append("LiteLoader")
-        title = "安装游戏 " + " + ".join(bits)
+        title = "安装游戏 " + " + ".join(bits)  # i18n:ignore 任务标题按原文拼，见 is_download_title
         return self.start_task(title, self._install_game_impl, version, loader, loader_version, inst, extra)
 
     def install_modpack(self, name: str, source: str = "Modrinth", extra: dict | None = None) -> str:
@@ -429,7 +490,7 @@ class BackendAPI:
             on_progress=lambda text, cur, total: progress(cur, total, text))
         log(f"备份完成: {info['path']}")
         self._emit("ui_changed", {})
-        return f"已备份到 {info['name']}"
+        return tr("已备份到 {0}").format(info['name'])
 
     def list_save_backups(self, instance: str, name: str = "", version: str = "") -> list[dict]:
         from mclauncher import saves as saves_mod
@@ -485,7 +546,7 @@ class BackendAPI:
             probe.write_text("ok", encoding="utf-8")
             probe.unlink()
         except OSError as exc:
-            raise InstanceError(f"游戏目录不可写: {target}\n{exc}") from exc
+            raise InstanceError(tr("游戏目录不可写: {0}").format(target) + f"\n{exc}") from exc
         CONFIG.set("instances_dir", str(p) if p.is_absolute() else path)
         CONFIG.save()
         self._emit("ui_changed", {})
@@ -497,7 +558,7 @@ class BackendAPI:
         meta = inst.meta() or {}
         pack = meta.get("modpack")
         if not isinstance(pack, dict) or not pack.get("name"):
-            raise InstanceError("该实例没有已安装整合包")
+            raise InstanceError(tr("该实例没有已安装整合包"))
         if purge_instance:
             inst.delete()
         else:
@@ -579,14 +640,14 @@ class BackendAPI:
         info = self.terracotta_snapshot()
         url = str(info.get("url") or "")
         if info.get("state") != "guest-ok" or not url:
-            raise terracotta_mod.TerracottaError("还没连上房间。请先输入邀请码加入。")
-        return self._launch_into_server(url, "请到游戏「多人游戏」双击「陶瓦联机大厅」。")
+            raise terracotta_mod.TerracottaError(tr("还没连上房间。请先输入邀请码加入。"))
+        return self._launch_into_server(url, tr("请到游戏「多人游戏」双击「陶瓦联机大厅」。"))
 
     def terracotta_direct_connect(self, address: str):
         host, port = terracotta_mod.split_join_url(address)
         if not host or host in ("127.0.0.1", "localhost"):
-            raise terracotta_mod.TerracottaError("请输入房主的公网地址，例如 1.2.3.4:25565")
-        return self._launch_into_server(f"{host}:{port}", "请到游戏「多人游戏」双击「陶瓦联机大厅」。")
+            raise terracotta_mod.TerracottaError(tr("请输入房主的公网地址，例如 1.2.3.4:25565"))
+        return self._launch_into_server(f"{host}:{port}", tr("请到游戏「多人游戏」双击「陶瓦联机大厅」。"))
 
     def _launch_into_server(self, url: str, already_msg: str):
         inst = self._instance()
@@ -596,15 +657,15 @@ class BackendAPI:
             return already_msg
         ids = inst.installed_ids()
         if not ids:
-            raise LaunchError("请先到「启动」页安装一个版本。")
+            raise LaunchError(tr("请先到「启动」页安装一个版本。"))
         version = max(ids, key=lambda vid: (inst.versions_dir() / vid).stat().st_mtime)
         host, port = terracotta_mod.split_join_url(url)
         acc = self.accounts.get_active()
         if acc and acc.get("type") == "microsoft":
-            account = acc.get("name") or "离线模式"
+            account = acc.get("name") or tr("离线模式")
             username = acc.get("name") or "Player"
         else:
-            account = "离线模式"
+            account = tr("离线模式")
             username = (acc or {}).get("name") or self.terracotta_player()
         return self.launch_game(
             instance=inst.name,
@@ -617,31 +678,38 @@ class BackendAPI:
             extra_game_args=["--server", host, "--port", str(port)],
         )
 
+    @staticmethod
+    def _is_offline_account(account) -> bool:
+        """「离线模式」这个哨兵原文和译文都认：eziapp / WinUI 传原文，WPF 传的是 L() 过的译文。"""
+        text = str(account or "")
+        return not text or text == "离线模式" or text == tr("离线模式")  # i18n:ignore 协议值，原文比对
+
     def launch_game(self, instance: str, version: str, account: str,
                     username: str, memory_mb: int, width: int, height: int,
-                    java: str = "自动选择", extra_game_args=None) -> str:
+                    java: str = JAVA_AUTO, extra_game_args=None,
+                    force: bool = False) -> str:
         task_id = self.start_task(
             f"启动游戏 {version}", self._launch_game_impl,
             instance, version, account, username, memory_mb, width, height, java,
-            extra_game_args,
+            extra_game_args, force,
         )
         self._launch_task_id = task_id
         return task_id
 
     def build_launch_command(self, instance: str, version: str, account: str,
                               username: str, memory_mb: int, width: int, height: int,
-                              java: str = "自动选择") -> str:
+                              java: str = JAVA_AUTO) -> str:
         """生成启动命令文本（不实际启动）。"""
         inst = self._instance(instance)
         if not version:
-            raise LaunchError("请先选择版本")
-        if account == "离线模式" or not account:
+            raise LaunchError(tr("请先选择版本"))
+        if self._is_offline_account(account):
             acc = self.accounts.offline_account(
                 username or "Player", skin=CONFIG.get("offline_skin") or "default")
         else:
             acc = self.accounts.get_account(account)
             if not acc:
-                raise LaunchError(f"账号不存在: {account}")
+                raise LaunchError(tr("账号不存在: {0}").format(account))
             acc = self.accounts.ensure_valid(acc)
         props = self.accounts.launch_props(acc)
         from mclauncher import launcher
@@ -650,7 +718,7 @@ class BackendAPI:
         if auth_server and not props.get("authlib_api"):
             props = dict(props)
             props["authlib_api"] = auth_server
-        java_exe = "自动选择" if java in ("自动选择", "") else java
+        java_exe = JAVA_AUTO if java in (JAVA_AUTO, "") else java
         cmd, _natives, _vdir, _gdir = launcher.build_launch_command(
             inst, version, props, java_exe, memory_mb=memory_mb,
             width=width, height=height, authlib_api=props.get("authlib_api"))
@@ -753,13 +821,14 @@ class BackendAPI:
                 return {"ok": ok, "message": msg, "task_id": task_id}
             if cancelled and cancelled():
                 self.cancel_task(task_id)
-                return {"ok": False, "message": "已停止", "task_id": task_id}
+                return {"ok": False, "message": tr("已停止"), "task_id": task_id}
             if time.time() - start > timeout:
-                return {"ok": False, "message": "等待任务超时", "task_id": task_id}
+                return {"ok": False, "message": tr("等待任务超时"), "task_id": task_id}
             time.sleep(0.3)
 
     def get_settings(self) -> dict:
         from mclauncher.ai.defaults import DEFAULT_GATEWAY_URL, DEFAULT_MODEL
+        from mclauncher.ai.permission import normalize_permission_mode
         from mclauncher.feedback_defaults import DEFAULT_FEEDBACK_URL
         return {
             "share_libraries": bool(CONFIG.get("shared_libraries", False)),
@@ -774,9 +843,17 @@ class BackendAPI:
             "ai_base_url": CONFIG.get("ai_base_url") or "",
             "ai_api_key": CONFIG.get("ai_api_key") or "",
             "ai_model": CONFIG.get("ai_model") or DEFAULT_MODEL,
-            # AI 权限：run_agent 的确认分流读这两个键，桥接端也要带出去
+            # AI 权限：词表与 app/backend.py 同一套（W-5）。get_settings 必须归一化——
+            # 前端词表不一的历史遗留值（trusted / strict / readonly）在这里统一折回
+            # 合法枚举，后端 normalize_permission_mode 认不出时按 confirm_writes 兜底。
             "ai_confirm_writes": bool(CONFIG.get("ai_confirm_writes", True)),
-            "ai_permission_mode": CONFIG.get("ai_permission_mode") or "standard",
+            "ai_permission_mode": normalize_permission_mode(
+                CONFIG.get("ai_permission_mode"),
+                bool(CONFIG.get("ai_confirm_writes", True))),
+            "ai_permission_rules": list(CONFIG.get("ai_permission_rules") or []),
+            "ai_permission_dont_ask": bool(CONFIG.get("ai_permission_dont_ask", False)),
+            "ai_context_window": int(CONFIG.get("ai_context_window") or 200000),
+            "ai_max_tokens": int(CONFIG.get("ai_max_tokens") or 8192),
             "root": str(utils.ROOT),
             "feedback_url": CONFIG.get("feedback_url") or DEFAULT_FEEDBACK_URL or "",
             "feedback_heartbeat": bool(CONFIG.get("feedback_heartbeat", True)),
@@ -797,6 +874,7 @@ class BackendAPI:
             "game_dir": str(CONFIG.instances_dir),
             "offline_skin": CONFIG.get("offline_skin") or "default",
             "default_java": CONFIG.get("default_java") or "",
+            "default_instance": CONFIG.get("default_instance") or "default",
             "ui_dark": bool(CONFIG.get("ui_dark", False)),
             # 侧栏编排：Qt 版一直在写这几个键，之前没暴露给桥，非 Qt 前端只能
             # 画一套写死的侧栏，用户在 Qt 里排好的顺序被静默忽略。
@@ -853,6 +931,26 @@ class BackendAPI:
             patch["ai_api_key"] = data.get("ai_api_key") or ""
         if "ai_model" in data:
             patch["ai_model"] = (data.get("ai_model") or CONFIG.get("ai_model") or "deepseek-v4-flash")
+        # AI 权限三键：之前不在白名单里，WPF 设置页提交了也被静默丢掉。词表校验
+        # 与 app/backend.py 相同——认不出的档位不写入，按 confirm_writes 折回，
+        # 决不让「只看不动」悄悄变成「每步都问」。
+        if "ai_permission_mode" in data:
+            mode = str(data.get("ai_permission_mode") or "")
+            if mode not in _PERM_MODES:
+                confirm = bool(data["ai_confirm_writes"]) if "ai_confirm_writes" in data \
+                    else bool(CONFIG.get("ai_confirm_writes", True))
+                mode = "default" if confirm else "yolo"
+            patch["ai_permission_mode"] = mode
+        if "ai_confirm_writes" in data:
+            patch["ai_confirm_writes"] = bool(data.get("ai_confirm_writes"))
+        if "ai_permission_rules" in data:
+            patch["ai_permission_rules"] = list(data.get("ai_permission_rules") or [])
+        if "ai_permission_dont_ask" in data:
+            patch["ai_permission_dont_ask"] = bool(data.get("ai_permission_dont_ask"))
+        if "ai_context_window" in data:
+            patch["ai_context_window"] = int(data.get("ai_context_window") or 200000)
+        if "ai_max_tokens" in data:
+            patch["ai_max_tokens"] = int(data.get("ai_max_tokens") or 8192)
         if "feedback_url" in data:
             patch["feedback_url"] = (data.get("feedback_url") or "").strip()
         if "feedback_heartbeat" in data:
@@ -875,6 +973,12 @@ class BackendAPI:
                     "window_mode", "offline_skin", "instances_dir", "default_java"):
             if key in data:
                 patch[key] = data.get(key)
+        # 设置页的「默认实例」与实例页的「设为默认」都走这里；之前这个键不在白名单里，
+        # 前端提交了也被静默丢掉，界面上却提示已保存。
+        if "default_instance" in data:
+            name = str(data.get("default_instance") or "").strip()
+            if name:
+                patch["default_instance"] = name
         if "download_limit_kbps" in data:
             patch["download_limit_kbps"] = int(data.get("download_limit_kbps") or 0)
         if "auto_check_update" in data:
@@ -932,14 +1036,23 @@ class BackendAPI:
 
     def help_articles(self, query: str = "") -> list:
         from mclauncher import help_content as hc
-        return hc.search_articles(query)
+        return [BackendAPI._localize_article(a) for a in hc.search_articles(query)]
 
     def help_article(self, article_id: str) -> dict:
         from mclauncher import help_content as hc
-        return hc.get_article(article_id) or {}
+        return BackendAPI._localize_article(hc.get_article(article_id) or {})
+
+    @staticmethod
+    def _localize_article(article: dict) -> dict:
+        """帮助文章的标题过一遍词表（词表里有的才会变）；正文是整篇文章，不翻。"""
+        if not isinstance(article, dict) or not article.get("title"):
+            return article
+        out = dict(article)
+        out["title"] = tr(str(out["title"]))
+        return out
 
     def get_accounts(self) -> list[str]:
-        names = ["离线模式"]
+        names = [tr("离线模式")]
         for acc in self.accounts.accounts:
             name = acc.get("name")
             if name and name not in names:
@@ -976,16 +1089,16 @@ class BackendAPI:
         from mclauncher import skin as skin_mod
         acc = self.accounts.get_account(name)
         if not acc:
-            raise ValueError(f"没有这个账号：{name}")
+            raise ValueError(tr("没有这个账号：{0}").format(name))
         if acc.get("type") != "offline":
-            raise ValueError("自定义皮肤只对离线账号有效；正版和皮肤站账号的皮肤在各自的网站上改")
+            raise ValueError(tr("自定义皮肤只对离线账号有效；正版和皮肤站账号的皮肤在各自的网站上改"))
         blob = (data or "").strip()
         if blob:
             raw = blob.split(",", 1)[-1] if blob.startswith("data:") else blob
             try:
                 png = base64.b64decode(raw, validate=True)
             except (binascii.Error, ValueError) as exc:
-                raise ValueError("皮肤数据不是有效的 base64") from exc
+                raise ValueError(tr("皮肤数据不是有效的 base64")) from exc
             skin_mod.validate_skin(png)
             acc["skin_file"] = skin_mod.save_skin_bytes(name, png)
             acc["skin_model"] = skin_mod.SLIM if str(model).lower() == "slim" else skin_mod.CLASSIC
@@ -1078,22 +1191,22 @@ class BackendAPI:
                 except Exception as exc:
                     failed.append(f"{name}: {exc}")
             if not done and failed:
-                return {"ok": False, "message": "未能禁用：" + "; ".join(failed)}
-            msg = f"已禁用 {len(done)} 个 Mod"
+                return {"ok": False, "message": tr("未能禁用：") + "; ".join(failed)}
+            msg = tr("已禁用 {0} 个 Mod").format(len(done))
             if failed:
-                msg += "；部分失败：" + "; ".join(failed)
+                msg += tr("；部分失败：") + "; ".join(failed)
             return {"ok": True, "message": msg}
 
         if aid == "repair_version":
             if not version:
-                return {"ok": False, "message": "报告里没有版本号，无法修复"}
+                return {"ok": False, "message": tr("报告里没有版本号，无法修复")}
             tid = self.repair_version(instance, version)
-            return {"ok": True, "message": f"已开始修复 {version}", "task_id": tid}
+            return {"ok": True, "message": tr("已开始修复 {0}").format(version), "task_id": tid}
 
         if aid == "need_java":
             major = int(action.get("major") or 17)
             tid = self.download_java(str(major), vendor="adoptium")
-            return {"ok": True, "message": f"已开始下载 Java {major}", "task_id": tid}
+            return {"ok": True, "message": tr("已开始下载 Java {0}").format(major), "task_id": tid}
 
         if aid == "bump_memory":
             mb = int(action.get("memory_mb") or 6144)
@@ -1101,7 +1214,7 @@ class BackendAPI:
             CONFIG.set("memory_mb", mb)
             CONFIG.save()
             self._emit("ui_changed", {})
-            return {"ok": True, "message": f"默认内存已设为 {mb} MB"}
+            return {"ok": True, "message": tr("默认内存已设为 {0} MB").format(mb)}
 
         if aid == "open_mods_folder":
             from mclauncher.crash import open_path
@@ -1113,21 +1226,21 @@ class BackendAPI:
                 path = inst.path / "mods"
             path.mkdir(parents=True, exist_ok=True)
             open_path(path)
-            return {"ok": True, "message": "已打开 Mods 文件夹"}
+            return {"ok": True, "message": tr("已打开 Mods 文件夹")}
 
         if aid == "open_crash_file":
             from pathlib import Path as _P
             from mclauncher.crash import open_path
             target = (action.get("path") or report.get("direct_file") or "").strip()
             if not target or not _P(target).is_file():
-                return {"ok": False, "message": "没有可打开的崩溃文件"}
+                return {"ok": False, "message": tr("没有可打开的崩溃文件")}
             open_path(target)
-            return {"ok": True, "message": "已打开崩溃报告"}
+            return {"ok": True, "message": tr("已打开崩溃报告")}
 
         if aid == "open_gpu_hint":
             return {
                 "ok": True,
-                "message": (
+                "message": tr(
                     "显卡/OpenGL 相关崩溃：请更新显卡驱动，关闭独显强制、"
                     "超采样/滤镜，并确认不是远程桌面/虚拟机缺 OpenGL。"
                 ),
@@ -1146,9 +1259,9 @@ class BackendAPI:
             except Exception:
                 pass
             self._emit("ui_changed", {})
-            return {"ok": True, "message": "已清空自定义 JVM 参数"}
+            return {"ok": True, "message": tr("已清空自定义 JVM 参数")}
 
-        return {"ok": False, "message": f"未知动作: {aid}"}
+        return {"ok": False, "message": tr("未知动作: {0}").format(aid)}
 
     def export_modpack(self, instance: str, dest: str = "") -> str:
         return self.start_task(f"导出整合包 {instance}", self._export_pack_impl, instance, dest)
@@ -1196,7 +1309,7 @@ class BackendAPI:
 
     def skin_urls(self, account_name: str = "") -> dict:
         from mclauncher import skin as skin_mod
-        if not account_name or account_name == "离线模式":
+        if self._is_offline_account(account_name):
             acc = {"type": "offline", "name": "Steve"}
         else:
             acc = self.accounts.get_account(account_name) or {"type": "offline", "name": account_name}
@@ -1215,11 +1328,11 @@ class BackendAPI:
     def get_mods_targets(self, instance: str) -> list[dict]:
         from mclauncher import version_settings as vs
         inst = self._instance(instance)
-        rows = [{"label": "实例共享 mods 目录", "value": ""}]
+        rows = [{"label": tr("实例共享 mods 目录"), "value": ""}]
         for vid in inst.installed_ids():
             iso = vs.load(inst, vid).get("isolation")
             if iso in (vs.ISOLATION_MODS, vs.ISOLATION_ALL):
-                rows.append({"label": f"{vid} · 独立 mods", "value": vid})
+                rows.append({"label": f"{vid} · {tr('独立 mods')}", "value": vid})
         return rows
 
     def open_mods_folder(self, instance: str, version: str = "") -> str:
@@ -1309,7 +1422,7 @@ class BackendAPI:
             meta = inst.meta() or {}
             pack = meta.get("modpack") if isinstance(meta.get("modpack"), dict) else {}
             pack_name = pack.get("name") if pack else None
-            mc = pack_name or meta.get("mc_version") or (ids[0] if ids else "未安装版本")
+            mc = pack_name or meta.get("mc_version") or (ids[0] if ids else tr("未安装版本"))
             rows.append({
                 "name": name,
                 "versions": len(ids),
@@ -1353,7 +1466,7 @@ class BackendAPI:
                     "id": key if pack_src == "curseforge" else None,
                     "slug": slug if pack_src == "curseforge" else key,
                     "source": pack_src,
-                    "description": "Forge 1.20.1 黄铜协奏曲，不是 Create+/CDC" if key == CBC_CF_ID else "",
+                    "description": tr("Forge 1.20.1 黄铜协奏曲，不是 Create+/CDC") if key == CBC_CF_ID else "",
                 }
                 mark = (row["source"], row["id"] or row["slug"])
                 if mark in seen:
@@ -1370,7 +1483,7 @@ class BackendAPI:
         from mclauncher.catalog_files import category_facets
         cats = category_facets(extra.get("category") or extra.get("type") or "")
         gv = extra.get("game_version") or extra.get("version") or ""
-        if isinstance(gv, str) and gv.startswith("全部"):
+        if isinstance(gv, str) and gv.startswith("全部"):  # i18n:ignore 协议值：前端传的筛选项原文
             gv = ""
         hits = []
         try:
@@ -1425,7 +1538,7 @@ class BackendAPI:
         dm = DownloadManager(threads=2)
         extra = extra or {}
         gv = extra.get("game_version") or extra.get("version") or ""
-        if isinstance(gv, str) and gv.startswith("全部"):
+        if isinstance(gv, str) and gv.startswith("全部"):  # i18n:ignore 协议值：前端传的筛选项原文
             gv = ""
         from mclauncher.catalog_files import category_facets, cf_category_tokens
         label = extra.get("category") or extra.get("type") or ""
@@ -1469,7 +1582,7 @@ class BackendAPI:
     @staticmethod
     def _catalog_source(source: str) -> str:
         s = (source or "").strip().lower()
-        if s in ("", "全部", "all"):
+        if s in ("", "全部", "all"):  # i18n:ignore 协议值：来源筛选原文
             return "all"
         if s.startswith("curse"):
             return "curseforge"
@@ -1513,8 +1626,8 @@ class BackendAPI:
         spec = mods_mod.CONTENT_KINDS[kind]
         src = (source or "").lower()
         extra = extra or {}
-        want_mr = src in ("", "全部", "all", "modrinth")
-        want_cf = src in ("", "全部", "all") or src.startswith("curse")
+        want_mr = src in ("", "全部", "all", "modrinth")  # i18n:ignore 协议值
+        want_cf = src in ("", "全部", "all") or src.startswith("curse")  # i18n:ignore 协议值
         if src.startswith("modrinth"):
             want_cf = False
         if src.startswith("curse"):
@@ -1523,7 +1636,7 @@ class BackendAPI:
         rows = []
         q = (query or "").strip()
         gv = extra.get("game_version") or extra.get("version") or ""
-        if isinstance(gv, str) and gv.startswith("全部"):
+        if isinstance(gv, str) and gv.startswith("全部"):  # i18n:ignore 协议值：前端传的筛选项原文
             gv = ""
         from mclauncher.catalog_files import category_facets, cf_category_tokens
         label = extra.get("category") or extra.get("type") or ""
@@ -1596,7 +1709,7 @@ class BackendAPI:
             opts.append({"label": j.get("name") or exe, "value": exe})
         stored = self.get_instance_java(instance)
         if stored != JAVA_AUTO and stored not in seen:
-            opts.append({"label": f"已保存 ({stored})", "value": stored})
+            opts.append({"label": tr("已保存 ({0})").format(stored), "value": stored})
         return opts
 
     def java_combo_label_for(self, instance: str, options=None) -> str:
@@ -1615,7 +1728,7 @@ class BackendAPI:
                 return f"Java {j.get('major') or '?'}"
         return Path(stored).name
 
-    def _install_game_impl(self, progress, log, version, loader="无", loader_version="", instance="", extra=None):
+    def _install_game_impl(self, progress, log, version, loader="无", loader_version="", instance="", extra=None):  # i18n:ignore 协议值：「无」= 不装加载器
         extra = dict(extra or {})
         extra.setdefault("skip_assets", bool(CONFIG.get("skip_assets")))
         inst = self._instance(instance)
@@ -1634,7 +1747,7 @@ class BackendAPI:
             from mclauncher import version_settings as vs
             vs.save(inst, vid, {"isolation": iso})
             log(f"已套用默认隔离: {iso}")
-        return f"已安装 {vid}"
+        return tr("已安装 {0}").format(vid)
 
     def _install_modpack_impl(self, progress, log, name, source, extra=None):
         extra = extra or {}
@@ -1643,9 +1756,9 @@ class BackendAPI:
         path = extra.get("path") or name
         on_progress = dm.on_progress
         src_l = (source or "").lower()
-        log("整合包安装引擎：按声明的 Forge/Fabric 版本直装（不依赖残缺的 Maven 列表）")
+        log(tr("整合包安装引擎：按声明的 Forge/Fabric 版本直装（不依赖残缺的 Maven 列表）"))
 
-        if src_l.startswith("本地") or Path(str(path)).is_file():
+        if src_l.startswith("本地") or Path(str(path)).is_file():  # i18n:ignore 协议值：source=本地 是前端传的原文
             p = Path(path)
             log(f"从本地文件安装: {p}")
             log(f"实例: {inst.name}  路径: {inst.path}")
@@ -1658,13 +1771,13 @@ class BackendAPI:
             addon_id = hit.get("id")
             slug = hit.get("slug")
             if not addon_id and not slug:
-                raise RuntimeError(f"无法解析整合包: {name}")
+                raise RuntimeError(tr("无法解析整合包: {0}").format(name))
             log(f"从 CurseForge 安装 {hit.get('name') or name} (id={addon_id} slug={slug})")
             log(f"实例: {inst.name}  路径: {inst.path}")
             if str(addon_id) == str(CBC_CF_ID) or (slug or "") == CBC_CF_SLUG:
-                log("目标包：机械动力：黄铜协奏曲（CBC），Minecraft 1.20.1 Forge。这不是 Create+ / CDC。")
+                log(tr("目标包：机械动力：黄铜协奏曲（CBC），Minecraft 1.20.1 Forge。这不是 Create+ / CDC。"))
             elif str(addon_id) == str(CDC_CF_ID) or (slug or "") == CDC_CF_SLUG:
-                log("目标包：机械动力：齿轮盛宴（CDC），Minecraft 1.20.1 Forge。")
+                log(tr("目标包：机械动力：齿轮盛宴（CDC），Minecraft 1.20.1 Forge。"))
             existing = (inst.meta() or {}).get("modpack")
             if isinstance(existing, dict) and existing.get("name"):
                 log(f"注意：实例 {inst.name} 当前已是 {existing.get('name')} "
@@ -1719,7 +1832,7 @@ class BackendAPI:
                 log(f"从 Modrinth 安装模组 {slug}")
                 mods_mod.install_mod_from_source(
                     dm, str(slug), inst, mc_version=gv, on_progress=on_progress, version_id=vid)
-        log("模组安装完成")
+        log(tr("模组安装完成"))
 
     def _install_content_impl(self, progress, log, kind, name, instance, extra=None):
         extra = dict(extra or {})
@@ -1734,7 +1847,7 @@ class BackendAPI:
         files = (result or {}).get("files") or []
         log(f"完成: {', '.join(files) or name}")
         if kind == "datapack":
-            log("数据包已放到实例 datapacks 目录，请复制到对应存档的 datapacks 文件夹后进入世界。")
+            log(tr("数据包已放到实例 datapacks 目录，请复制到对应存档的 datapacks 文件夹后进入世界。"))
 
     def _download_java_impl(self, progress, log, major):
         dm = self._dm(progress, log)
@@ -1748,19 +1861,19 @@ class BackendAPI:
     def _terracotta_prepare_impl(self, progress, log):
         dm = self._dm(progress, log)
         terracotta_mod.install(dm, log=log)
-        progress(1, 1, "启动内核")
+        progress(1, 1, tr("启动内核"))
         terracotta_mod.start(log=log)
-        return "陶瓦联机已就绪"
+        return tr("陶瓦联机已就绪")
 
     def _launch_game_impl(self, progress, log, instance, version, account,
-                          username, memory_mb, width, height, java="自动选择",
-                          extra_game_args=None):
+                          username, memory_mb, width, height, java=JAVA_AUTO,
+                          extra_game_args=None, force: bool = False):
         if not version:
-            raise LaunchError("请先选择版本（到「版本」页安装）")
+            raise LaunchError(tr("请先选择版本（到「版本」页安装）"))
         # 多开检查
         allow_multi = bool(CONFIG.get("allow_multi_instance", False))
         if not allow_multi and self.is_game_running():
-            raise LaunchError("游戏正在运行中\n若要同时运行多个游戏，请到设置开启「允许多开」")
+            raise LaunchError(tr("游戏正在运行中\n若要同时运行多个游戏，请到设置开启「允许多开」"))
 
         from mclauncher import preflight as preflight_mod
         java_exe_hint = ""
@@ -1778,8 +1891,13 @@ class BackendAPI:
                 log(f"[预检:{lvl}] {it.get('title')}: {it.get('detail')}")
         if not pf.get("ok", True):
             errs = [it for it in (pf.get("items") or []) if it.get("level") == "error"]
-            msg = "\n\n".join(f"· {e.get('title')}\n{e.get('detail')}" for e in errs) or "启动预检未通过"
-            raise LaunchError("启动预检未通过\n\n" + msg)
+            if force:
+                # 预检弹框里用户选了「仍要启动」：把忽略了哪几条记进任务日志头，崩溃归因好定位
+                log("[预检:强制启动] 忽略 " + str(len(errs)) + " 条 error 强制启动："
+                    + "; ".join(f"{e.get('code')}·{e.get('title')}" for e in errs))
+            else:
+                msg = "\n\n".join(f"· {e.get('title')}\n{e.get('detail')}" for e in errs) or tr("启动预检未通过")
+                raise LaunchError(tr("启动预检未通过") + "\n\n" + msg)
 
         inst = self._instance(instance)
         log(f"实例: {inst.name} | 版本: {version}")
@@ -1791,18 +1909,18 @@ class BackendAPI:
         if bound:
             account = bound
             log(f"该版本绑定账号: {bound}")
-        if account == "离线模式" or not account:
+        if self._is_offline_account(account):
             acc = self.accounts.offline_account(
                 username or "Player", skin=CONFIG.get("offline_skin") or "default")
         else:
             acc = self.accounts.get_account(account)
             if not acc:
-                raise LaunchError(f"账号不存在: {account}")
+                raise LaunchError(tr("账号不存在: {0}").format(account))
             acc = self.accounts.ensure_valid(acc)
         props = self.accounts.launch_props(acc)
-        kind = "正版" if props.get("user_type") == "msa" else (
-            "皮肤站" if props.get("authlib_api") else (
-                "统一通行证" if props.get("nide8_id") else "离线"))
+        kind = tr("正版") if props.get("user_type") == "msa" else (
+            tr("皮肤站") if props.get("authlib_api") else (
+                tr("统一通行证") if props.get("nide8_id") else tr("离线")))
         log(f"账号: {props.get('name')} ({kind})")
         log(f"内存: {memory_mb} MB | 分辨率: {width}x{height}")
 
@@ -1815,7 +1933,7 @@ class BackendAPI:
             prep["settings"].get("pre_launch") or "", game_dir, log=log,
             wait=bool(prep.get("pre_launch_wait", True)))
 
-        progress(1, 4, "检查 Java")
+        progress(1, 4, tr("检查 Java"))
         vjson = inst.version_json(version) or {}
         try:
             resolved = manifest_mod.resolve_inherits(vjson, lambda pid: inst.version_json(pid))
@@ -1849,7 +1967,7 @@ class BackendAPI:
         ver_line = next((ln.strip() for ln in (java_mod.java_version_output(java_exe) or "").splitlines() if ln.strip()), "?")
         log(f"Java -version: {ver_line}")
         log(f"使用 Java {java_mod.get_java_major(java_exe) or '?'}: {java_exe}")
-        progress(2, 4, "构建启动参数")
+        progress(2, 4, tr("构建启动参数"))
         if props.get("authlib_api"):
             from mclauncher import authlib as authlib_mod
             authlib_mod.ensure_injector(self._dm(progress, log), on_note=log)
@@ -1869,8 +1987,8 @@ class BackendAPI:
             authlib_api=props.get("authlib_api"),
         )
         log(f"实际启动: {cmd[0]}")
-        log("正在启动游戏进程…")
-        progress(3, 4, "游戏启动中")
+        log(tr("正在启动游戏进程…"))
+        progress(3, 4, tr("游戏启动中"))
         worker = getattr(_tls, "worker", None)
         proc = GameProcess(cmd, cwd=game_dir, on_line=log, priority=prep["priority"],
                            window_title=prep.get("window_title") or "")
@@ -1901,7 +2019,7 @@ class BackendAPI:
                     self._game_proc = None
             self._emit("game_exited", {"code": code})
         if getattr(worker, "_cancelled", False):
-            log("已停止游戏")
+            log(tr("已停止游戏"))
             return
         log(f"游戏已退出，退出码 {code}")
         launch_flow.run_hook(prep["settings"].get("post_launch") or "", game_dir, log=log)
@@ -1914,7 +2032,7 @@ class BackendAPI:
         if report.get("is_crash"):
             log(f"[崩溃分析] {report.get('summary') or report.get('headline')}")
             raise GameCrashError(report)
-        return "游戏已退出"
+        return tr("游戏已退出")
 
     def _microsoft_login_impl(self, progress, log):
         client_id = CONFIG.get("microsoft_client_id") or "00000000402b5328"
@@ -1935,7 +2053,7 @@ class BackendAPI:
         account = auth.login(on_code=on_code, on_status=on_status, open_browser=True)
         self.accounts.add_account(account)
         log(f"登录成功：{account.get('name')}")
-        return f"已登录 {account.get('name')}"
+        return tr("已登录 {0}").format(account.get('name'))
 
     def _authlib_login_impl(self, progress, log, api, username, password):
         from mclauncher import authlib as authlib_mod
@@ -1943,7 +2061,7 @@ class BackendAPI:
         account = authlib_mod.login(api, username, password)
         self.accounts.add_account(account)
         log(f"皮肤站登录成功：{account.get('name')}")
-        return f"已登录 {account.get('name')}"
+        return tr("已登录 {0}").format(account.get('name'))
 
     def _repair_impl(self, progress, log, instance, version):
         from mclauncher.repair import repair
@@ -1966,25 +2084,25 @@ class BackendAPI:
         dm = self._dm(progress, log)
         rows = check_updates(inst, dm=dm)
         if not rows:
-            return "没有可更新的模组"
+            return tr("没有可更新的模组")
         for i, row in enumerate(rows):
             apply_update(inst, row, dm=dm)
             progress(i + 1, len(rows), row.get("name") or "")
-        return f"已更新 {len(rows)} 个模组"
+        return tr("已更新 {0} 个模组").format(len(rows))
 
     def _self_update_impl(self, progress, log):
         from mclauncher import updater as updater_mod
         info = updater_mod.check(self._dm(progress, log))
         if not info.get("has_update"):
-            return info.get("message") or "已是最新"
-        log(info.get("message") or "下载更新")
+            return info.get("message") or tr("已是最新")
+        log(info.get("message") or tr("下载更新"))
         path = updater_mod.download(info, self._dm(progress, log))
         # 这里不能走 apply_exe：bridge 是宿主壳拉起来的子进程，sys.argv[0]
         # 指向 bridge 自己而不是 PyMCL.exe，替换脚本会盯错目标、还会一直
         # 等一个不会退出的进程。只把包备好，交给宿主壳去替换。
         log(f"更新包已下载: {path}")
         self._emit("update_staged", {"package": str(path), "version": info.get("latest") or ""})
-        return f"更新包已下载到 {path}，关闭启动器后运行它即可完成更新"
+        return tr("更新包已下载到 {0}，关闭启动器后运行它即可完成更新").format(path)
 
     def _nide8_login_impl(self, progress, log, server_id, username, password):
         from mclauncher import nide8 as nide8_mod
@@ -1992,7 +2110,7 @@ class BackendAPI:
         account = nide8_mod.login(server_id, username, password)
         self.accounts.add_account(account)
         log(f"统一通行证登录成功：{account.get('name')}")
-        return f"已登录 {account.get('name')}"
+        return tr("已登录 {0}").format(account.get('name'))
 
     def _install_world_impl(self, progress, log, name, instance, extra=None):
         from mclauncher import worlds as worlds_mod
@@ -2006,7 +2124,7 @@ class BackendAPI:
                                           version_id=target_version)
         files = (result or {}).get("files") or []
         log(f"完成: {', '.join(files) or name}")
-        return f"已安装世界 {', '.join(files) or name}"
+        return tr("已安装世界 {0}").format(', '.join(files) or name)
 
     def _export_bat_impl(self, progress, log, instance, version, dest):
         from mclauncher import launch_flow, version_ops as vops
@@ -2126,7 +2244,7 @@ class BackendAPI:
         dm = self._dm(progress, log)
         exe = java_mod.install_java_vendor(dm, major, vendor=vendor, on_progress=dm.on_progress)
         log(f"Java 已安装: {exe}")
-        return f"Java {major} ({vendor}) 安装完成"
+        return tr("Java {0} ({1}) 安装完成").format(major, vendor)
 
     # ==================================================================
     # 新增 API：多语言
@@ -2168,9 +2286,9 @@ class BackendAPI:
         try:
             payload = base64.b64decode(raw, validate=True)
         except (binascii.Error, ValueError) as exc:
-            raise ValueError("上传的数据不是有效的 base64") from exc
+            raise ValueError(tr("上传的数据不是有效的 base64")) from exc
         if not payload:
-            raise ValueError("上传的文件是空的")
+            raise ValueError(tr("上传的文件是空的"))
 
         # 文件名是前端给的，直接当路径用就能被 ../ 跳出暂存目录
         safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", os.path.basename(name or "")).strip(" .")
@@ -2247,7 +2365,7 @@ class BackendAPI:
         from mclauncher import ui_layout as lm
         parsed = lm.parse_doc(doc)
         if parsed is None:
-            raise ValueError("不是有效的布局文档")
+            raise ValueError(tr("不是有效的布局文档"))
         name = lm.active_profile()
         lm.save_active_doc(parsed)
         if name:
@@ -2259,13 +2377,13 @@ class BackendAPI:
         from mclauncher import ui_layout as lm
         name = (name or "").strip()
         if not name:
-            raise ValueError("方案名称不能为空")
+            raise ValueError(tr("方案名称不能为空"))
         if doc is None:
             parsed = lm.load_active_doc()
         else:
             parsed = lm.parse_doc(doc)
             if parsed is None:
-                raise ValueError("不是有效的布局文档")
+                raise ValueError(tr("不是有效的布局文档"))
         lm.save_profile(name, parsed)
         return self.get_layout()
 
@@ -2278,7 +2396,7 @@ class BackendAPI:
     def delete_layout_profile(self, name: str) -> dict:
         from mclauncher import ui_layout as lm
         if not lm.delete_profile(name):
-            raise ValueError(f"布局方案「{name}」不存在")
+            raise ValueError(tr("布局方案「{0}」不存在").format(name))
         return self.get_layout()
 
     def reset_layout(self) -> dict:
@@ -2292,7 +2410,7 @@ class BackendAPI:
         from mclauncher import ui_layout as lm
         parsed = lm.parse_doc(doc)
         if parsed is None:
-            raise ValueError("不是有效的布局文件")
+            raise ValueError(tr("不是有效的布局文件"))
         lm.save_active_doc(parsed)
         return self.get_layout()
 
@@ -2326,26 +2444,26 @@ class BackendAPI:
         from mclauncher import official_migrate as om
         src = om.official_dir()
         if not src:
-            raise FileNotFoundError("未找到官方启动器目录")
+            raise FileNotFoundError(tr("未找到官方启动器目录"))
         log(f"正在从 {src} 迁移…")
-        progress(1, 3, "扫描版本")
+        progress(1, 3, tr("扫描版本"))
         versions = om.scan_versions(src)
         if not versions:
-            log("未发现版本")
-            return "无版本可导入"
+            log(tr("未发现版本"))
+            return tr("无版本可导入")
         log(f"发现 {len(versions)} 个版本")
-        progress(2, 3, f"导入 {len(versions)} 个版本（含依赖库）")
+        progress(2, 3, tr("导入 {0} 个版本（含依赖库）").format(len(versions)))
         result = om.migrate(str(src), instance)
         imported = result.get("versions") or []
         accounts = result.get("accounts") or []
         log(f"已导入 {len(imported)} 个版本（含各版本用到的 libraries）")
         if accounts:
             log("已导入账号: " + "、".join(accounts))
-            log("官方只存了访问令牌、没有刷新令牌，过期后需要重新登录")
+            log(tr("官方只存了访问令牌、没有刷新令牌，过期后需要重新登录"))
         self._emit("ui_changed", {})
-        summary = f"已导入 {len(imported)} 个版本"
+        summary = tr("已导入 {0} 个版本").format(len(imported))
         if accounts:
-            summary += f"、{len(accounts)} 个账号"
+            summary += tr("、{0} 个账号").format(len(accounts))
         return summary
 
     # ==================================================================
@@ -2371,10 +2489,10 @@ class BackendAPI:
     def submit_crash_report(self, task_id: str = "") -> str:
         report = self.get_crash(task_id)
         if not report:
-            raise LaunchError("没有可上传的崩溃报告")
+            raise LaunchError(tr("没有可上传的崩溃报告"))
         from mclauncher import feedback as fb
         result = fb.submit_crash(report)
-        return result.get("message") or "已上传"
+        return result.get("message") or tr("已上传")
 
     # ==================================================================
     # 新增 API：启动命令展示
@@ -2386,7 +2504,7 @@ class BackendAPI:
         from mclauncher.launcher import build_launch_command
         inst = self._instance(instance)
         if not version:
-            raise LaunchError("请先选择版本")
+            raise LaunchError(tr("请先选择版本"))
         vjson = inst.version_json(version) or {}
         from mclauncher import manifest as manifest_mod
         try:
@@ -2397,7 +2515,7 @@ class BackendAPI:
         if not java_exe:
             java_exe = java_mod.resolve_launch_java(resolved, dm=DownloadManager(threads=2))
         if not java_exe:
-            raise LaunchError("无法确定 Java 路径")
+            raise LaunchError(tr("无法确定 Java 路径"))
         if not account:
             acc = self.accounts.get_account(self.accounts.active) if self.accounts.active else None
             if not acc:
@@ -2434,25 +2552,44 @@ class BackendAPI:
 
     def ai_list_chats(self) -> dict:
         from mclauncher.ai import store as chat_store
-        return chat_store.load()
+        return self._localize_chats(chat_store.load())
 
     def ai_new_chat(self) -> dict:
         from mclauncher.ai import store as chat_store
         data = chat_store.load()
         chat_store.new_chat(data)
-        return data
+        return self._localize_chats(data)
 
     def ai_delete_chat(self, chat_id: str) -> dict:
         from mclauncher.ai import store as chat_store
         data = chat_store.load()
         chat_store.delete_chat(data, chat_id)
-        return data
+        return self._localize_chats(data)
 
     def ai_set_active(self, chat_id: str) -> dict:
         from mclauncher.ai import store as chat_store
         data = chat_store.load()
         chat_store.set_active(data, chat_id)
-        return data
+        return self._localize_chats(data)
+
+    @staticmethod
+    def _localize_chats(data: dict) -> dict:
+        """对话列表吐给前端前把默认标题「新对话」翻掉。
+
+        只改返回的这一份拷贝，不动 store 里存的原文：`ai/store.py` 自动起标题时还按
+        原文「新对话」认「这条还没起过名」，翻进文件里就认不出来了。
+        """
+        if not isinstance(data, dict):
+            return data
+        chats = []
+        for chat in data.get("chats") or []:
+            if isinstance(chat, dict) and chat.get("title") in ("", "新对话"):  # i18n:ignore 存盘原文，只翻出口
+                chat = dict(chat)
+                chat["title"] = tr("新对话")
+            chats.append(chat)
+        out = dict(data)
+        out["chats"] = chats
+        return out
 
     def ai_stop(self) -> dict:
         self._ai_cancel = True
@@ -2478,7 +2615,7 @@ class BackendAPI:
 
     def ai_send(self, text: str, chat_id: str = "", launch: dict | None = None) -> dict:
         if self._ai_busy:
-            return {"ok": False, "message": "上一条还在处理"}
+            return {"ok": False, "message": tr("上一条还在处理")}
         self._ai_busy = True
         self._ai_cancel = False
         self._ui_launch = dict(launch or {})
@@ -2533,9 +2670,11 @@ class BackendAPI:
                 notes.append(payload.get("label"))
             self._bus.emit("ai.status", {"kind": kind, **payload})
 
-        def confirm_fn(name, args, label):
+        # 四参签名：内核 _call_confirm 靠参数个数识别新接口，把判权原因带给前端
+        def confirm_fn(name, args, label, reason=""):
             self._ai_confirm_ev.clear()
-            self._bus.emit("ai.confirm", {"name": name, "args": args or {}, "label": label})
+            self._bus.emit("ai.confirm",
+                           {"name": name, "args": args or {}, "label": label, "reason": reason or ""})
             self._ai_confirm_ev.wait()
             return self._ai_confirm_ok
 
@@ -2560,16 +2699,27 @@ class BackendAPI:
             if self._ai_cancel:
                 raise AgentCancelled()
             if notes:
-                extra = "（本轮：" + "；".join(notes[:8]) + "）"
+                extra = tr("（本轮：{0}）").format(tr("；").join(notes[:8]))
                 if extra not in (reply or ""):
                     reply = ((reply or "") + "\n\n" + extra).strip()
             history.append({"role": "user", "content": text})
-            history.append({"role": "assistant", "content": reply or ""})
+            # 停止提示语随正文一起入库：Qt 端 _on_done 就是这么干的，两端共用一份
+            # ai_chats.json，持久化里少了它，重开程序 / 换前端后「为什么停」就丢了。
+            shown = (reply or "") + _stop_note(reply)
+            history.append({"role": "assistant", "content": shown})
             chat_store.upsert_messages(data, data.get("active_id") or "", history[-24:])
-            self._bus.emit("ai.done", {"text": reply or "", "store": data})
+            self._bus.emit("ai.done", {
+                "text": shown,
+                "store": data,
+                # AgentResult 是 str 子类，旧前端把整包当文本消费不受影响；
+                # stop_reason 用 getattr 兜底，内核万一退化回纯 str 也不炸。
+                "stop_reason": getattr(reply, "stop_reason", None) and reply.stop_reason.value,
+                "detail": getattr(reply, "detail", ""),
+                "pending_tasks": list(getattr(reply, "pending_tasks", []) or []),
+            })
         except AgentCancelled:
             flush_delta(True)
-            self._bus.emit("ai.fail", {"text": "已停止", "stopped": True})
+            self._bus.emit("ai.fail", {"text": tr("已停止"), "stopped": True})
         except AIClientError as exc:
             flush_delta(True)
             self._bus.emit("ai.fail", {"text": str(exc), "stopped": False})
@@ -2582,3 +2732,216 @@ class BackendAPI:
                 delayed[0] = None
             self._ai_busy = False
             self._ai_http = None
+
+    # ==================================================================
+    # 补齐 app/backend.py 有、这边没有的公开能力
+    #
+    # tests/test_bridge_parity.py 开头那句是本节存在的理由：桥必须跟
+    # app/backend.py 修得一样，否则同一批缺陷在 eziapp / WinUI / WPF 上原样存在。
+    # 实现一律照搬同名方法，不另起炉灶——两边行为不一致比缺失更难查。
+    #
+    # 没有搬过来的三个及其原因：
+    #   call_async            形参 fn / on_ok / on_err 要的是 Python 可调用对象，
+    #                         JSON 送不过去（与 start_task 同类，见决策 d-398）。
+    #                         桥这边「后台跑一件事」由 start_task + 事件流承担。
+    #   invalidate_instances  清的是 Qt 进程内的 _inst_cache；桥的 _instance()
+    #                         每次现建 Instance，没有那层缓存，暴露出去就是个空动作。
+    #   take_migration_report 读的是 Qt 启动时写下的 _migration_report；桥的启动
+    #                         路径不跑那次单目录合并，永远只会返回 {}。
+    # ==================================================================
+
+    # ---------------- 内容导出 ----------------
+    def default_export_dir(self) -> str:
+        from mclauncher import content_export
+        return str(content_export.default_export_dir())
+
+    def remember_export_dir(self, path: str) -> str:
+        from mclauncher import content_export
+        return content_export.remember_export_dir(path)
+
+    def export_content(self, kind: str, name: str, dest_dir: str = "",
+                       version: str = "", instance: str = "") -> str:
+        from mclauncher import content_export
+        return content_export.export_one(
+            self._instance(instance), kind, name, dest_dir, version)
+
+    def export_contents(self, kind: str, names, dest_dir: str = "",
+                        version: str = "", instance: str = "") -> dict:
+        from mclauncher import content_export
+        return content_export.export_many(
+            self._instance(instance), kind, names, dest_dir, version)
+
+    # ---------------- 游戏根目录 ----------------
+    def game_root_name(self) -> str:
+        """唯一游戏目录的名字。还需要「实例名」的旧接口一律拿它。"""
+        from mclauncher.instances import root_name
+        return root_name()
+
+    def game_root_path(self) -> str:
+        return str(self._instance().path)
+
+    # ---------------- 存档安装目标 ----------------
+    def get_saves_targets(self, instance: str = "") -> list[dict]:
+        """世界安装目标：共享 saves + 开了存档隔离的版本各自目录。"""
+        from mclauncher import version_settings as vs
+        inst = self._instance(instance)
+        rows = [{"label": tr("大锅饭（所有版本共用）"), "value": ""}]
+        for vid in inst.installed_ids():
+            iso = vs.load(inst, vid).get("isolation")
+            if iso in (vs.ISOLATION_SAVES, vs.ISOLATION_ALL):
+                rows.append({"label": f"{vid} · {tr('独立存档')}", "value": vid})
+        return rows
+
+    # ---------------- 版本隔离 ----------------
+    def get_version_isolation(self, version: str) -> str:
+        from mclauncher import version_settings as vs
+        return vs.load(self._instance(), version).get("isolation") or vs.ISOLATION_NONE
+
+    def set_version_isolation(self, version: str, mode: str, seed: bool = False) -> dict:
+        """切「独立 / 大锅饭」。seed=True 会把共享池里的模组复制一份过去。"""
+        from mclauncher import version_settings as vs
+        out = vs.set_isolation(self._instance(), version, mode, seed=seed)
+        self._emit("ui_changed", {})
+        return out
+
+    def toggle_version_isolation(self, version: str, isolated: bool, seed: bool = False) -> dict:
+        from mclauncher import version_settings as vs
+        mode = vs.ISOLATED_DEFAULT if isolated else vs.ISOLATION_NONE
+        return self.set_version_isolation(version, mode, seed=seed)
+
+    # ---------------- 版本管理页数据源 ----------------
+    LOADER_TAGS = (
+        ("neoforge", "NeoForge", "#D84B28"),
+        ("fabric", "Fabric", "#7C5CD6"),
+        ("quilt", "Quilt", "#C25BD6"),
+        ("forge", "Forge", "#E8862E"),
+        ("optifine", "OptiFine", "#2E9B6B"),
+        ("liteloader", "LiteLoader", "#4C8BF5"),
+    )
+
+    @classmethod
+    def loader_of(cls, version_id: str) -> tuple[str, str]:
+        from mclauncher.i18n import tr
+        low = str(version_id or "").lower()
+        for token, label, color in cls.LOADER_TAGS:
+            if token in low:
+                return label, color
+        return tr("原版"), "#8A9099"
+
+    @staticmethod
+    def _version_mc_id(inst, version_id: str) -> str:
+        """版本 json 里的原版号。继承链上的 inheritsFrom 优先。"""
+        data = inst.version_json(version_id) or {}
+        return str(data.get("inheritsFrom") or data.get("id") or version_id)
+
+    @staticmethod
+    def _count_mods(folder) -> int:
+        p = Path(folder)
+        if not p.is_dir():
+            return 0
+        return sum(1 for f in p.iterdir()
+                   if f.is_file() and f.name.lower().endswith(".jar"))
+
+    def get_version_rows(self, include_hidden: bool = False) -> list[dict]:
+        """版本管理页的数据源：一个版本一行，自带隔离状态与模组数。"""
+        from mclauncher import version_settings as vs
+        inst = self._instance()
+        rows = []
+        for vid in inst.installed_ids():
+            settings = vs.load(inst, vid)
+            hidden = bool(settings.get("hidden"))
+            if hidden and not (include_hidden or CONFIG.get("show_hidden_versions")):
+                continue
+            isolated = vs.is_isolated(settings)
+            mods_dir = vs.mods_dir(inst, vid, settings)
+            label, color = self.loader_of(vid)
+            rows.append({
+                "id": vid,
+                "loader": label,
+                "loader_color": color,
+                "mc": self._version_mc_id(inst, vid),
+                "isolation": settings.get("isolation") or vs.ISOLATION_NONE,
+                "isolation_label": tr(vs.ISOLATION_LABELS.get(
+                    settings.get("isolation") or vs.ISOLATION_NONE, "")),
+                "isolated": isolated,
+                "mods": self._count_mods(mods_dir),
+                "mods_dir": str(mods_dir),
+                "hidden": hidden,
+                "java": settings.get("java") or JAVA_AUTO,
+                "memory_mb": settings.get("memory_mb") or 0,
+            })
+        return rows
+
+    # ---------------- 任务标题归类 ----------------
+    #: 这三类是交互流程，不进下载条也不计红点。
+    _INTERACTIVE_TITLES = ("启动游戏", "微软登录", "皮肤站登录")  # i18n:ignore 任务标题前缀，WPF/WinUI 按原文比对
+
+    @staticmethod
+    def is_download_title(title: str) -> bool:
+        """标题是不是「下载类」任务。
+
+        任务标题一律按中文原文拼（`f"启动游戏 {version}"`），WPF / WinUI 也按原文
+        前缀认它们，所以标题不翻。这里原文和译文各比一次：桥一旦切到 en，只比译文
+        就会把「启动游戏 1.21」错算成下载任务。
+        """
+        t = str(title or "")
+        return not any(t.startswith(k) or t.startswith(tr(k))
+                       for k in BackendAPI._INTERACTIVE_TITLES)
+
+    # ---------------- 壁纸历史与撤销 ----------------
+    def _current_background(self) -> dict:
+        return {"image": str(CONFIG.get("ui_background") or ""),
+                "folder": str(CONFIG.get("ui_background_folder") or "")}
+
+    def _after_background_change(self):
+        """undo / reset 绕开了 save_settings，得自己补一次通知。
+
+        app/backend.py 这里清的是它自己的 _settings_cache 再发 theme_changed 信号；
+        桥没有那层缓存，对应动作就是往事件流上推一条 ui_changed，前端照样会重读。
+        """
+        self._emit("ui_changed", {})
+
+    def background_history(self) -> list:
+        """换下来的旧壁纸，最早在前、最新在后。"""
+        from mclauncher.config import background_history as _bg_history
+        return _bg_history()[0]
+
+    def can_undo_background(self) -> bool:
+        from mclauncher.config import background_history as _bg_history
+        return bool(_bg_history()[0])
+
+    def undo_background(self) -> dict:
+        """退回上一组壁纸设置，返回 {image, folder}。没历史就原样返回当前值。
+
+        单图和文件夹一起退：只退单图的话，文件夹还挂着轮播，界面上什么都不会变。
+        """
+        from mclauncher.config import background_history as _bg_history
+        images, folders = _bg_history()
+        if not images:
+            return self._current_background()
+        previous = {"image": images.pop(), "folder": folders.pop()}
+        CONFIG.update({"ui_background_history": images,
+                       "ui_background_folder_history": folders,
+                       "ui_background": previous["image"],
+                       "ui_background_folder": previous["folder"]})
+        CONFIG.save()
+        self._after_background_change()
+        return previous
+
+    def reset_background(self) -> dict:
+        """回到出厂壁纸（纯色，连轮播文件夹一起清）。当前这组照样进历史栈。"""
+        from mclauncher.config import DEFAULT_CONFIG
+        from mclauncher.config import push_background_history as _push_bg_history
+        default = {"image": str(DEFAULT_CONFIG.get("ui_background") or ""),
+                   "folder": str(DEFAULT_CONFIG.get("ui_background_folder") or "")}
+        current = self._current_background()
+        updates = {"ui_background": default["image"],
+                   "ui_background_folder": default["folder"]}
+        if current != default:
+            images, folders = _push_bg_history(current["image"], current["folder"])
+            updates["ui_background_history"] = images
+            updates["ui_background_folder_history"] = folders
+        CONFIG.update(updates)
+        CONFIG.save()
+        self._after_background_change()
+        return default

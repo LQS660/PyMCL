@@ -82,9 +82,21 @@ class DataLayerTests(_IsolatedConfig):
 
     def test_default_doc_unchanged(self):
         d = lm.default_doc().to_dict()
-        self.assertEqual([it["type"] for it in d["items"]], ["banner", "config", "log", "news"])
+        # 日志与新闻都不进默认版式（手动添加），右半边空着留给启动坞
+        self.assertEqual([it["type"] for it in d["items"]], ["banner", "config"])
         self.assertEqual(d["grid"], 8)
         self.assertEqual(d["version"], 1)
+        # 白名单不跟着删：两种卡片在「添加卡片」里还加得回来
+        self.assertIn("log", lm.CARD_MIN_SIZE)
+        self.assertIn("news", lm.CARD_MIN_SIZE)
+
+    def test_explicit_empty_items_kept(self):
+        """用户把卡片删光是合法状态：不能被当成坏数据换回默认布局。"""
+        doc = lm.LayoutDoc.from_dict({"version": 1, "grid": 16, "items": []})
+        self.assertEqual(doc.items, [])
+        self.assertEqual(doc.grid, 16)
+        # items 缺失 / 类型不对才回落默认
+        self.assertEqual(lm.LayoutDoc.from_dict({"grid": 16}).grid, 8)
 
 
 class LayoutRpcTests(_IsolatedConfig):
@@ -93,7 +105,9 @@ class LayoutRpcTests(_IsolatedConfig):
         self.assertEqual(out["profile"], "")
         self.assertEqual(out["profiles"], [])
         self.assertEqual(out["doc"], out["default"])
-        self.assertEqual(out["min_sizes"]["banner"], [340, 150])
+        # 横幅正文最小高 125（卡片本体再加 40 标题栏 = 165，够渐变 Hero 的
+        # 148 不裁字）；eziapp 侧 layout_geom.ts 的 CARD_MIN_SIZE 必须同数
+        self.assertEqual(out["min_sizes"]["banner"], [340, 125])
         self.assertIn("skin", out["min_sizes"])
 
     def test_save_layout_persists_and_roundtrips(self):

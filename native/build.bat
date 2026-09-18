@@ -3,7 +3,7 @@ setlocal
 set "PATH=C:\msys64\mingw64\bin;%PATH%"
 set "ROOT=%~dp0"
 if not exist "%ROOT%build" mkdir "%ROOT%build"
-gcc -O2 -std=c11 -Wall -Wno-unused-parameter -Wno-unused-function -Wno-format-truncation -DUNICODE -D_UNICODE -DWIN32_LEAN_AND_MEAN -I"%ROOT%include" -I"%ROOT%vendor" -o "%ROOT%build\pymcl-bridge.exe" "%ROOT%src\util.c" "%ROOT%src\http.c" "%ROOT%src\config.c" "%ROOT%src\instances.c" "%ROOT%src\catalog.c" "%ROOT%src\manifest.c" "%ROOT%src\java.c" "%ROOT%src\auth.c" "%ROOT%src\launcher.c" "%ROOT%src\installer.c" "%ROOT%src\mods.c" "%ROOT%src\modpack.c" "%ROOT%src\rpc_extra.c" "%ROOT%src\backend.c" "%ROOT%src\server.c" "%ROOT%src\main.c" "%ROOT%src\zip.c" "%ROOT%vendor\cJSON.c" -lcurl -lz -lbcrypt -lcrypt32 -lws2_32 -lwinhttp -lpthread -lole32 -lshell32
+gcc -O2 -std=c11 -Wall -Wno-unused-parameter -Wno-unused-function -Wno-format-truncation -DUNICODE -D_UNICODE -DWIN32_LEAN_AND_MEAN -I"%ROOT%include" -I"%ROOT%vendor" -o "%ROOT%build\pymcl-bridge.exe" "%ROOT%src\util.c" "%ROOT%src\http.c" "%ROOT%src\config.c" "%ROOT%src\instances.c" "%ROOT%src\catalog.c" "%ROOT%src\manifest.c" "%ROOT%src\java.c" "%ROOT%src\auth.c" "%ROOT%src\launcher.c" "%ROOT%src\installer.c" "%ROOT%src\mods.c" "%ROOT%src\modpack.c" "%ROOT%src\rpc_extra.c" "%ROOT%src\layout.c" "%ROOT%src\backend.c" "%ROOT%src\server.c" "%ROOT%src\main.c" "%ROOT%src\zip.c" "%ROOT%vendor\cJSON.c" -lcurl -lz -lbcrypt -lcrypt32 -lws2_32 -lwinhttp -lpthread -lole32 -lshell32
 if errorlevel 1 exit /b 1
 copy /Y "C:\msys64\mingw64\etc\ssl\certs\ca-bundle.crt" "%ROOT%build\curl-ca-bundle.crt" >nul
 rem libnghttp3 / libngtcp2 / libngtcp2_crypto_ossl: libcurl 的 HTTP/3 分支要；

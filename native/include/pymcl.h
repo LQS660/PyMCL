@@ -261,6 +261,8 @@ cJSON *py_rpc_call(const char *method, cJSON *params);
    调用方靠它区分「方法不存在」和「方法跑了但失败了」。 */
 cJSON *py_rpc_call_ex(const char *method, cJSON *params, int *handled);
 cJSON *rpc_align_call(const char *method, cJSON *params, sse_emit_fn emit);
+/* 启动页布局（layout.c）。*handled = 1 表示方法属于这里，返回 NULL 即出错（pymcl_error 已置）。 */
+cJSON *rpc_layout_call(const char *method, cJSON *params, int *handled);
 
 #ifdef __cplusplus
 }
