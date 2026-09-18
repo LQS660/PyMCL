@@ -7,8 +7,10 @@ import inspect
 import json
 import uuid
 
+from . import compact
 from . import permission
 from . import scheduler
+from . import tokens as tokens_mod
 from . import trace
 from .client import AIClientError, chat_once, chat_stream
 from .defaults import MAX_HISTORY, MAX_TOOL_ROUNDS
@@ -132,6 +134,27 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
     continuation_pending = False    # 下一轮 progress 通道带行动指引
     turn = TurnState(id=uuid.uuid4().hex[:12], session_id="active", turn_number=1)
 
+    # ---- 上下文与 token（批次 3）----
+    auto_cfg = compact.AutoConfig(
+        context_window=int((settings or {}).get("ai_context_window") or 200_000))
+    # micro 阈值从 autocompact 阈值派生：先清旧工具结果，实在不行再全量总结
+    micro_cfg = compact.MicroConfig(
+        threshold_tokens=max(4_000, compact.auto_threshold(auto_cfg) - 16_000))
+    cstate = compact.CompactState()
+    token_state = tokens_mod.TokenState()
+
+    def _summarize(slice_messages) -> str:
+        # 压缩会再发一次模型请求，必须尊重停止信号
+        _check()
+        prompt = [
+            {"role": "system", "content": compact._SUMMARY_PROMPT},
+            {"role": "user", "content": json.dumps(
+                slice_messages, ensure_ascii=False)[:60000]},
+        ]
+        data = chat_once(settings, prompt, None, http_cancel=http_cancel)
+        _check()
+        return data.get("content") or ""
+
     try:
         turn.transition(TurnPhase.PROCESSING_INPUT)
         for _round in range(MAX_TOOL_ROUNDS):
@@ -155,10 +178,51 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 messages[1]["content"] = state_base + extra
 
             _status("think", {"after_tools": any(m.get("role") == "tool" for m in messages)})
+
+            # ---- 上下文管理：先试两级压缩，再发模型请求 ----
+            cur_tokens = tokens_mod.current_input_tokens(messages, token_state)
+            decision = compact.should_autocompact(messages, auto_cfg, cstate, token_state)
+            if decision.should:
+                try:
+                    compact.check_rapid_refill(cstate, auto_cfg)
+                except compact.RapidRefillBlocked as exc:
+                    _to_phase(turn, TurnPhase.COMPLETING)
+                    trace.record("compact_rapid_refill_blocked", round_=round_no[0], exc=exc)
+                    return AgentResult(
+                        final or "", stop_reason=StopReason.ERROR,
+                        detail="上下文反复逼近窗口上限，已中断本轮以保护额度",
+                        pending_tasks=pending, rounds_used=round_no[0])
+                try:
+                    cres = compact.compact_conversation(messages, auto_cfg, _summarize)
+                    messages[:] = cres.messages
+                    compact.note_compact_success(cstate)
+                    _status("compact", {"reason": decision.reason,
+                                        "pre": cres.pre_token_count,
+                                        "post": cres.post_token_count,
+                                        "summarized": cres.summarized_message_count})
+                    trace.record("autocompact", round_=round_no[0],
+                                 pre=cres.pre_token_count, post=cres.post_token_count)
+                except AgentCancelled:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    if compact.note_compact_failure(cstate, auto_cfg):
+                        trace.record("compact_circuit_break", round_=round_no[0])
+                    else:
+                        trace.record("compact_failure", round_=round_no[0], exc=exc)
+            elif cur_tokens >= (micro_cfg.threshold_tokens or 10 ** 12):
+                mres = compact.microcompact(messages, micro_cfg, 0.0, 0.0)
+                if mres.changed:
+                    messages[:] = mres.messages
+                    _status("compact", {"reason": "microcompact",
+                                        "cleared": mres.cleared_count,
+                                        "saved": mres.tokens_saved})
+
+            n_req = len(messages)
             tool_calls = []
             text_parts = []
             truncated = False
             stream_failed = False
+            usage_info = None
             try:
                 for ev in chat_stream(settings, messages, TOOL_SCHEMAS, http_cancel=http_cancel):
                     _check()
@@ -173,6 +237,8 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     elif kind == "done":
                         truncated = ev.get("finish_reason") == "length"
                         break
+                    elif kind == "usage":
+                        usage_info = ev.get("usage")
                     elif kind == "error":
                         raise AIClientError(ev.get("message") or "接口错误")
             except AIClientError as exc:
@@ -183,10 +249,14 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             except Exception as exc:  # noqa: BLE001
                 stream_failed = True
                 trace.record("stream_exception", round_=round_no[0], exc=exc, stream_failed=True)
+            if usage_info:
+                tokens_mod.update_from_usage(token_state, usage_info, n_req)
 
             if not tool_calls and (stream_failed or not "".join(text_parts)):
                 _check()
                 data = chat_once(settings, messages, TOOL_SCHEMAS, http_cancel=http_cancel)
+                if isinstance(data.get("usage"), dict) and data["usage"]:
+                    tokens_mod.update_from_usage(token_state, data["usage"], len(messages))
                 if not text_parts and data.get("content"):
                     text_parts.append(data["content"])
                     _delta(data["content"])
@@ -366,6 +436,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     "content": obj.result or "",
                 })
             turn.transition(TurnPhase.AWAITING_MODEL)
+            cstate.tool_turns_since_compact += 1
     except AgentCancelled:
         _to_phase(turn, TurnPhase.COMPLETING)
         raise

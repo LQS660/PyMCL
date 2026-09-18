@@ -218,9 +218,11 @@ def _flush_complete_tools(acc: dict) -> list | None:
     return None
 
 
-def _assemble_stream(resp) -> Iterator[dict]:
+def _assemble_stream(resp, expect_usage: bool = False) -> Iterator[dict]:
     tool_acc = {}
     got_delta = False
+    pending_done = None
+    last_usage = None
     resp.encoding = "utf-8"
     try:
         lines = resp.iter_lines(decode_unicode=False)
@@ -238,7 +240,12 @@ def _assemble_stream(resp) -> Iterator[dict]:
                 if tool_acc:
                     yield {"type": "error", "message": "工具参数不完整，正在换一次非流式"}
                     return
-                yield {"type": "done"}
+                if pending_done:
+                    if last_usage:
+                        yield {"type": "usage", "usage": last_usage}
+                    yield pending_done
+                else:
+                    yield {"type": "done"}
                 return
             try:
                 chunk = json.loads(line)
@@ -249,6 +256,9 @@ def _assemble_stream(resp) -> Iterator[dict]:
                 msg = err.get("message") if isinstance(err, dict) else str(err)
                 yield {"type": "error", "message": msg}
                 return
+            usage = chunk.get("usage")
+            if isinstance(usage, dict) and usage:
+                last_usage = usage
             choices = chunk.get("choices") or []
             if not choices:
                 continue
@@ -277,6 +287,10 @@ def _assemble_stream(resp) -> Iterator[dict]:
                 yield {"type": "error", "message": "工具参数不完整，正在换一次非流式"}
                 return
             if reason in ("stop", "length"):
+                # 请求了 usage 时等 [DONE]：usage 包在最后一个内容包之后
+                if expect_usage:
+                    pending_done = {"type": "done", "finish_reason": reason}
+                    continue
                 yield {"type": "done", "finish_reason": reason}
                 return
         tools = _flush_complete_tools(tool_acc) if tool_acc else None
@@ -285,6 +299,11 @@ def _assemble_stream(resp) -> Iterator[dict]:
             return
         if tool_acc:
             yield {"type": "error", "message": "工具参数不完整，正在换一次非流式"}
+            return
+        if pending_done:
+            if last_usage:
+                yield {"type": "usage", "usage": last_usage}
+            yield pending_done
             return
         if got_delta:
             yield {"type": "done"}
@@ -333,6 +352,11 @@ def chat_stream(settings: dict, messages: list, tools: list | None = None,
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
+    expect_usage = False
+    if not ep["public"]:
+        # 公益网关是纯字节转发拿不到 usage；自定义 NewAPI 直连才请求计量
+        body["stream_options"] = {"include_usage": True}
+        expect_usage = True
     session = requests.Session()
     if http_cancel:
         http_cancel.bind(session)
@@ -352,7 +376,7 @@ def chat_stream(settings: dict, messages: list, tools: list | None = None,
             raise AIClientError("已停止")
     if resp.status_code >= 400:
         raise AIClientError(_err_text(resp), resp.status_code)
-    yield from _assemble_stream(resp)
+    yield from _assemble_stream(resp, expect_usage=expect_usage)
 
 
 def chat_once(settings: dict, messages: list, tools: list | None = None,
@@ -390,4 +414,5 @@ def chat_once(settings: dict, messages: list, tools: list | None = None,
         "content": msg.get("content") or "",
         "tool_calls": msg.get("tool_calls") or [],
         "finish_reason": choice.get("finish_reason") or "stop",
+        "usage": data.get("usage") or {},
     }

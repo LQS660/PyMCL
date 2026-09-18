@@ -63,6 +63,8 @@ DEFAULT_CONFIG = {
     "ai_permission_mode": "default",
     "ai_permission_rules": [],
     "ai_permission_dont_ask": False,
+    # ★ 待实测：deepseek-v4-flash 真实窗口未知，200000 是照抄 ZCode 的常量
+    "ai_context_window": 200000,
     # HMCL 自定义 EasyTier 会合节点（官方 /nodes 表往往不够）
     "terracotta_extra_nodes": [
         "https://terracotta.glavo.site/acebc7d8-1208-47fd-b212-d03ac49e36e0",

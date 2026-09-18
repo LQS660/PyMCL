@@ -14,6 +14,7 @@ from mclauncher.downloader import DownloadManager
 from mclauncher.instances import Instance, unique_instance_name
 from mclauncher.mods import detect_loader, detect_mc_version
 
+from . import artifacts
 from . import conflict as conflict_mod
 from . import diagnose as diagnose_mod
 from . import modconfig as modconfig_mod
@@ -220,6 +221,12 @@ TOOL_SCHEMAS = [
         "content": {"type": "string", "description": "完整文件内容"},
         "instance": {"type": "string"},
     }, ["path", "content"], readonly=False, side_effect="write_local", risk="high"),
+    _schema("read_artifact", "回读之前被存盘的超长工具结果。传结果摘要里给的文件名", {
+        "artifact_id": {"type": "string",
+                        "description": "如 20260918-221533-a1b2c3.txt"},
+        "offset": {"type": "integer", "description": "起始行（0 起）"},
+        "limit": {"type": "integer", "description": "读取行数，默认 200"},
+    }, ["artifact_id"], readonly=True, side_effect="read"),
 ]
 
 
@@ -285,13 +292,14 @@ def normalize_ask_args(args: dict) -> list[dict]:
     return out
 
 
-def _clip(obj) -> str:
+def _clip(obj, tool_name: str = "") -> str:
     if isinstance(obj, str):
         text = obj
     else:
         text = json.dumps(obj, ensure_ascii=False, indent=2)
     if len(text) > MAX_TOOL_RESULT:
-        return text[:MAX_TOOL_RESULT] + "\n…(已截断)"
+        # 超长结果落盘，给模型路径 + 前 120 行；细节用 read_artifact 回读
+        return artifacts.store(text, tool_name)
     return text
 
 
@@ -630,6 +638,9 @@ def execute_tool(backend, name: str, args: dict, wait=True, cancelled=None):
     if name == "write_mod_config":
         return modconfig_mod.write_config(
             _inst(backend, args), args.get("path"), args.get("content") or "")
+    if name == "read_artifact":
+        return artifacts.read_artifact(
+            args.get("artifact_id"), args.get("offset") or 0, args.get("limit") or 200)
     return f"未知工具: {name}"
 
 
@@ -643,7 +654,7 @@ def run_tool(backend, name: str, raw_args, wait=True, cancelled=None) -> str:
         args = dict(raw_args or {})
     try:
         result = execute_tool(backend, name, args, wait=wait, cancelled=cancelled)
-        return _clip(result)
+        return _clip(result, name)
     except Exception as exc:  # noqa: BLE001
         trace.record("tool_exception", tool_name=name, exc=exc)
         return f"工具失败: {exc}"
