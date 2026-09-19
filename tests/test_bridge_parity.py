@@ -168,9 +168,16 @@ class BridgeAiPayloadParityTests(unittest.TestCase):
       同一批缺陷在 WPF / eziapp / WinUI 上原样存在，这正是文件头那句规约。
     """
 
-    DONE_KEYS = {"text", "store", "stop_reason", "detail", "pending_tasks"}
-    FAIL_KEYS = {"text", "stopped"}
-    CONFIRM_KEYS = {"name", "args", "label", "reason"}
+    # chat_id 不是内核元数据，是桥自己的路由键：回合属于哪条对话。用户中途切换 /
+    # 新建 / 删除对话时，前端靠它判断「这帖收尾是不是我正看着的对话」，
+    # 别把旧对话的报错气泡贴进新对话、也别在切走之后按钮还卡在「忙」上。
+    ROUTING_KEYS = {"chat_id"}
+    DONE_KEYS = {"text", "store", "stop_reason", "detail", "pending_tasks", "note"} | ROUTING_KEYS
+    UI_KEYS = {"note"}
+    FAIL_KEYS = {"text", "stopped"} | ROUTING_KEYS
+    # rule_content：内核按 RULE_CONTENT_KEYS 从 args 里抽出来的那一项，前端「始终允许」
+    # 的说明文案靠它，不用把键表抄进 C#。
+    CONFIRM_KEYS = {"name", "args", "label", "reason", "rule_content"}
 
     def _payload_keys(self, event: str) -> set:
         """AST 抽出 bridge/api.py 里 emit("<event>", {字面量 dict}) 的键集合。"""
@@ -193,7 +200,7 @@ class BridgeAiPayloadParityTests(unittest.TestCase):
         from mclauncher.ai.result import AgentResult
         result = AgentResult("ok", stop_reason="max_rounds", detail="d",
                              pending_tasks=[{"task_id": "t"}])
-        for key in self.DONE_KEYS - {"text", "store"}:
+        for key in self.DONE_KEYS - {"text", "store"} - self.ROUTING_KEYS - self.UI_KEYS:
             self.assertTrue(hasattr(result, key),
                             f"AgentResult 缺 {key}：bridge 在 ai.done 里发的是死键")
         self.assertEqual(self._payload_keys("ai.done"), self.DONE_KEYS)
@@ -203,6 +210,61 @@ class BridgeAiPayloadParityTests(unittest.TestCase):
 
     def test_confirm_payload_carries_reason(self):
         self.assertEqual(self._payload_keys("ai.confirm"), self.CONFIRM_KEYS)
+
+
+class BridgeAlwaysAllowParityTests(unittest.TestCase):
+    """确认卡「始终允许」：Qt 端把 Rule 直接回给内核，桥端得给 WPF 同一条路。
+
+    ai_confirm(ok, always, scope) 靠 confirm_fn 那一刻存下的 (name, args) 拼 Rule；
+    scope 决定内核落 per_instance 还是 global。规则增删列三条 RPC 是 WPF 权限面板的后端。
+    """
+
+    def setUp(self):
+        import tempfile
+        from mclauncher.ai import permission as perm
+        self._perm = perm
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old = perm.PERMISSIONS_FILE
+        perm.PERMISSIONS_FILE = Path(self._tmp.name) / "ai_permissions.json"
+        self.api = BackendAPI(mock.MagicMock())
+
+    def tearDown(self):
+        self._perm.PERMISSIONS_FILE = self._old
+        self._tmp.cleanup()
+
+    def test_always_builds_rule_from_pending_card(self):
+        from mclauncher.ai.permission import Behavior, Rule
+        self.api._ai_confirm_ctx = ("install_mod", {"name": "钠", "slug": "sodium"})
+        self.api.ai_confirm(True, always=True, scope="global")
+        rule = self.api._ai_confirm_ok
+        self.assertIsInstance(rule, Rule)
+        self.assertEqual((rule.tool_name, rule.rule_content, rule.behavior, rule.scope),
+                         ("install_mod", "sodium", Behavior.ALLOW, "global"))
+
+    def test_always_defaults_to_instance_scope_and_plain_ok_stays_bool(self):
+        self.api._ai_confirm_ctx = ("delete_mod", {"filename": "a.jar"})
+        self.api.ai_confirm(True, always=True)
+        self.assertEqual(self.api._ai_confirm_ok.scope, "instance")
+        self.api.ai_confirm(True)
+        self.assertIs(self.api._ai_confirm_ok, True)
+        # 拒绝时 always 无意义，不能拼出规则
+        self.api.ai_confirm(False, always=True)
+        self.assertIs(self.api._ai_confirm_ok, False)
+
+    def test_rule_rpcs_round_trip(self):
+        rows = self.api.ai_permission_rule_add("install_mod", "deny", "sodium", "demo")
+        self.assertEqual([(r["toolName"], r["ruleContent"], r["behavior"], r["instance"]) for r in rows],
+                         [("install_mod", "sodium", "deny", "demo")])
+        rows = self.api.ai_permission_rule_add("launch_game", "ask")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(self.api.ai_permission_rules(), rows)
+        key = next(r["key"] for r in rows if r["toolName"] == "launch_game")
+        rows = self.api.ai_permission_rule_remove(key, "")
+        self.assertEqual([r["toolName"] for r in rows], ["install_mod"])
+        with self.assertRaises(ValueError):
+            self.api.ai_permission_rule_add("no_such_tool")
+        with self.assertRaises(ValueError):
+            self.api.ai_permission_rule_add("install_mod", "maybe")
 
 
 class BridgePermissionModeParityTests(unittest.TestCase):

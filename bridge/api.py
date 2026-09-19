@@ -209,9 +209,11 @@ class BackendAPI:
         self._ai_http = None
         self._ai_confirm_ev = threading.Event()
         self._ai_confirm_ok = False
+        self._ai_confirm_ctx = None     # (tool_name, args)：正在等回答的那张确认卡
         self._ai_ask_ev = threading.Event()
         self._ai_ask_result = None
         self._ai_busy = False
+        self._ai_steer: list[str] = []   # 跑动中插话（ai_steer），下一轮模型请求前取走
         self._ui_launch = {}
         self._ensure_default_instance()
 
@@ -2552,7 +2554,11 @@ class BackendAPI:
 
     def ai_list_chats(self) -> dict:
         from mclauncher.ai import store as chat_store
-        return self._localize_chats(chat_store.load())
+        out = self._localize_chats(chat_store.load())
+        # 前端重进页面 / 刷新时靠这一位把「发送 / 停止」按钮对回后端的真实状态：
+        # 桥进程重启、事件漏掉一帖，前端自己那份 busy 就永远卡在上一回合。
+        out["busy"] = bool(self._ai_busy)
+        return out
 
     def ai_new_chat(self) -> dict:
         from mclauncher.ai import store as chat_store
@@ -2592,6 +2598,9 @@ class BackendAPI:
         return out
 
     def ai_stop(self) -> dict:
+        # 回执带上「当时有没有回合在跑」：没有的话前端就别再等 ai.fail 来复位按钮——
+        # 那一帖不会来（前端的 busy 是脱节的旧状态），得拿这一位当场复位。
+        was_busy = bool(self._ai_busy)
         self._ai_cancel = True
         http = self._ai_http
         if http:
@@ -2601,12 +2610,46 @@ class BackendAPI:
                 pass
         self.ai_confirm(False)
         self.ai_answer(None)
-        return {"ok": True}
+        return {"ok": True, "busy": was_busy}
 
-    def ai_confirm(self, ok: bool = False) -> dict:
-        self._ai_confirm_ok = bool(ok)
+    def ai_confirm(self, ok: bool = False, always: bool = False,
+                   scope: str = "instance") -> dict:
+        """回答确认卡。always=True 即「始终允许」：按 scope（instance / global）记成规则，
+        内核收到 Rule 会自己落盘；卡片上下文来自 confirm_fn 那一刻存下的 name / args。"""
+        answer: object = bool(ok)
+        ctx = getattr(self, "_ai_confirm_ctx", None)
+        if ok and always and ctx:
+            from mclauncher.ai.permission import (
+                SCOPE_GLOBAL, SCOPE_INSTANCE, Behavior, Rule, rule_content_from_input)
+            name, args = ctx
+            answer = Rule(name, rule_content_from_input(args or {}), Behavior.ALLOW,
+                          scope=SCOPE_GLOBAL if scope == SCOPE_GLOBAL else SCOPE_INSTANCE)
+        self._ai_confirm_ok = answer
         self._ai_confirm_ev.set()
         return {"ok": True}
+
+    # ---- 权限规则（供 WPF 权限面板；Qt 端进程内直调 permission.*）----
+    def ai_permission_rules(self) -> list:
+        from mclauncher.ai.permission import list_stored_rules
+        return list_stored_rules()
+
+    def ai_permission_rule_add(self, tool: str, behavior: str = "allow",
+                               content: str = "", instance: str = "") -> list:
+        from mclauncher.ai.permission import Behavior, Rule, append_rule, list_stored_rules
+        from mclauncher.ai.tools import TOOL_META
+        if tool not in TOOL_META:
+            raise ValueError(tr("未知工具：{0}").format(tool))
+        try:
+            beh = Behavior(str(behavior or "allow"))
+        except ValueError:
+            raise ValueError(tr("未知行为：{0}").format(behavior)) from None
+        append_rule(Rule(tool, (content or "").strip() or None, beh), instance or None)
+        return list_stored_rules()
+
+    def ai_permission_rule_remove(self, key: str, instance: str = "") -> list:
+        from mclauncher.ai.permission import list_stored_rules, remove_rule
+        remove_rule(key, instance=instance or "")
+        return list_stored_rules()
 
     def ai_answer(self, result=None) -> dict:
         self._ai_ask_result = result
@@ -2614,15 +2657,32 @@ class BackendAPI:
         return {"ok": True}
 
     def ai_send(self, text: str, chat_id: str = "", launch: dict | None = None) -> dict:
-        if self._ai_busy:
-            return {"ok": False, "message": tr("上一条还在处理")}
-        self._ai_busy = True
-        self._ai_cancel = False
+        # 检查-置位放在同一把锁里：连点两次「发送」不能并发起两条 run
+        with self._ai_lock:
+            if self._ai_busy:
+                return {"ok": False, "message": tr("上一条还在处理")}
+            self._ai_busy = True
+            self._ai_cancel = False
+            self._ai_steer = []
         self._ui_launch = dict(launch or {})
         t = threading.Thread(
             target=self._ai_run, args=(text, chat_id), daemon=True, name="ai-send")
         t.start()
         return {"ok": True, "started": True}
+
+    def ai_steer(self, text: str) -> dict:
+        """跑动中插一句（steering）：下一轮模型请求前被采纳，不用等这回合结束。
+
+        没在跑就原样退回 ok=False，前端拿它当普通 ai_send 发。
+        """
+        text = str(text or "").strip()
+        if not text:
+            return {"ok": False, "message": tr("内容为空")}
+        with self._ai_lock:
+            if not self._ai_busy:
+                return {"ok": False, "message": tr("当前没有在跑的回合")}
+            self._ai_steer.append(text)
+        return {"ok": True, "queued": len(self._ai_steer)}
 
     def _ai_run(self, text: str, chat_id: str):
         from mclauncher.ai import store as chat_store
@@ -2632,7 +2692,10 @@ class BackendAPI:
         data = chat_store.load()
         if chat_id:
             chat_store.set_active(data, chat_id)
-        chat = chat_store.get_chat(data, data.get("active_id") or "") or {}
+        # 这一回合从头到尾都属于开跑时的这条对话。用户中途切走 / 新建 / 删除对话，
+        # 结果仍写回这一条，事件也带着它的 id，前端才分得清「这帖是不是我正看着的对话」。
+        run_cid = str(data.get("active_id") or "")
+        chat = chat_store.get_chat(data, run_cid) or {}
         history = chat_store.api_messages(chat.get("messages") or [])
         http = HttpCancel()
         self._ai_http = http
@@ -2670,47 +2733,128 @@ class BackendAPI:
                 notes.append(payload.get("label"))
             self._bus.emit("ai.status", {"kind": kind, **payload})
 
+        def cancelled():
+            return self._ai_cancel
+
+        def _wait_card(ev: threading.Event) -> bool:
+            """等确认 / 选择卡片，每 0.2s 看一眼停止位。
+
+            ai_stop 是先 set 事件再由内核走到这里的：若这里先 clear 再无限 wait，
+            停止就落空，卡片挂在停止之后弹出，用户不点就一直 busy。
+            返回 False = 被停止。
+            """
+            while not ev.wait(0.2):
+                if self._ai_cancel:
+                    return False
+            return not self._ai_cancel
+
         # 四参签名：内核 _call_confirm 靠参数个数识别新接口，把判权原因带给前端
         def confirm_fn(name, args, label, reason=""):
+            if self._ai_cancel:
+                return False
             self._ai_confirm_ev.clear()
+            # 记下这张卡对应的工具与参数：前端点「始终允许」时 ai_confirm 靠它拼 Rule
+            self._ai_confirm_ctx = (name, dict(args or {}))
+            from mclauncher.ai.permission import rule_content_from_input
             self._bus.emit("ai.confirm",
-                           {"name": name, "args": args or {}, "label": label, "reason": reason or ""})
-            self._ai_confirm_ev.wait()
+                           {"name": name, "args": args or {}, "label": label, "reason": reason or "",
+                            "rule_content": rule_content_from_input(args or {}) or ""})
+            if not _wait_card(self._ai_confirm_ev):
+                return False
             return self._ai_confirm_ok
 
         def ask_fn(questions, title):
+            if self._ai_cancel:
+                return None
             self._ai_ask_ev.clear()
             self._ai_ask_result = None
             self._bus.emit("ai.ask", {"questions": questions or [], "title": title or ""})
-            self._ai_ask_ev.wait()
+            if not _wait_card(self._ai_ask_ev):
+                return None
             return self._ai_ask_result
 
-        def cancelled():
-            return self._ai_cancel
+        def drain_inputs():
+            with self._ai_lock:
+                out = list(self._ai_steer)
+                self._ai_steer = []
+            return out
+
+        def _turn_trajectory(reply) -> list:
+            """本回合的工具轨迹（assistant.tool_calls + tool 回执），入库给下一轮模型看。"""
+            out = []
+            for m in (getattr(reply, "turn_messages", None) or []):
+                if not isinstance(m, dict):
+                    continue
+                role = m.get("role")
+                if role == "tool" or (role == "assistant" and m.get("tool_calls")):
+                    out.append(dict(m))
+            return out
+
+        def release():
+            # 先放开 busy 再发收尾事件：前端收到 ai.done / ai.fail 往往立刻回查
+            # ai_list_chats 的 busy 位或补发排队的下一句，这里若还挂着 busy，
+            # 那一发就被「上一条还在处理」顶回去，按钮也会被对回「忙」。
+            self._ai_busy = False
+            self._ai_http = None
+
+        def persist(new_messages: list) -> dict:
+            """把本回合新增的几条追加进所属对话再落盘。
+
+            落盘前重新读一遍：跑的这几十秒里用户可能已经切换 / 新建 / 删除了对话，
+            拿开跑前那份旧快照去 save 会把这些改动整份盖掉（新建的对话直接消失、
+            激活项跳回旧对话）。只追加、不截 24 条：UI 侧上限由 store 的 MAX_MESSAGES
+            管，模型侧上限由 agent 的 MAX_HISTORY 管，这里再截一刀等于把工具轨迹全丢掉。
+            对话被删了就只报事件不落盘。
+            """
+            fresh = chat_store.load()
+            cur = chat_store.get_chat(fresh, run_cid)
+            if cur is not None:
+                chat_store.upsert_messages(
+                    fresh, run_cid, list(cur.get("messages") or []) + list(new_messages))
+            return fresh
+
+        def fail(text_shown: str, stopped: bool):
+            flush_delta(True)
+            release()
+            # 失败也把用户这句和出错原因存上，否则重开程序这一问就凭空消失了
+            try:
+                persist([{"role": "user", "content": text},
+                         {"role": "error", "content": text_shown}])
+            except Exception:  # noqa: BLE001
+                pass
+            self._bus.emit("ai.fail", {"text": text_shown, "stopped": stopped, "chat_id": run_cid})
 
         try:
             reply = run_agent(
                 self, self.get_settings(), history, text,
                 on_delta=on_delta, on_status=on_status,
                 confirm_fn=confirm_fn, ask_fn=ask_fn, cancelled=cancelled,
-                http_cancel=http,
+                http_cancel=http, drain_inputs_fn=drain_inputs,
             )
             flush_delta(True)
             if self._ai_cancel:
                 raise AgentCancelled()
+            body = str(reply or "")
             if notes:
                 extra = tr("（本轮：{0}）").format(tr("；").join(notes[:8]))
-                if extra not in (reply or ""):
-                    reply = ((reply or "") + "\n\n" + extra).strip()
-            history.append({"role": "user", "content": text})
-            # 停止提示语随正文一起入库：Qt 端 _on_done 就是这么干的，两端共用一份
-            # ai_chats.json，持久化里少了它，重开程序 / 换前端后「为什么停」就丢了。
-            shown = (reply or "") + _stop_note(reply)
-            history.append({"role": "assistant", "content": shown})
-            chat_store.upsert_messages(data, data.get("active_id") or "", history[-24:])
+                if extra not in body:
+                    body = (body + "\n\n" + extra).strip()
+            # 「为什么停」的提示只给人看：正文里带着它入库，下一轮模型会读到自己上一句
+            # 后面挂着「没有真的开始执行」，容易误判成要补动作。所以拆成独立字段 note
+            # 存着（store 保留、api_messages 不喂给模型），前端渲染历史时再拼回去。
+            note = _stop_note(reply)
+            shown = (body + note) if note else body
+            final = {"role": "assistant", "content": body}
+            if note:
+                final["note"] = note
+            fresh = persist([{"role": "user", "content": text}]
+                            + _turn_trajectory(reply) + [final])
+            release()
             self._bus.emit("ai.done", {
                 "text": shown,
-                "store": data,
+                "note": note,
+                "store": fresh,
+                "chat_id": run_cid,
                 # AgentResult 是 str 子类，旧前端把整包当文本消费不受影响；
                 # stop_reason 用 getattr 兜底，内核万一退化回纯 str 也不炸。
                 "stop_reason": getattr(reply, "stop_reason", None) and reply.stop_reason.value,
@@ -2718,20 +2862,16 @@ class BackendAPI:
                 "pending_tasks": list(getattr(reply, "pending_tasks", []) or []),
             })
         except AgentCancelled:
-            flush_delta(True)
-            self._bus.emit("ai.fail", {"text": tr("已停止"), "stopped": True})
+            fail(tr("已停止"), True)
         except AIClientError as exc:
-            flush_delta(True)
-            self._bus.emit("ai.fail", {"text": str(exc), "stopped": False})
+            fail(str(exc), False)
         except Exception as exc:  # noqa: BLE001
-            flush_delta(True)
-            self._bus.emit("ai.fail", {"text": str(exc), "stopped": False})
+            fail(str(exc), False)
         finally:
             if delayed[0] is not None:
                 delayed[0].cancel()
                 delayed[0] = None
-            self._ai_busy = False
-            self._ai_http = None
+            release()
 
     # ==================================================================
     # 补齐 app/backend.py 有、这边没有的公开能力
