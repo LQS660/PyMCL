@@ -8,6 +8,7 @@ from qfluentwidgets import (
     TransparentPushButton,
 )
 
+from ..pcl_chrome import Theme
 from ..widgets import EmptyState, IconTile, Pill
 from mclauncher.i18n import tr
 
@@ -40,7 +41,8 @@ class JavaDownloadTile(SimpleCardWidget):
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(4)
         title = StrongBodyLabel(f"Java {major}")
-        title.setStyleSheet("font-size: 16px;")
+        # 整份替掉 FluentLabel 的样式表就得自己带 color，否则深色下退回黑字
+        title.setStyleSheet(f"color: {Theme.text}; font-size: 16px;")
         layout.addWidget(title)
         layout.addWidget(CaptionLabel(note))
         layout.addStretch(1)
@@ -71,7 +73,9 @@ class JavaPage(QWidget):
         head = QHBoxLayout()
         title_box = QVBoxLayout()
         title_box.addWidget(SubtitleLabel("Java"))
-        title_box.addWidget(CaptionLabel(tr("Minecraft 所需 Java 会在启动时自动匹配下载；也可在版本管理页为单个版本指定")))
+        caption = CaptionLabel(tr("Minecraft 所需 Java 会在启动时自动匹配下载；也可在版本管理页为单个版本指定"))
+        caption.setWordWrap(True)
+        title_box.addWidget(caption)
         head.addLayout(title_box, 1)
         self.refresh_btn = TransparentPushButton(FIF.SYNC, tr("重新检测"))
         head.addWidget(self.refresh_btn, 0)

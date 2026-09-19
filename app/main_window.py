@@ -923,8 +923,7 @@ class MainWindow(FluentWindowBase):
             seq.insert(seq.index("more"), key)
         else:
             seq.append(key)
-        CONFIG.set("ui_nav_order", [k for k in seq if k in _TOP_KEYS])
-        CONFIG.save()
+        self._write_sidebar_sequence(seq)
         self._rebuild_sections()
         self._rebuild_sidebar()
 

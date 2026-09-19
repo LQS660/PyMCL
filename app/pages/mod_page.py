@@ -105,7 +105,10 @@ class ModManagerPage(QWidget):
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
         self.title = SubtitleLabel(tr("模组管理"))
-        self.title.setStyleSheet("font-size: 17px; font-weight: 700; background: transparent;")
+        # FluentLabel 的字色是它自己那份样式表里的 color 给的；这里整份替掉
+        # 就必须自己带上 color，否则退回系统调色板的黑，深色下黑字压黑底。
+        self.title.setStyleSheet(
+            f"color: {Theme.text}; font-size: 17px; font-weight: 700; background: transparent;")
         self.subtitle = CaptionLabel(tr("查看与管理已安装的模组"))
         self.subtitle.setStyleSheet(f"color: {Theme.muted}; background: transparent;")
         title_box.addWidget(self.title)

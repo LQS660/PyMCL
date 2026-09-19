@@ -303,7 +303,9 @@ class PclCatalogPage(QWidget):
 
         head = QHBoxLayout()
         title = QLabel(spec["search_title"])
-        title.setStyleSheet("font-size: 15px; font-weight: 700; background: transparent;")
+        # 纯 QLabel 的字色来自系统调色板（深色主题下仍是黑），必须显式跟 Theme
+        title.setStyleSheet(
+            f"color: {Theme.text}; font-size: 15px; font-weight: 700; background: transparent;")
         head.addWidget(title)
         head.addStretch(1)
         self.instance_box = ComboBox()
@@ -602,7 +604,7 @@ class PclCatalogPage(QWidget):
         lay.setContentsMargins(12, 6, 12, 6)
         name = row.get("filename") or row.get("name") or "?"
         lab = QLabel(name)
-        lab.setStyleSheet("font-size: 13px; background: transparent;")
+        lab.setStyleSheet(f"color: {Theme.text}; font-size: 13px; background: transparent;")
         lay.addWidget(lab, 1)
         if "enabled" in row:
             sw = SwitchButton()

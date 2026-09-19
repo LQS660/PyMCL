@@ -385,7 +385,9 @@ def paint_theme_surfaces(root, allow_transparent: bool = True) -> None:
     border-image 从页面底下透出来；对话框里的表单宿主传 allow_transparent=False
     保持实底，不透出主窗背景图。
     """
-    from PySide6.QtWidgets import QAbstractScrollArea, QFormLayout, QFrame, QLabel, QWidget
+    from PySide6.QtWidgets import (
+        QAbstractScrollArea, QFormLayout, QFrame, QLabel, QScrollArea, QWidget,
+    )
 
     if root is None:
         return
@@ -425,7 +427,16 @@ def paint_theme_surfaces(root, allow_transparent: bool = True) -> None:
                 # 透明滚动区（布局卡片内部）：保持透明，别刷成页面底色
                 # 在卡片 (Theme.card) 上出色块。
                 continue
-            _paint_scroll(w, surface, bg_c)
+            # 只刷「承托页面内容的滚动容器」（QScrollArea 及 Fluent 的
+            # ScrollArea / SmoothScrollArea）。文本框、列表、表格
+            # （QPlainTextEdit / QTextEdit / QListView / QTableView…）虽然
+            # 也是 QAbstractScrollArea，但样式表是它们自己那套 Fluent 皮肤：
+            # 这里一句 setStyleSheet 会把整份皮肤连同 `color: white` 一起
+            # 抹掉，字色退回系统调色板的黑——深色下就是黑字压黑底、占位符
+            # 几乎看不见（反馈页正文框、任务日志框都是这么坏的）。
+            # 它们的底色由自己的皮肤负责，这里不碰。
+            if isinstance(w, QScrollArea):
+                _paint_scroll(w, surface, bg_c)
             continue
 
         # SettingCard：补卡片底色（选择器限定在 SettingCard，不灌进子 QLabel）

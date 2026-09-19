@@ -865,7 +865,7 @@ class BackendAPI(QObject):
                     java: str = tr("自动选择"), extra_game_args=None,
                     force: bool = False) -> str:
         task_id = self.start_task(
-            f"启动游戏 {version}", self._launch_game_impl,
+            f"{tr('启动游戏')} {version}", self._launch_game_impl,
             instance, version, account, username, memory_mb, width, height, java,
             extra_game_args, force,
         )
@@ -1566,6 +1566,7 @@ class BackendAPI(QObject):
         if aid == "reset_jvm_args":
             CONFIG.set("default_jvm_args", "")
             CONFIG.save()
+            version_error = None
             try:
                 from mclauncher import version_settings as vs
                 inst = self._instance(instance)
@@ -1573,10 +1574,12 @@ class BackendAPI(QObject):
                     data = vs.load(inst, version)
                     data["jvm_args"] = ""
                     vs.save(inst, version, data)
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                version_error = exc
             self._emit_ui_changed()
-            return {"ok": True, "message": "已清空自定义 JVM 参数"}
+            if version_error is not None:
+                return {"ok": False, "message": f"{tr('已清空自定义 JVM 参数')}；{tr('版本参数清除失败')}：{version_error}"}
+            return {"ok": True, "message": tr("已清空自定义 JVM 参数")}
 
         return {"ok": False, "message": f"未知动作: {aid}"}
 
