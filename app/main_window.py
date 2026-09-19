@@ -20,7 +20,7 @@ from .background import BackgroundLayer, WallpaperPlaylist
 from .fly_anim import fly_to
 from .pcl_chrome import (
     Theme, fade_stack_to, paint_theme_surfaces, ensure_theme_surfaces,
-    PclSideBar, PclTitleBar, TITLE_H, SIDE_W,
+    PclSideBar, PclTitleBar, TITLE_H, SIDE_W, install_infobar_offsets,
 )
 from .widgets import pick_color
 from .pages.launch_page import LaunchPage
@@ -611,6 +611,8 @@ class MainWindow(FluentWindowBase):
 
         bar = PclTitleBar(self)
         self.setTitleBar(bar)
+        # 挂在主窗口上的提示条：从标题栏下沿起算、对齐内容区，别压着标题栏
+        install_infobar_offsets()
 
         self._side_items = nav_items_from_config()
         self.side = PclSideBar(self._side_items, width=sidebar_width_from_config())

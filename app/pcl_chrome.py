@@ -104,6 +104,53 @@ TITLE_H = 40
 SIDE_W = 188
 
 
+def install_infobar_offsets() -> None:
+    """窗口级的顶部提示条从标题栏下沿起算，横向对齐内容区，不再压着标题栏。
+
+    InfoBar 挂在主窗口上（parent=window）时，qfluentwidgets 按整窗算位置：
+    y=24 正压在 40 高的标题栏上，x 按整窗居中、骑在侧栏和内容区的交界上，
+    滑入动画又从更高处起步。页面自己挂的提示条（parent=页面）本来就落在
+    标题栏下面 24px，这里把窗口级的挪到同一条线上，两种来源看着是一个位置。
+    只改「顶层窗口且带 titleBar」的情况，对话框、页面级提示条照旧。
+    """
+    from qfluentwidgets.components.widgets import info_bar as _ib
+
+    def _shift(manager_cls, align: str):
+        if getattr(manager_cls, "_pymcl_shifted", False):
+            return
+        orig = manager_cls._pos
+
+        def _pos(self, infoBar, parentSize=None, _orig=orig, _align=align):
+            pos = _orig(self, infoBar, parentSize)
+            p = infoBar.parent()
+            try:
+                if p is None or not p.isWindow():
+                    return pos
+                bar = getattr(p, "titleBar", None)
+                if bar is None:
+                    return pos
+                pos.setY(pos.y() + bar.height())
+                side = getattr(p, "side", None)
+                if side is None or not side.isVisible():
+                    return pos
+                width = parentSize.width() if parentSize is not None else p.width()
+                sw = side.width()
+                if _align == "center":
+                    pos.setX(sw + max(0, (width - sw - infoBar.width()) // 2))
+                elif _align == "left":
+                    pos.setX(sw + self.margin)
+            except RuntimeError:
+                pass
+            return pos
+
+        manager_cls._pos = _pos
+        manager_cls._pymcl_shifted = True
+
+    _shift(_ib.TopInfoBarManager, "center")
+    _shift(_ib.TopLeftInfoBarManager, "left")
+    _shift(_ib.TopRightInfoBarManager, "right")
+
+
 def rgba(color: str, opacity: int) -> str:
     """`#RRGGBB` + 0–100 不透明度 → QSS 的 `rgba(...)`；满值时原样返回。
 

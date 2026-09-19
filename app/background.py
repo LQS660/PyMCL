@@ -136,6 +136,7 @@ class BackgroundLayer(QWidget):
         self._cache_key = None
         self._gen = 0              # 画面内容换一次加一，缓存靠它失效
         self._surfaces = weakref.WeakSet()  # 借了壁纸当底的页面
+        self._filtered = weakref.WeakSet()  # 装过事件钩子的页面（借过就一直挂着，见 _paint_lent_backdrop）
         self._adopting = False     # 正在铺刷子，挡住自己触发的 PaletteChange
         self._player = None
         self._sink = None
@@ -393,8 +394,9 @@ class BackgroundLayer(QWidget):
             return False
         # 先挂上钩子再说：页面刚构造时往往还没布局，这一刻裁不出对得上的片，
         # 等它 Show / Resize 了再借一次。不挂就永远等不到第二次机会。
-        if widget not in self._surfaces:
-            self._surfaces.add(widget)
+        self._surfaces.add(widget)
+        if widget not in self._filtered:
+            self._filtered.add(widget)
             widget.installEventFilter(self)
         crop = None if self._player is not None else self._crop_for(widget)
         if crop is None:
@@ -415,17 +417,19 @@ class BackgroundLayer(QWidget):
         return True
 
     def release_surface(self, widget):
-        """不再借了（换回纯色壁纸）：摘钩子，底交还给调用方。
+        """不再借了（换回纯色壁纸）：不再跟着重裁，底交还给调用方。
 
         这里**不动调色板**：纯色模式下页面的底是 paint_theme_surfaces 刚
         刷好的实色 Theme.bg，在这儿顺手清成透明会把它变回非不透明控件，
         整棵树又得每帧重画一遍（实测 51ms → 518ms 的那一下）。
+        事件钩子也**留着**：页面还标着 WA_OpaquePaintEvent，Qt 不会替它铺
+        调色板底，那一笔仍由 _paint_lent_backdrop 补——这时刷子已经是实色
+        Theme.bg，不补的话页面底下残留的是上一张壁纸。
         """
         if widget is None or widget not in self._surfaces:
             return
         self._surfaces.discard(widget)
         try:
-            widget.removeEventFilter(self)
             widget.setProperty("pymclLentWallpaper", False)
         except RuntimeError:
             pass
@@ -458,16 +462,44 @@ class BackgroundLayer(QWidget):
                 QEvent.PaletteChange, QEvent.StyleChange)
 
     def eventFilter(self, obj, event):
-        """借出去那块一有风吹草动就重借一次。
+        """借出去那块一有风吹草动就重借一次；每次重绘先替它铺底。
 
         Resize / Move / Show：裁片得跟着走，否则页面上那块壁纸跟侧栏旁边的
         接不上缝。PaletteChange / StyleChange：主题重刷、样式表重新 polish
         都会把调色板连同我们铺的刷子一起抹掉——不补回来就会悄悄退回「整棵树
         每帧重新合成」的慢路，而且画面上看不出来，只有帧率知道。
+        Paint：见 _paint_lent_backdrop。
         """
-        if event.type() in self._WATCHED and not self._adopting:
+        et = event.type()
+        if et == QEvent.Paint:
+            self._paint_lent_backdrop(obj, event)
+            return False
+        if et in self._WATCHED and not self._adopting and obj in self._surfaces:
             self.adopt_surface(obj)
         return False
+
+    @staticmethod
+    def _paint_lent_backdrop(widget, event):
+        """标了 WA_OpaquePaintEvent 的页面根，在它自己的 paintEvent 之前把底铺上。
+
+        Qt 只给没标不透明的控件走 paintBackground——autoFillBackground 的调色板
+        刷子就是在那一步铺的。adopt_surface 把裁片挂进调色板又标了不透明，等于
+        告诉 Qt「这块我自己画」，可页面根本不会画：借出去那块就是一片没人画的
+        黑，切回纯色后残留的是上一张壁纸，顶上滑过的提示条还会留拖影。这里在
+        Paint 事件送到控件之前补上这一笔：借着壁纸时刷子是裁片，还回去后是
+        paint_theme_surfaces 刷好的实色 Theme.bg，两种情况一句 fillRect 都对。
+        """
+        try:
+            if not widget.testAttribute(Qt.WA_OpaquePaintEvent):
+                return
+            brush = widget.palette().brush(QPalette.ColorRole.Window)
+        except RuntimeError:
+            return
+        if brush.style() == Qt.NoBrush:
+            return
+        painter = QPainter(widget)
+        painter.fillRect(event.rect(), brush)
+        painter.end()
 
     def _crop_for(self, widget):
         """widget 盖住的那块壁纸（窗口坐标）。露到层外就返回 None，不接管。"""
