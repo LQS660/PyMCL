@@ -13,7 +13,7 @@ from enum import Enum
 
 class StopReason(str, Enum):
     COMPLETED      = "completed"        # 模型主动收尾，没有待办
-    NO_TOOL_CALL   = "no_tool_call"     # 模型只说话没动手（★最常见）
+    NO_TOOL_CALL   = "no_tool_call"     # 用户要它动手（下载/安装/改配置）它却只说话；问答闲聊回文字算 COMPLETED
     MAX_ROUNDS     = "max_rounds"       # 撞到 MAX_TOOL_ROUNDS
     TRUNCATED      = "truncated"        # 输出撞 max_tokens
     PENDING_TASK   = "pending_task"     # 有后台任务还在跑

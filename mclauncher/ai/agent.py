@@ -6,6 +6,7 @@ from __future__ import annotations
 import inspect
 import json
 import random
+import re
 import time
 import uuid
 
@@ -87,6 +88,67 @@ def _to_phase(turn: TurnState, phase: TurnPhase) -> None:
             turn.transition(phase)
     except IllegalTransition as exc:
         trace.record("illegal_transition", phase=turn.phase.value, exc=exc)
+
+
+# ---- 「只回了文字」到底算不算没干活 -------------------------------------
+# NO_TOOL_CALL 原来的口径是「一轮下来没调过工具」，于是「你好」「1.20.1 有啥新东西」
+# 这类本来就该用文字回答的回合也被打成没动手，三端都弹「它没有真的开始执行」。
+# 这里按用户那句话判：要求下载 / 安装 / 改配置这类得调工具才办得到的事，模型却
+# 光说话，才是真的没动手；问答、闲聊回文字就是完成。模型嘴上说「已经装好了」
+# 而工具轨迹是空的，也算没动手——那是在编。
+_ACTION_RE = re.compile(
+    r"下载|安装|重装|卸载|装(?:个|一下|上|好|到|进|下)|删(?:除|掉|了|个|一下)|移除"
+    r"|清(?:理|掉|空|一下)|修(?:复|好|一下|下)|修改|改(?:成|为|一下|下|掉|到|个)"
+    r"|设(?:置|成|为|定|到)|配置|调(?:成|到|整|一下|大|小|高|低)|换(?:成|到|个|一下)"
+    r"|切(?:换|到|成)|开(?:启|一下|下)|关(?:闭|掉|上|一下)|打开|启动|运行|跑(?:一下|起来|个)"
+    r"|导入|导出|更新|升级|备份|恢复|还原|重启|添加|加(?:个|上|一下|进|到)|新建|创建"
+    r"|重命名|迁移|帮我|给我|替我|干活|搞定|弄(?:好|一下|个)|试试|继续|开始|执行|动手"
+    r"|\b(?:install|download|uninstall|remove|delete|clean|fix|repair|set|change|configure"
+    r"|config|enable|disable|turn (?:on|off)|switch|launch|start|run|import|export|update"
+    r"|upgrade|back ?up|restore|add|create|rename|migrate|do it|go ahead|continue|proceed)\b",
+    re.IGNORECASE,
+)
+# 问法：「怎么安装 Fabric」是在问，不是在派活——除非同时带着「帮我 / 请 / 把」
+_QUESTION_RE = re.compile(
+    r"怎么|怎样|如何|为什么|为啥|什么|哪(?:个|些|里|儿)|是不是|能不能|可不可以|区别|介绍"
+    r"|解释|说说|讲讲|意思|吗[？?]?\s*$|[？?]\s*$"
+    r"|\b(?:how|what|why|which|where|when|does|do|is|are|should)\b",
+    re.IGNORECASE,
+)
+_DELEGATE_RE = re.compile(
+    r"帮我|给我|替我|请你?|麻烦|把|\b(?:can you|could you|would you|please|go ahead|do it)\b",
+    re.IGNORECASE,
+)
+_CLAIM_RE = re.compile(
+    r"(?:已经?|正在|马上|现在)(?:帮你|为你|给你)?(?:开始)?"
+    r"(?:下载|安装|重装|卸载|删除|移除|清理|修复|修改|设置|配置|调整|切换|开启|关闭|打开"
+    r"|启动|导入|导出|更新|升级|备份|恢复|重启|添加|创建|重命名|迁移)"
+    r"|(?:下载|安装|删除|清理|修复|修改|设置|切换|导入|导出|更新|升级|备份|恢复|添加)"
+    r"(?:完成|好了|成功|完毕)"
+    r"|\bI(?:'ve| have) (?:installed|downloaded|removed|deleted|updated|set|changed|configured"
+    r"|enabled|disabled|fixed|added|created)\b"
+    r"|\b(?:installing|downloading|removing|updating|configuring) (?:it|now|the)\b",
+    re.IGNORECASE,
+)
+
+
+def wants_action(user_text: str) -> bool:
+    """用户这句话是不是在要求动手（得调工具才办得到的事）。
+
+    带动作词才算；带动作词但整句是个问法（怎么 / 什么 / 吗 / ？）且没有
+    「帮我 / 请 / 把」这类派活语气的，按提问处理。
+    """
+    text = (user_text or "").strip()
+    if not text or not _ACTION_RE.search(text):
+        return False
+    if _QUESTION_RE.search(text) and not _DELEGATE_RE.search(text):
+        return False
+    return True
+
+
+def claims_action(reply: str) -> bool:
+    """模型的回复是不是在声称「已经做了 / 正在做」某件要调工具的事。"""
+    return bool(_CLAIM_RE.search(reply or ""))
 
 
 def run_agent(backend, settings: dict, history: list, user_text: str,
@@ -221,7 +283,22 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
         time.sleep(base * (0.8 + 0.4 * random.random()))
         _check()
 
+    def _looks_like_request(text: str) -> bool:
+        """用户这句像不像「要我动手」：像才把只回文字判成 NO_TOOL_CALL。
+
+        打招呼、问概念、追问原因，模型只回文字是正常收尾，不该被标成「没有真的
+        开始执行」——那句提示会被两端拼进正文并入库，下一轮模型读到自己上一句后面
+        挂着这话，容易误判成要补动作。词表与问法过滤见模块级 wants_action。
+        """
+        return wants_action(text)
+
     def _result(text, reason, **kw):
+        # 只回文字算不算没动手，统一在这儿裁决（所有 NO_TOOL_CALL 出口都经过这里）：
+        # 用户没派活、模型也没自称干了什么 → 就是一次正常的文字回答
+        if reason == StopReason.NO_TOOL_CALL and not _looks_like_request(user_text) \
+                and not claims_action(text):
+            reason = StopReason.COMPLETED
+            kw.pop("detail", None)
         res = AgentResult(text, stop_reason=reason, **kw)
         try:
             # 本回合完整轨迹（不含 system 头），供 UI 持久化（W5-1）
@@ -473,6 +550,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     _to_phase(turn, TurnPhase.COMPLETING)
                     return _result(_full(content), StopReason.COMPLETED,
                                    rounds_used=rounds_used)
+                # 问答 / 闲聊只回文字算不算没动手，由 _result 统一裁决
                 _to_phase(turn, TurnPhase.COMPLETING)
                 return _result(_full(content), StopReason.NO_TOOL_CALL,
                                detail="模型只回了文字，没有调用任何工具",
