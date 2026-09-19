@@ -15,14 +15,34 @@ from mclauncher import utils
 
 # 测试可以把它指到临时目录；None = 默认 utils.ROOT/cache/ai_trace
 TRACE_DIR = None
+# 按天一个文件，只留最近 KEEP_DAYS 天；每个进程清一次
+KEEP_DAYS = 14
 
 _LOCK = threading.Lock()
+_pruned = False
 
 
 def _dir():
     if TRACE_DIR is not None:
         return utils.ensure_dir(TRACE_DIR)
     return utils.ensure_dir(utils.ROOT / "cache" / "ai_trace")
+
+
+def _prune_once() -> None:
+    global _pruned
+    if _pruned:
+        return
+    _pruned = True
+    try:
+        cutoff = datetime.datetime.now().timestamp() - KEEP_DAYS * 86400
+        for p in _dir().glob("*.jsonl"):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink()
+            except OSError:
+                pass
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def record(event: str, *, round_=None, phase="", tool_name="", exc=None,
@@ -49,6 +69,7 @@ def record(event: str, *, round_=None, phase="", tool_name="", exc=None,
         path = _dir() / f"{day}.jsonl"
         line = json.dumps(entry, ensure_ascii=False)
         with _LOCK:
+            _prune_once()
             with open(path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
     except Exception:  # noqa: BLE001

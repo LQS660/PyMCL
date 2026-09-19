@@ -12,12 +12,42 @@ from mclauncher import utils
 ARTIFACTS_DIR = None
 
 HEAD_LINES = 120
+# 只增不删会把 cache 撑爆：保留最近 KEEP_DAYS 天、最多 KEEP_FILES 个，每个进程清一次
+KEEP_DAYS = 7
+KEEP_FILES = 300
+_pruned = False
 
 
 def _dir():
     if ARTIFACTS_DIR is not None:
         return utils.ensure_dir(ARTIFACTS_DIR)
     return utils.ensure_dir(utils.ROOT / "cache" / "ai_results")
+
+
+def prune(days: int = KEEP_DAYS, keep: int = KEEP_FILES) -> int:
+    """删过期 / 超量的 artifact，返回删掉的个数。任何失败都吞掉。"""
+    removed = 0
+    try:
+        files = sorted(_dir().glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+        cutoff = datetime.datetime.now().timestamp() - days * 86400
+        for i, p in enumerate(files):
+            try:
+                if i >= keep or p.stat().st_mtime < cutoff:
+                    p.unlink()
+                    removed += 1
+            except OSError:
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+    return removed
+
+
+def _prune_once() -> None:
+    global _pruned
+    if _pruned:
+        return
+    _pruned = True
+    prune()
 
 
 def _fmt_size(n: int) -> str:
@@ -35,6 +65,7 @@ def artifact_id(text: str) -> str:
 def save(text: str, tool_name: str = "") -> str:
     """把全文写盘，返回文件路径（供 read_artifact 用）。失败返回空串。"""
     try:
+        _prune_once()
         day = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         name = f"{day}-{artifact_id(text)}.txt"
         path = _dir() / name
@@ -65,9 +96,14 @@ def store(text: str, tool_name: str = "") -> str:
 def read_artifact(rel_or_name: str, offset: int = 0, limit: int = 200) -> str:
     """按行回读 artifact。offset/limit 都是行号（0 起）。"""
     name = str(rel_or_name or "").strip().replace("\\", "/").split("/")[-1]
-    if not name or "/" in name or ".." in name:
+    # 「D:xxx」这种盘符相对路径在 Windows 上会让 Path(dir) / name 直接换盘，
+    # 只挡 / 和 .. 不够；名字里不许有冒号，拼出来的路径还要落在目录本身里。
+    if not name or "/" in name or ".." in name or ":" in name:
         return "无效的 artifact 名"
-    path = _dir() / name
+    base = _dir().resolve()
+    path = (base / name).resolve()
+    if path.parent != base:
+        return "无效的 artifact 名"
     try:
         text = path.read_text(encoding="utf-8")
     except Exception:  # noqa: BLE001

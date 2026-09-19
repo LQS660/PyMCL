@@ -9,6 +9,8 @@ from typing import Iterator
 import requests
 from requests.exceptions import ReadTimeout, ChunkedEncodingError
 
+from mclauncher.net import apply_direct_to_session
+
 from . import builtin
 from .defaults import (
     CLIENT_HEADER, DEFAULT_GATEWAY_URL, DEFAULT_MODEL,
@@ -160,12 +162,20 @@ def resolve_endpoint(settings: dict) -> dict:
     }
 
 
+def _session() -> requests.Session:
+    """代理策略跟全项目一致（net.py：默认跟随系统代理，用户关掉才直连）。
+
+    以前这里三处硬写 proxies={"http": None, "https": None}，AI 成了唯一强制直连的
+    模块：走代理的用户下载正常、AI 连不上。
+    """
+    session = requests.Session()
+    apply_direct_to_session(session)
+    return session
+
+
 def test_connection(settings: dict) -> str:
     ep = resolve_endpoint(settings)
-    r = requests.get(
-        ep["models_url"], headers=ep["headers"], timeout=15,
-        proxies={"http": None, "https": None},
-    )
+    r = _session().get(ep["models_url"], headers=ep["headers"], timeout=15)
     if r.status_code >= 400:
         raise AIClientError(_err_text(r), r.status_code)
     try:
@@ -232,12 +242,19 @@ def _decode_sse_line(raw) -> str:
     if raw is None:
         return ""
     if isinstance(raw, str):
-        if any("\u4e00" <= ch <= "\u9fff" for ch in raw):
+        # 已经是 str 的，只在「像被 latin-1 错解的 UTF-8 字节串」时才反解：
+        # 全部字符 ≤ 0xFF 且含 ≥ 0x80 的；反解成功后还要么原文里带 C1 控制符
+        # （0x80–0x9F，正常文本不会出现，UTF-8 续字节常落在这一段），要么解出了
+        # 中文，才采纳。否则 "café" / "Â©" 这类正常拉丁文会被改坏。
+        if not raw or any(ord(ch) > 0xFF for ch in raw) or all(ord(ch) < 0x80 for ch in raw):
             return raw
         try:
-            return raw.encode("latin-1").decode("utf-8")
+            fixed = raw.encode("latin-1").decode("utf-8")
         except (UnicodeDecodeError, UnicodeEncodeError):
             return raw
+        looks_mojibake = any(0x80 <= ord(ch) <= 0x9F for ch in raw) \
+            or any("\u4e00" <= ch <= "\u9fff" for ch in fixed)
+        return fixed if looks_mojibake else raw
     return raw.decode("utf-8", errors="replace")
 
 
@@ -275,7 +292,9 @@ def _assemble_stream(resp, expect_usage: bool = False) -> Iterator[dict]:
             line = _decode_sse_line(raw).strip()
             if line.startswith("data:"):
                 line = line[5:].strip()
-            if not line or line == "[DONE]":
+            if not line:
+                continue   # 空载荷 / 心跳行不是流结束，只有 [DONE] 才是
+            if line == "[DONE]":
                 tools = _flush_complete_tools(tool_acc) if tool_acc else None
                 if tools:
                     yield {"type": "tool_calls", "tool_calls": tools}
@@ -400,7 +419,7 @@ def chat_stream(settings: dict, messages: list, tools: list | None = None,
         # 公益网关是纯字节转发拿不到 usage；自定义 NewAPI 直连才请求计量
         body["stream_options"] = {"include_usage": True}
         expect_usage = True
-    session = requests.Session()
+    session = _session()
     if http_cancel:
         http_cancel.bind(session)
         if http_cancel.cancelled():
@@ -409,7 +428,6 @@ def chat_stream(settings: dict, messages: list, tools: list | None = None,
         resp = session.post(
             ep["url"], headers=ep["headers"], json=body,
             stream=True, timeout=(STREAM_CONNECT_TIMEOUT, STREAM_READ_TIMEOUT),
-            proxies={"http": None, "https": None},
         )
     except requests.RequestException as exc:
         raise _http_error(exc, http_cancel) from exc
@@ -435,7 +453,7 @@ def chat_once(settings: dict, messages: list, tools: list | None = None,
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
-    session = requests.Session()
+    session = _session()
     if http_cancel:
         http_cancel.bind(session)
         if http_cancel.cancelled():
@@ -443,7 +461,6 @@ def chat_once(settings: dict, messages: list, tools: list | None = None,
     try:
         resp = session.post(
             ep["url"], headers=ep["headers"], json=body, timeout=ONCE_TIMEOUT,
-            proxies={"http": None, "https": None},
         )
     except requests.RequestException as exc:
         raise _http_error(exc, http_cancel) from exc

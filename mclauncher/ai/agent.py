@@ -186,6 +186,10 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             trace.record("on_delta_error", round_=round_no[0], exc=exc)
 
     messages = _system_messages(backend, settings) + _trim_history(history)
+    # 这之后追加的都是本回合新产生的（用户这句 + 工具轨迹 + 续写），导出给 UI 持久化时
+    # 只取这一段，别把裁剪过的旧历史再抄一遍进去
+    base_len = len(messages)
+    compacted = [False]
     messages.append({"role": "user", "content": user_text})
     state_base = messages[1]["content"] if len(messages) > 1 and \
         messages[1].get("role") == "system" else ""
@@ -241,6 +245,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             trace.record("reactive_compact_failure", round_=round_, exc=exc)
             return False
         messages[:] = cres.messages
+        compacted[0] = True
         compact.note_compact_success(cstate)
         _status("compact", {"reason": "reactive", "pre": cres.pre_token_count,
                             "post": cres.post_token_count})
@@ -311,8 +316,22 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                          or export[-1].get("tool_calls")):
                 export.append({"role": "assistant", "content": str(text)})
             res.messages = export
+            # 只属于本回合的那一段（用户这句 + 工具轨迹 + 最终正文）：UI 往历史里
+            # 追加时用它，别把 messages 里抄来的旧历史再存一遍。压缩过就取不准了，
+            # 退回「用户这句 + 最终正文」。
+            if compacted[0]:
+                turn = [{"role": "user", "content": user_text}]
+            else:
+                turn = [dict(m) for m in messages[base_len:]
+                        if isinstance(m, dict) and m.get("role") != "system"]
+            if text and (not turn
+                         or turn[-1].get("role") != "assistant"
+                         or turn[-1].get("tool_calls")):
+                turn.append({"role": "assistant", "content": str(text)})
+            res.turn_messages = turn
         except Exception:  # noqa: BLE001
             res.messages = []
+            res.turn_messages = []
         return res
 
     session_id = str((settings or {}).get("ai_session_id") or "active")
@@ -373,6 +392,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 try:
                     cres = compact.compact_conversation(messages, auto_cfg, _summarize)
                     messages[:] = cres.messages
+                    compacted[0] = True
                     compact.note_compact_success(cstate)
                     _status("compact", {"reason": decision.reason,
                                         "pre": cres.pre_token_count,
@@ -479,9 +499,20 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                         raise
                     if isinstance(data.get("usage"), dict) and data["usage"]:
                         tokens_mod.update_from_usage(token_state, data["usage"], len(messages))
-                    if not text_parts and data.get("content"):
-                        text_parts.append(data["content"])
-                        _delta(data["content"])
+                    fb_content = data.get("content") or ""
+                    if fb_content and not text_parts:
+                        text_parts.append(fb_content)
+                        _delta(fb_content)
+                    elif fb_content and stream_failed:
+                        # 流中途断了、已经吐出半截：兜底拿回来的是完整正文，得采纳它，
+                        # 否则用户只看到半句还没有任何提示。界面上已经显示了前半截：
+                        # 是同一开头就只补后半截，不是就换行接完整版（ai.done 会整段覆盖）。
+                        partial = "".join(text_parts)
+                        if fb_content.startswith(partial):
+                            _delta(fb_content[len(partial):])
+                        else:
+                            _delta("\n\n" + fb_content)
+                        text_parts[:] = [fb_content]
                     if not tool_calls:
                         tool_calls = data.get("tool_calls") or []
                     truncated = truncated or data.get("finish_reason") == "length"
@@ -558,6 +589,16 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
 
             # ---- 工具阶段 ----
             turn.transition(TurnPhase.SCHEDULING_TOOLS)
+            # 个别网关会给同一批 tool_calls 重复的 id：decisions / set_tool_status 都按 id
+            # 索引，撞了就串号（第二个工具的结果落成空串）。这里先补齐再去重，
+            # 并写回 tool_calls，随后进 messages 的 assistant.tool_calls 与 tool 回执才对得上。
+            seen_ids: set = set()
+            for i, tc in enumerate(tool_calls):
+                cid = str(tc.get("id") or f"call_{round_no[0]}_{i}")
+                if cid in seen_ids:
+                    cid = f"{cid}_{i}"
+                seen_ids.add(cid)
+                tc["id"] = cid
             messages.append({"role": "assistant", "content": content or None,
                              "tool_calls": tool_calls})
             acted = True
@@ -566,7 +607,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             for i, tc in enumerate(tool_calls):
                 fn = tc.get("function") or {}
                 obj = turn.add_tool_call(ToolCall(
-                    id=tc.get("id") or f"call_{round_no[0]}_{i}",
+                    id=tc["id"],
                     name=fn.get("name") or "",
                     args=parse_args(fn.get("arguments"))))
                 tool_objs.append(obj)
@@ -628,7 +669,10 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 rv = _call_confirm(confirm_fn, obj.name, obj.args, label, reason)
                 if isinstance(rv, Rule):
                     rules = permission.apply_updates(rules, [rv])
-                    permission.append_rule(rv, instance_name)
+                    # 「始终允许」按卡片上选的范围落盘：默认只记当前实例，选了全局进 global
+                    scope_inst = None if getattr(rv, "scope", "") == permission.SCOPE_GLOBAL \
+                        else instance_name
+                    permission.append_rule(rv, scope_inst)
                     decisions[obj.id] = ("allow", "")
                 elif not rv:
                     decisions[obj.id] = ("deny", "用户拒绝了这次操作")

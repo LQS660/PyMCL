@@ -34,6 +34,11 @@ class AgentResult(str):
         obj.detail = str(detail or "")
         obj.pending_tasks = list(pending_tasks or [])
         obj.rounds_used = int(rounds_used)
+        # run_agent 填：messages = 模型侧完整历史（不含 system）；
+        # turn_messages = 只属于本回合的那一段（用户这句 + 工具轨迹 + 最终正文），
+        # UI 往聊天记录里追加时用后者，别把旧历史再抄一遍。
+        obj.messages = []
+        obj.turn_messages = []
         return obj
 
     @property

@@ -20,14 +20,33 @@ def _meta(name):
 
 class RuleContentTests(unittest.TestCase):
     def test_extraction_order(self):
-        """ruleContent 按固定优先级取第一个非空串（照抄 ZCode）。"""
+        """ruleContent 按固定优先级取第一个非空串（判定顺序照抄 ZCode）。"""
         self.assertEqual(
             rule_content_from_input({"url": "u", "command": "c"}),
             "c", "command 优先于 url")
         self.assertEqual(rule_content_from_input({"path": "p", "pattern": "x"}), "p")
         self.assertEqual(rule_content_from_input({"pattern": "x"}), "x")
-        self.assertIsNone(rule_content_from_input({"name": "钠"}))
         self.assertIsNone(rule_content_from_input({"path": "   "}),)
+        self.assertIsNone(rule_content_from_input({"instance": "demo"}),
+                          "instance 不是标识，不能当 ruleContent")
+
+    def test_launcher_tool_args_are_identifiers(self):
+        """启动器工具的标识键也算 ruleContent：勾「始终允许」记到同一项，不是整个工具。"""
+        self.assertEqual(rule_content_from_input({"name": "钠", "slug": "sodium"}), "sodium",
+                         "slug 比显示名稳定，优先")
+        self.assertEqual(rule_content_from_input({"name": "钠"}), "钠")
+        self.assertEqual(rule_content_from_input({"filename": "a.jar", "instance": "d"}), "a.jar")
+        self.assertEqual(rule_content_from_input({"version": "1.20.1", "loader": "Fabric"}), "1.20.1")
+        self.assertEqual(rule_content_from_input({"major": "17"}), "17")
+
+    def test_always_allow_on_delete_mod_stays_per_file(self):
+        """删一次 a.jar 勾了「始终允许」，删 b.jar 仍要问——这是改键表的理由。"""
+        args = {"filename": "a.jar", "instance": "demo"}
+        rule = Rule("delete_mod", rule_content_from_input(args), Behavior.ALLOW)
+        same = decide(_meta("delete_mod"), args, "default", [rule])
+        other = decide(_meta("delete_mod"), {"filename": "b.jar"}, "default", [rule])
+        self.assertEqual(same.decision, Decision.ALLOW)
+        self.assertEqual(other.decision, Decision.ASK)
 
 
 class DecideTests(unittest.TestCase):
@@ -152,6 +171,31 @@ class RuleStoreTests(unittest.TestCase):
         self.assertTrue(perm.remove_rule(key))
         self.assertEqual(perm.load_rules(), [])
         self.assertFalse(perm.remove_rule(key))
+
+    def test_remove_rule_scoped_to_one_section(self):
+        """同一条规则全局、实例各存一份时，界面点删哪行只删哪行。"""
+        perm.append_rule(Rule("install_mod", None, Behavior.ALLOW))
+        perm.append_rule(Rule("install_mod", None, Behavior.ALLOW), "demo")
+        key = Rule("install_mod", None, Behavior.ALLOW).key()
+        self.assertTrue(perm.remove_rule(key, instance="demo"))
+        rows = perm.list_stored_rules()
+        self.assertEqual([r["instance"] for r in rows], [""], "全局那条得留着")
+        self.assertTrue(perm.remove_rule(key, instance=""))
+        self.assertEqual(perm.list_stored_rules(), [])
+
+    def test_list_rows_carry_instance_for_frontends(self):
+        perm.append_rule(Rule("write_mod_config", "config/a.toml", Behavior.DENY), "demo")
+        row = perm.list_stored_rules()[0]
+        self.assertEqual((row["toolName"], row["ruleContent"], row["behavior"], row["instance"]),
+                         ("write_mod_config", "config/a.toml", "deny", "demo"))
+
+    def test_rule_scope_default_is_instance(self):
+        """Rule.scope 只影响落盘位置，不进 key，也不影响去重。"""
+        a = Rule("install_mod", "sodium", Behavior.ALLOW)
+        b = Rule("install_mod", "sodium", Behavior.ALLOW, scope=perm.SCOPE_GLOBAL)
+        self.assertEqual(a.scope, perm.SCOPE_INSTANCE)
+        self.assertEqual(a.key(), b.key())
+        self.assertEqual(len(dedupe_rules([a, b])), 1)
 
 
 if __name__ == "__main__":

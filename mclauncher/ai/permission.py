@@ -45,8 +45,16 @@ class Decision(str, Enum):
     MODIFY   = "modify"
 
 
-# ruleContent 从工具入参里按固定优先级取第一个非空字符串（照抄 ZCode）
-RULE_CONTENT_KEYS = ("command", "url", "file_path", "path", "pattern")
+# ruleContent 从工具入参里按固定优先级取第一个非空字符串（判定顺序照抄 ZCode）。
+# 前五个是 ZCode 的原键；后面几个是启动器工具真正用的标识：模组 slug / 名字、
+# 模组文件名、游戏版本、Java 大版本。没有它们，「始终允许」会落成整个工具级
+# （勾一次 delete_mod 以后删任何模组都不问），与卡片上写的「同一项不再询问」不符。
+RULE_CONTENT_KEYS = ("command", "url", "file_path", "path", "pattern",
+                     "filename", "slug", "name", "version", "major")
+
+# 规则记忆范围：只记到当前实例，或记成全局
+SCOPE_INSTANCE = "instance"
+SCOPE_GLOBAL = "global"
 
 
 @dataclass
@@ -54,6 +62,8 @@ class Rule:
     tool_name: str
     rule_content: str | None = None
     behavior: Behavior = Behavior.ALLOW
+    # 只在「始终允许」回传时有意义：决定 append_rule 落到 per_instance 还是 global
+    scope: str = SCOPE_INSTANCE
 
     def key(self) -> str:
         return f"{self.tool_name}\0{self.rule_content or ''}"
@@ -150,6 +160,13 @@ def decide(tool_meta, args, mode, rules) -> PermissionResult:
                                (Behavior.ASK, Decision.ASK)):
         for r in matched:
             if r.behavior == behavior:
+                if decision == Decision.ALLOW and not r.rule_content \
+                        and side_effect == "delete":
+                    # 删除类不吃「整工具级」放行：delete_mod / delete_instance 的参数键
+                    # （filename / name）不在 RULE_CONTENT_KEYS 里，确认卡上勾一次
+                    # 「以后都允许」生成的就是这种无 ruleContent 的规则，照单全收等于
+                    # 以后删什么都不问。带具体目标的放行规则仍然有效。
+                    continue
                 rid = f"rule.{r.tool_name}.{r.behavior.value}"
                 if decision == Decision.DENY:
                     return PermissionResult(Decision.DENY, reason="这条操作被你的规则禁止",
@@ -231,7 +248,15 @@ def permission_note(settings: dict) -> str:
         return (
             "[权限设置] 写操作会直接执行；删除实例、删除模组前仍会先询问，要等用户点了才执行。"
         )
-    return ""
+    if mode == PermissionMode.DONT_ASK.value:
+        return "[权限设置] 用户选了「不询问」：需要确认的写操作会被直接拒绝，只读查看照常。"
+    if mode == PermissionMode.EDIT.value:
+        return "[权限设置] 文件类修改直接执行；安装、删除、启动前会弹确认，要等用户点了才执行。"
+    # default / custom：每一步写操作都会弹确认
+    return (
+        "[权限设置] 安装、删除、禁用、改配置、启动这类写操作执行前都会弹确认，"
+        "用户点了才会真的执行；查看类操作不弹。被拒绝时不要重复发起同一操作，改为说明原因。"
+    )
 
 
 # ---------------------------------------------------------------- 规则落盘（W1-5）
@@ -327,7 +352,11 @@ _BEHAVIOR_LABELS = {Behavior.ALLOW: "允许", Behavior.DENY: "禁止", Behavior.
 
 
 def list_stored_rules() -> list:
-    """平铺 store 里的规则（global + per_instance），供设置界面展示。"""
+    """平铺 store 里的规则（global + per_instance），供设置界面展示。
+
+    每行带 instance（全局为空串）让前端自己拼范围文案；scope 是现成的中文标签，
+    Qt 端直接用。
+    """
     store = load_rule_store()
     out = []
     for bucket, behavior in (("allow", Behavior.ALLOW), ("deny", Behavior.DENY),
@@ -342,6 +371,7 @@ def list_stored_rules() -> list:
                 "ruleContent": r.rule_content or "",
                 "behavior": behavior.value,
                 "behavior_label": _BEHAVIOR_LABELS[behavior],
+                "instance": "",
                 "scope": "全局",
             })
     for inst, section in store["per_instance"].items():
@@ -357,15 +387,26 @@ def list_stored_rules() -> list:
                     "ruleContent": r.rule_content or "",
                     "behavior": behavior.value,
                     "behavior_label": _BEHAVIOR_LABELS[behavior],
+                    "instance": inst,
                     "scope": f"实例 {inst}",
                 })
     return out
 
 
 def remove_rule(key: str, instance: str | None = None) -> bool:
-    """按 Rule.key() 删规则；不指定实例时在所有段里找。返回是否删到了。"""
+    """按 Rule.key() 删规则。
+
+    instance 为 None 时在所有段里找（旧行为）；传 "" 只删全局那条，传实例名只删
+    该实例那条——同一条规则可能全局、实例各存一份，界面上点删哪行就该只删哪行。
+    返回是否删到了。
+    """
     store = load_rule_store()
-    sections = [store["global"]] + list(store["per_instance"].values())
+    if instance is None:
+        sections = [store["global"]] + list(store["per_instance"].values())
+    elif instance == "":
+        sections = [store["global"]]
+    else:
+        sections = [store["per_instance"].get(instance) or {}]
     removed = False
     for section in sections:
         for bucket in ("allow", "deny", "ask"):

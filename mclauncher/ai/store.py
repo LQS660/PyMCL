@@ -16,7 +16,8 @@ MAX_CHATS = 40
 # 200 条 + 批次 3 的压缩共同控制真实体积；24 条会丢光工具上下文
 MAX_MESSAGES = 200
 
-_KEEP_FIELDS = ("tool_calls", "tool_call_id", "name", "id")
+# note = 「为什么停」的提示，只给界面渲染；api_messages 不会把它喂给模型
+_KEEP_FIELDS = ("tool_calls", "tool_call_id", "name", "id", "note")
 
 # 会话事件日志目录；测试可覆盖。None = 默认 utils.ROOT/cache/ai_sessions
 SESSIONS_DIR = None
@@ -165,6 +166,26 @@ def upsert_messages(data: dict, cid: str, messages: list, title: str | None = No
     save(data)
 
 
+def prune_empty(data: dict) -> None:
+    """清掉历史累积的空会话（没有一条消息的「新对话」）。
+
+    最早因每次进页面都建新会话攒了一长串空条目。保留当前激活的空会话
+    （没有就保留最新一个），其余全部丢弃。chats 列表由 upsert 按 updated
+    倒序维护，empties[0] 即最新。
+    """
+    chats = data.get("chats") or []
+    empties = [c for c in chats if not (c.get("messages") or [])]
+    if len(empties) <= 1:
+        return
+    active = data.get("active_id")
+    keep = next((c for c in empties if c.get("id") == active), empties[0])
+    drop = {c["id"] for c in empties if c["id"] != keep["id"]}
+    data["chats"] = [c for c in chats if c.get("id") not in drop]
+    if data.get("active_id") in drop:
+        data["active_id"] = (data["chats"][0]["id"] if data["chats"] else "")
+    save(data)
+
+
 def delete_chat(data: dict, cid: str) -> dict:
     data["chats"] = [c for c in (data.get("chats") or []) if c.get("id") != cid]
     if not data["chats"]:
@@ -179,6 +200,31 @@ def delete_chat(data: dict, cid: str) -> dict:
 
 # ---------------------------------------------------------------- 会话事件日志
 
+# 事件日志只增不删会一直长；每个进程第一次写的时候清一次 30 天前的、
+# 单文件超过 EVENT_LOG_MAX_BYTES 的直接截掉重来（它是排障骨架，不是持久化）。
+EVENT_LOG_KEEP_DAYS = 30
+EVENT_LOG_MAX_BYTES = 4 * 1024 * 1024
+_event_pruned = False
+
+
+def _prune_event_logs(d) -> None:
+    global _event_pruned
+    if _event_pruned:
+        return
+    _event_pruned = True
+    try:
+        cutoff = time.time() - EVENT_LOG_KEEP_DAYS * 86400
+        for p in d.glob("*.jsonl"):
+            try:
+                st = p.stat()
+                if st.st_mtime < cutoff or st.st_size > EVENT_LOG_MAX_BYTES:
+                    p.unlink()
+            except OSError:
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def log_event(session_id: str, event: str, **fields) -> None:
     """cache/ai_sessions/<session_id>.jsonl：正常流程骨架，与 trace 分工。
 
@@ -188,6 +234,7 @@ def log_event(session_id: str, event: str, **fields) -> None:
         d = SESSIONS_DIR if SESSIONS_DIR is not None \
             else utils.ROOT / "cache" / "ai_sessions"
         utils.ensure_dir(d)
+        _prune_event_logs(d)
         entry = {
             "ts": datetime.datetime.now().isoformat(timespec="milliseconds"),
             "event": str(event or ""),

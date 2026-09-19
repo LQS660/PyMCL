@@ -386,14 +386,24 @@ def runtime_context(backend) -> str:
         return f"状态读取失败: {exc}"
 
 
+_CJK_DM = None
+
+
+def _cjk_downloader() -> DownloadManager:
+    """中文搜索用的下载器：整个进程复用一个，别每搜一次就新建一个 Session。"""
+    global _CJK_DM
+    if _CJK_DM is None:
+        _CJK_DM = DownloadManager(threads=2)
+    return _CJK_DM
+
+
 def _search_mods(backend, query, source):
     src = source or "全部"
     rows = []
     if _cjk(query):
         try:
-            dm = DownloadManager(threads=2)
             hits = mods_mod.search_mods_chinese(
-                dm, query, limit=20, api_key=CONFIG.get("curseforge_api_key"))
+                _cjk_downloader(), query, limit=20, api_key=CONFIG.get("curseforge_api_key"))
             for h in hits:
                 rows.append({
                     "name": h.get("title") or h.get("name"),
@@ -489,8 +499,7 @@ def execute_tool(backend, name: str, args: dict, wait=True, cancelled=None):
             if q and q not in vid.lower():
                 continue
             if kind not in ("", "all") and (r.get("type") or "") != kind:
-                if not (kind == "release" and r.get("type") == "release"):
-                    continue
+                continue
             out.append(r)
             if len(out) >= 20:
                 break
@@ -572,12 +581,15 @@ def execute_tool(backend, name: str, args: dict, wait=True, cancelled=None):
         }
         tid = backend.install_world(args.get("name"), inst_name, extra)
         return backend.wait_task(tid, cancelled=cancelled) if wait else {"task_id": tid, "queued": True}
+    # 建实例 / 禁用 / 启用一律走 backend 的同名方法（和 delete_mod 一样）：
+    # 两个后端都有，而且各自负责通知界面刷新。以前这里直接 backend.ui_changed.emit()，
+    # 桥的 BackendAPI 没有这个 Signal，动作做完才 AttributeError，模型收到「工具失败」
+    # 就会重试——实例建两个、模组「不存在」。
     if name == "create_instance":
         raw = args.get("name") or "游戏"
-        inst = Instance(unique_instance_name(raw))
-        inst.create()
-        backend.ui_changed.emit()
-        return f"已创建实例 {inst.name}"
+        new_name = unique_instance_name(raw)
+        backend.create_instance(new_name)
+        return f"已创建实例 {new_name}"
     if name == "delete_instance":
         backend.delete_instance(args.get("name"))
         return f"已删除实例 {args.get('name')}"
@@ -585,12 +597,10 @@ def execute_tool(backend, name: str, args: dict, wait=True, cancelled=None):
         backend.delete_mod(inst_name, args.get("filename"))
         return f"已删除 {args.get('filename')}"
     if name == "disable_mod":
-        new = mods_mod.set_mod_enabled(backend._instance(inst_name), args.get("filename"), False)
-        backend.ui_changed.emit()
+        new = backend.disable_mod(inst_name, args.get("filename"))
         return f"已禁用 → {new}"
     if name == "enable_mod":
-        new = mods_mod.set_mod_enabled(backend._instance(inst_name), args.get("filename"), True)
-        backend.ui_changed.emit()
+        new = backend.enable_mod(inst_name, args.get("filename"))
         return f"已启用 → {new}"
     if name == "get_java_list":
         return backend.get_java_list(False)
