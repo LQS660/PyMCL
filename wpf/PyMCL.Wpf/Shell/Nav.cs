@@ -299,6 +299,11 @@ public partial class MainWindow
             if (nowOpen)
             {
                 panel.Visibility = Visibility.Visible;
+                // 量自然高度之前先把上一轮可能还钳着的高度动画摘掉、恢复自动尺寸：
+                // 收起动画没播完就又点开时，Height 仍被动画钳在中间值，Measure 量出来就是那个值，
+                // 展开动画会停在半截；HoldEnd 钳在 0 的老问题也是同一条路（Motion.AnimateLength 已在播完时摘）。
+                panel.BeginAnimation(FrameworkElement.HeightProperty, null);
+                panel.Height = double.NaN;
                 panel.Measure(new Size(SideCol.Width.Value, double.PositiveInfinity));
                 var h = panel.DesiredSize.Height;
                 panel.Height = 0;

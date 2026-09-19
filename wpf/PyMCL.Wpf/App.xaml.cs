@@ -11,11 +11,6 @@ public partial class App : Application
 {
     public static bool IsDark { get; private set; }
 
-    [System.Runtime.InteropServices.DllImport("user32.dll")]
-    private static extern int GetWindowLong(IntPtr hwnd, int index);
-    [System.Runtime.InteropServices.DllImport("user32.dll")]
-    private static extern int SetWindowLong(IntPtr hwnd, int index, int value);
-
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -61,24 +56,6 @@ public partial class App : Application
         {
             // 运行期冒烟：自带看门狗，跑完自己退，不会留窗口等人点
             Smoke.Run(e.Args);
-            return;
-        }
-        if (e.Args.Contains("--nav-test"))
-        {
-            // 临时调试入口：静默起一个不激活、不上任务栏、屏幕外的窗口，
-            // 供后台（无障碍注入）驱动侧栏点击排查用，查完删掉。
-            var win = new MainWindow();
-            win.ShowActivated = false;
-            win.ShowInTaskbar = false;
-            win.WindowStartupLocation = WindowStartupLocation.Manual;
-            win.Left = 200;
-            win.Top = 120;
-            win.SourceInitialized += (_, _) =>
-            {
-                var hwnd = new WindowInteropHelper(win).Handle;
-                SetWindowLong(hwnd, -20, GetWindowLong(hwnd, -20) | 0x08000000); // WS_EX_NOACTIVATE
-            };
-            win.Show();
             return;
         }
         new MainWindow().Show();

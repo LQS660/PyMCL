@@ -243,33 +243,37 @@ public static class Motion
         CompositionTarget.Rendering += tick;
     }
 
-    /// <summary>宽/高的平滑变化（用于侧栏折叠、面板展开）。</summary>
-    public static void AnimateWidth(FrameworkElement el, double to, double ms = 220, Action? done = null)
-    {
-        if (!Enabled)
-        {
-            el.Width = to;
-            done?.Invoke();
-            return;
-        }
-        var from = double.IsNaN(el.Width) ? el.ActualWidth : el.Width;
-        var an = new DoubleAnimation(from, to, D(ms)) { EasingFunction = EaseOut };
-        if (done != null) an.Completed += (_, _) => done();
-        el.BeginAnimation(FrameworkElement.WidthProperty, an);
-    }
+    /// <summary>
+    /// 宽/高的平滑变化（用于侧栏折叠、面板展开）。
+    /// 播完必须把动画从属性上摘掉：DoubleAnimation 默认 HoldEnd，会一直钳着 Width/Height，
+    /// 调用方之后写的 Height = NaN 落不下去，再 Measure 量到的就是被钳住的旧值
+    /// （侧栏分区开→关→开，第三下没反应就是这个）。
+    /// </summary>
+    public static void AnimateWidth(FrameworkElement el, double to, double ms = 220, Action? done = null) =>
+        AnimateLength(el, FrameworkElement.WidthProperty, double.IsNaN(el.Width) ? el.ActualWidth : el.Width, to, ms, done);
 
-    public static void AnimateHeight(FrameworkElement el, double to, double ms = 220, Action? done = null)
+    public static void AnimateHeight(FrameworkElement el, double to, double ms = 220, Action? done = null) =>
+        AnimateLength(el, FrameworkElement.HeightProperty, double.IsNaN(el.Height) ? el.ActualHeight : el.Height, to, ms, done);
+
+    private static void AnimateLength(FrameworkElement el, DependencyProperty prop, double from, double to, double ms, Action? done)
     {
         if (!Enabled)
         {
-            el.Height = to;
+            // 动画开关是运行期可切的：之前播过的动画可能还钳着，先摘掉再赋值才落得下去
+            el.BeginAnimation(prop, null);
+            el.SetValue(prop, to);
             done?.Invoke();
             return;
         }
-        var from = double.IsNaN(el.Height) ? el.ActualHeight : el.Height;
         var an = new DoubleAnimation(from, to, D(ms)) { EasingFunction = EaseOut };
-        if (done != null) an.Completed += (_, _) => done();
-        el.BeginAnimation(FrameworkElement.HeightProperty, an);
+        an.Completed += (_, _) =>
+        {
+            // 终值先落成本地值再摘动画，done 里再把它改成 NaN（自动尺寸）才有效
+            el.BeginAnimation(prop, null);
+            el.SetValue(prop, to);
+            done?.Invoke();
+        };
+        el.BeginAnimation(prop, an);
     }
 
     public static void Fade(UIElement el, double to, double ms = 160, Action? done = null)
