@@ -205,6 +205,8 @@ public sealed class AiStoreDto
 {
     [JsonPropertyName("active_id")] public string ActiveId { get; set; } = "";
     public List<AiChatDto> Chats { get; set; } = new();
+    /// <summary>后端此刻是否有一回合在跑（ai_list_chats 带回），前端按钮状态以它为准。</summary>
+    public bool Busy { get; set; }
 }
 
 public sealed class AiChatDto
@@ -218,6 +220,18 @@ public sealed class AiMsgDto
 {
     public string Role { get; set; } = "";
     public string Content { get; set; } = "";
+    public string Note { get; set; } = "";
+}
+
+public sealed class AiPermissionRuleDto
+{
+    public string Key { get; set; } = "";
+    [JsonPropertyName("toolName")] public string ToolName { get; set; } = "";
+    [JsonPropertyName("ruleContent")] public string RuleContent { get; set; } = "";
+    public string Behavior { get; set; } = "";
+    [JsonPropertyName("behavior_label")] public string BehaviorLabel { get; set; } = "";
+    public string Instance { get; set; } = "";
+    public string Scope { get; set; } = "";
 }
 
 public sealed class CrashReport
