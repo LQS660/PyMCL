@@ -1,3 +1,5 @@
+> 2026-09-19 续验（分支 `fix-8items` @ `60cc011` + 工作区未提交改动）：`python -m pytest -q` 476 passed / 1 skipped（此前红灯 `test_bridge_i18n` 缺 4 词条、`test_bridge_parity` 的 `note` 键、`test_wpf_i18n` 缺 27 条权限文案均已修）；`dotnet build -c Release` 0 警告 0 错误。AI 权限 UI 已 Qt / WPF 对齐（五档模式、自定义规则表、允许 / 始终允许 / 拒绝 + 实例 / 全局范围，删除类工具不给「始终允许」）；Qt 对话切换回归 `tests/test_ai_chat_switch.py` 已补；Qt 确认 / 提问等待可取消、关窗主动停 AI 回合。两份发行包已更新到桌面：`Desktop\PyMCL-Qt\PyMCL.exe`（PyInstaller onefile，离屏沙盒起跑 15 s 无报错）与 `Desktop\PyMCL-WPF\`（`dotnet publish -c Release -r win-x64` 依赖框架 + Python 桥；`--i18n-check / --consent-check / --ime-check` 退码 0，`--smoke` 退码 0：44 次点击 / 24 个对话框 / 0 问题）。**仍未做**：这批改动（24 个文件 +1642/−247，含 5 个未跟踪文件）尚未按主题拆分提交；`wpf32/` 内部 `Services/Motion.cs` 的同款修复未提交；NAS MP4 插件只做了只读核验（服务 active、两个群与 100 MB 上限已加载、sqlite-web 已停），真实群视频触发转码仍无日志证据。
+>
 > 2026-09-17 接手续验：Android JVM 653 测试通过，但标准 Gradle 仍阻塞于 AAPT2；WPF 构建通过，严格静默冒烟覆盖达标但有在线目录加载超时。详见 `docs/audit/continuation-2026-09-17.md`。下面历史快照不能替代本次证据。
 
 # PyMCL 构建状态与审计归档
