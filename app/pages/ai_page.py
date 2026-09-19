@@ -9,15 +9,15 @@ import re
 import threading
 
 from PySide6.QtCore import Qt, QTimer, QThread, Signal
-from PySide6.QtGui import QFont, QKeySequence, QShortcut
+from PySide6.QtGui import QFont, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QFrame, QHBoxLayout, QListWidget, QListWidgetItem,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QButtonGroup, QFrame, QHBoxLayout, QHeaderView,
+    QListWidget, QListWidgetItem, QSizePolicy, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, CheckBox, ComboBox, FluentIcon as FIF, InfoBar,
     InfoBarPosition, LineEdit, MessageBoxBase, PlainTextEdit, PrimaryPushButton,
-    ProgressBar, PushButton, RadioButton, ScrollArea, SettingCard, SubtitleLabel,
+    ProgressBar, PushButton, RadioButton, ScrollArea, SubtitleLabel, TableWidget,
     TransparentPushButton, TransparentToolButton,
 )
 
@@ -29,8 +29,11 @@ from mclauncher.ai.defaults import DEFAULT_MODEL
 from mclauncher.ai.permission import Behavior, Rule, rule_content_from_input
 from mclauncher.ai.result import AgentResult, StopReason
 from mclauncher.ai.tools import TOOL_META
+from ..lucide import IconLabel, ShimmerLabel, pixmap as lucide_pixmap, tool_icon
 from ..pcl_chrome import Theme, prestyle_page
 from mclauncher.i18n import tr
+
+_RED = "#D64545"
 
 _STOP = {tr("已停止"), tr("已取消")}
 _CHIPS = (tr("下一款游戏 1.20.1 Fabric"), tr("装钠和光影"), tr("启动闪退了帮我看"))
@@ -43,6 +46,128 @@ _WELCOME_NOCONFIRM = (
     "直接说你想做什么就行。写操作会直接执行，不逐条询问。")
 )
 _FENCE = re.compile(r"```(?:\w+)?\n([\s\S]*?)```")
+
+
+def _split_think(text: str) -> tuple[list[str], str]:
+    """把 <think>…</think> 块从回复里摘出来。
+
+    流式期间可能只有开头没有收尾（模型还在想），这种情况把未闭合块整体
+    算作思考内容，答案为空；收尾出现后答案从 </think> 之后起算。
+    """
+    parts: list[str] = []
+    answer: list[str] = []
+    rest = text or ""
+    while True:
+        i = rest.lower().find("<think>")
+        if i < 0:
+            break
+        answer.append(rest[:i])
+        j = rest.lower().find("</think>", i + 7)
+        if j < 0:
+            parts.append(rest[i + 7:])
+            rest = ""
+            break
+        parts.append(rest[i + 7:j])
+        rest = rest[j + 8:]
+    answer.append(rest)
+    return parts, "".join(answer).strip()
+
+
+class _ThinkHead(QFrame):
+    """思考块的标题行：brain 图标 + 文字 + 右侧折叠箭头，整行可点。"""
+
+    def __init__(self, on_click, parent=None):
+        super().__init__(parent)
+        self._on_click = on_click
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(26)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(2, 0, 2, 0)
+        lay.setSpacing(8)
+        self.icon = IconLabel("brain", 16, Theme.muted)
+        self.label = ShimmerLabel("")
+        self.chevron = IconLabel("chevron-right", 16, Theme.muted)
+        lay.addWidget(self.icon)
+        lay.addWidget(self.label)
+        lay.addStretch(1)
+        lay.addWidget(self.chevron)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._on_click()
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+
+class ThinkFold(QFrame):
+    """可折叠的思考过程块：平时一行收起，点开看全文；流式期间自动展开。
+
+    标题行照 ZCode 的 Reasoning 行：左 brain 图标，中间文字（模型还在想时走流光），
+    右侧 chevron 展开时转 90°。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 6, 10, 6)
+        lay.setSpacing(4)
+        self.toggle = _ThinkHead(self._flip)
+        self.body = BodyLabel("")
+        self.body.setWordWrap(True)
+        self.body.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.body.setVisible(False)
+        lay.addWidget(self.toggle)
+        lay.addWidget(self.body)
+        self._open = False
+        self._live = False
+        self._thinking = False
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.restyle()
+
+    def _flip(self):
+        self._open = not self._open
+        self.body.setVisible(self._open)
+        self._sync_head()
+
+    def set_open(self, on: bool):
+        if self._open == on:
+            self._sync_head()
+            return
+        self._open = on
+        self.body.setVisible(on)
+        self._sync_head()
+
+    def _sync_head(self):
+        if self._thinking:
+            head = tr("思考中…")
+        else:
+            n = len(self.body.text())
+            head = tr("思考过程") + (f"（{n}）" if n else "")
+        self.toggle.label.setText(head)
+        self.toggle.label.set_active(self._thinking)
+        self.toggle.chevron.set_angle(90 if self._open else 0)
+
+    def set_think(self, text: str, *, live: bool, open_: bool):
+        """live=整条消息还在流式；open_=思考块还没闭合（模型仍在想）。"""
+        self._live = live
+        self._thinking = bool(live and open_)
+        self.body.setText(text or "")
+        self.set_open(open_)
+        self._sync_head()
+
+    def restyle(self):
+        bg = Theme.hover if not Theme.dark else "#232823"
+        self.setStyleSheet(
+            f"ThinkFold {{ background: {bg}; border: 1px solid {Theme.line};"
+            " border-radius: 8px; }")
+        self.body.setStyleSheet(f"color: {Theme.muted}; font-size: 12px;")
+        self.toggle.setStyleSheet("QFrame { background: transparent; border: none; }")
+        self.toggle.label.setStyleSheet(
+            f"color: {Theme.text}; font-size: 12px; font-weight: 500; background: transparent;")
+        self.toggle.label.set_shimmer_color(Theme.text)
+        self.toggle.icon.set_color(Theme.muted)
+        self.toggle.chevron.set_color(Theme.muted)
 _CODE = re.compile(r"`([^`]+)`")
 _BOLD = re.compile(r"\*\*(.+?)\*\*")
 
@@ -122,14 +247,18 @@ class AgentThread(QThread):
         def confirm_fn(name, args, label, reason=""):
             self._confirm_ev.clear()
             self.need_confirm.emit(name, args, label, str(reason or ""))
-            self._confirm_ev.wait()
+            while not self._confirm_ev.wait(0.2):
+                if self._cancel:
+                    return False
             return self._confirm_ok
 
         def ask_fn(questions, title):
             self._ask_ev.clear()
             self._ask_result = None
             self.need_ask.emit(list(questions or []), str(title or ""))
-            self._ask_ev.wait()
+            while not self._ask_ev.wait(0.2):
+                if self._cancel:
+                    return None
             return self._ask_result
 
         def cancelled():
@@ -174,6 +303,11 @@ class Bubble(QFrame):
         lay.setContentsMargins(12, 8, 12, 8)
         lay.setSpacing(4)
         head = QHBoxLayout()
+        head.setSpacing(6)
+        self._err_icon: IconLabel | None = None
+        if err:
+            self._err_icon = IconLabel("circle-x", 14, _RED)
+            head.addWidget(self._err_icon)
         self.who = CaptionLabel(tr("我") if mine else (tr("出错") if err else tr("助手")))
         head.addWidget(self.who)
         head.addStretch(1)
@@ -183,6 +317,21 @@ class Bubble(QFrame):
             copy.clicked.connect(self._copy)
             head.addWidget(copy)
         lay.addLayout(head)
+        self._think: ThinkFold | None = None
+        self._answer = self._plain
+        # 「正在想…」占位行：brain 图标 + 流光文字，对齐 ZCode 的思考行；
+        # 一有正文（流式 delta / 最终答案）就收起来换回 body
+        self._ph = QWidget()
+        ph = QHBoxLayout(self._ph)
+        ph.setContentsMargins(0, 2, 0, 2)
+        ph.setSpacing(8)
+        self._ph_icon = IconLabel("brain", 16, Theme.muted)
+        self._ph_label = ShimmerLabel("")
+        ph.addWidget(self._ph_icon)
+        ph.addWidget(self._ph_label)
+        ph.addStretch(1)
+        self._ph.hide()
+        lay.addWidget(self._ph)
         self.body = BodyLabel("")
         self.body.setWordWrap(True)
         self.body.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
@@ -207,49 +356,136 @@ class Bubble(QFrame):
         )
         self.who.setStyleSheet(f"color: {'#C23A3A' if err else Theme.muted};")
         self.body.setStyleSheet(f"color: {Theme.text};")
+        self._ph_icon.set_color(Theme.muted)
+        self._ph_label.setStyleSheet(f"color: {Theme.text}; font-weight: 500;")
+        self._ph_label.set_shimmer_color(Theme.text)
+        if self._think is not None:
+            self._think.restyle()
 
     def restyle(self):
         self._apply_style()
+        if not self._ph.isHidden():
+            return
         self.set_text(self._plain, live=self._live)
 
+    def set_placeholder(self, text: str):
+        """还没有正文时的「正在想…」：整条气泡只剩 brain + 流光一行。"""
+        self._plain = ""
+        self._answer = ""
+        self._ph_label.setText(text or "")
+        self._ph_label.set_active(True)
+        self._ph.show()
+        self.body.hide()
+        if self._think is not None:
+            self._think.hide()
+
+    def _hide_placeholder(self):
+        if not self._ph.isHidden():
+            self._ph_label.set_active(False)
+            self._ph.hide()
+        if self.body.isHidden():
+            self.body.show()
+        if self._think is not None and self._think.isHidden():
+            self._think.show()
+
     def set_text(self, text: str, *, live: bool = False):
+        self._hide_placeholder()
         self._plain = text or ""
         self._live = live
-        if self.role == "user" or live:
+        if self.role == "user":
             self.body.setTextFormat(Qt.PlainText)
             self.body.setText(self._plain)
             return
+        think, answer = _split_think(self._plain)
+        self._answer = answer
+        if think:
+            if self._think is None:
+                self._think = ThinkFold(self)
+                self.layout().insertWidget(self.layout().indexOf(self.body), self._think)
+            open_think = (self._plain.lower().count("<think>")
+                          > self._plain.lower().count("</think>"))
+            self._think.set_think("\n\n".join(p.strip() for p in think if p.strip()),
+                                  live=live, open_=(live and open_think))
+        if live:
+            self.body.setTextFormat(Qt.PlainText)
+            self.body.setText(answer)
+            return
         self.body.setTextFormat(Qt.RichText)
-        self.body.setText(_md(self._plain) or "…")
+        self.body.setText(_md(answer) or "…")
 
     def _copy(self):
-        QApplication.clipboard().setText(self._plain or "")
+        QApplication.clipboard().setText(self._answer or self._plain or "")
         InfoBar.success(tr("已复制"), "", parent=self.window() or self,
                         position=InfoBarPosition.TOP, duration=1200)
 
 
 class ToolLine(QFrame):
-    def __init__(self, text: str, parent=None):
+    """对话流里的一行工具状态：左侧图标 + 文字，绑了后台任务再带进度条。
+
+    图标照 ZCode 的工具行：搜索 / 读文件 / 改文件三类工具在准备、执行时显示
+    类型图标，其余工具显示旋转的 loader；结束后统一换成 circle-check /
+    circle-slash-2 / circle-x。执行中文字走流光。
+    """
+
+    _STATES = ("prepare", "run", "done", "skip", "fail")
+
+    def __init__(self, text: str, parent=None, *, tool: str = ""):
         super().__init__(parent)
+        self.tool = tool or ""
+        self._state = "prepare"
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 6, 10, 6)
         lay.setSpacing(4)
-        self.lab = CaptionLabel(text)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        self.icon = IconLabel("", 16, Theme.green)
+        self.lab = ShimmerLabel(text)
         self.lab.setWordWrap(True)
-        self.restyle()
+        row.addWidget(self.icon, 0, Qt.AlignTop)
+        row.addWidget(self.lab, 1)
         self.bar = ProgressBar()
         self.bar.setRange(0, 100)
         self.bar.hide()
-        lay.addWidget(self.lab)
+        lay.addLayout(row)
         lay.addWidget(self.bar)
         self.task_id = ""
+        self.restyle()
 
     def restyle(self):
         self.setStyleSheet(f"ToolLine {{ background: {Theme.hover}; border-radius: 8px; }}")
-        self.lab.setStyleSheet(f"color: {Theme.green};")
+        self.lab.setStyleSheet(f"color: {Theme.green}; font-size: 12px; background: transparent;")
+        self.lab.set_shimmer_color(Theme.green)
+        self._sync_icon()
 
     def set_text(self, text: str):
         self.lab.setText(text)
+
+    def set_state(self, state: str):
+        if state not in self._STATES:
+            return
+        self._state = state
+        self._sync_icon()
+
+    def _sync_icon(self):
+        running = self._state in ("prepare", "run")
+        self.lab.set_active(running)
+        if running:
+            kind = tool_icon(self.tool)
+            if kind:
+                self.icon.spin(False)
+                self.icon.set_icon(kind, Theme.green)
+            else:
+                self.icon.set_icon("loader-circle", Theme.green)
+                self.icon.spin(True)
+            return
+        self.icon.spin(False)
+        if self._state == "done":
+            self.icon.set_icon("circle-check", Theme.green)
+        elif self._state == "skip":
+            self.icon.set_icon("circle-slash-2", Theme.muted)
+        else:
+            self.icon.set_icon("circle-x", _RED)
 
     def bind_task(self, task_id: str):
         self.task_id = task_id or ""
@@ -263,16 +499,49 @@ class ToolLine(QFrame):
             self.lab.setText(message.split("  |  ", 1)[0])
 
 
+_AMBER = "#D68A17"
+
+# 工具 → 人话动词，给「始终允许」那行说明用；没列的工具退回工具名
+_TOOL_TITLES = {
+    "install_game": "安装游戏", "install_mod": "安装模组", "install_modpack": "安装整合包",
+    "install_shader": "安装光影", "install_resourcepack": "安装资源包",
+    "install_datapack": "安装数据包", "install_world": "安装地图",
+    "download_java": "下载 Java", "launch_game": "启动游戏",
+    "create_instance": "新建实例", "delete_instance": "删除实例", "delete_mod": "删除模组",
+    "disable_mod": "禁用模组", "enable_mod": "启用模组", "write_mod_config": "改配置",
+}
+
+
+def always_hint(name: str, args: dict | None) -> str:
+    """「始终允许」会记住什么，一句话说清（对齐 ZCode 的 allowAlways.description）。"""
+    title = tr(_TOOL_TITLES[name]) if name in _TOOL_TITLES else (name or "")
+    content = rule_content_from_input(args or {})
+    if content:
+        return tr("以后「{0} {1}」不再询问；换别的仍会问").format(title, content)
+    return tr("以后所有「{0}」操作都不再询问").format(title)
+
+
 class ConfirmCard(QFrame):
+    """内联权限卡：允许 / 始终允许 / 拒绝 三键（ZCode 的 permission 卡），
+    「始终允许」下面一行说明记什么、记到哪（仅当前实例 / 所有实例）。"""
+
     accepted = Signal()
     rejected = Signal()
+    always = Signal(str)        # 参数 = 记忆范围 permission.SCOPE_*
 
-    def __init__(self, label: str, detail: str = "", parent=None):
+    def __init__(self, label: str, detail: str = "", parent=None, *,
+                 name: str = "", args: dict | None = None):
         super().__init__(parent)
-        self.restyle()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
-        lay.addWidget(BodyLabel(tr("需要你点一下确认：")))
+        lay.setSpacing(8)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        self._icon = IconLabel("shield-alert", 16, _AMBER)
+        head.addWidget(self._icon, 0, Qt.AlignVCenter)
+        self._title = BodyLabel(tr("需要你点一下确认："))
+        head.addWidget(self._title, 1)
+        lay.addLayout(head)
         desc = BodyLabel(label)
         desc.setWordWrap(True)
         lay.addWidget(desc)
@@ -282,17 +551,48 @@ class ConfirmCard(QFrame):
             box.setPlainText(detail)
             box.setFixedHeight(min(160, 40 + detail.count("\n") * 16))
             lay.addWidget(box)
-        self.allow_always = CheckBox(tr("以后都允许这类操作（按当前实例记忆）"))
-        lay.addWidget(self.allow_always)
+
         row = QHBoxLayout()
-        yes = PrimaryPushButton(tr("确认执行"))
-        no = PushButton(tr("取消"))
-        yes.clicked.connect(self.accepted.emit)
-        no.clicked.connect(self.rejected.emit)
-        row.addWidget(yes)
-        row.addWidget(no)
+        row.setSpacing(8)
+        self.yes_btn = PrimaryPushButton(tr("允许"))
+        self.always_btn = PushButton(tr("始终允许"))
+        self.no_btn = PushButton(tr("拒绝"))
+        self.yes_btn.clicked.connect(lambda: self._done(tr("已允许"), self.accepted.emit))
+        self.always_btn.clicked.connect(
+            lambda: self._done(tr("已允许并记住"), lambda: self.always.emit(self.scope())))
+        self.no_btn.clicked.connect(lambda: self._done(tr("已拒绝"), self.rejected.emit))
+        row.addWidget(self.yes_btn)
+        row.addWidget(self.always_btn)
+        row.addWidget(self.no_btn)
         row.addStretch(1)
+        self.state = CaptionLabel("")
+        row.addWidget(self.state, 0, Qt.AlignVCenter)
         lay.addLayout(row)
+
+        hint_row = QHBoxLayout()
+        hint_row.setSpacing(10)
+        self.hint = CaptionLabel(tr("始终允许 = ") + always_hint(name, args))
+        self.hint.setWordWrap(True)
+        hint_row.addWidget(self.hint, 1)
+        self._scope_group = QButtonGroup(self)
+        self.scope_inst = RadioButton(tr("仅当前实例"))
+        self.scope_all = RadioButton(tr("所有实例"))
+        self.scope_inst.setChecked(True)
+        self._scope_group.addButton(self.scope_inst, 0)
+        self._scope_group.addButton(self.scope_all, 1)
+        hint_row.addWidget(self.scope_inst, 0, Qt.AlignVCenter)
+        hint_row.addWidget(self.scope_all, 0, Qt.AlignVCenter)
+        lay.addLayout(hint_row)
+        self.restyle()
+
+    def scope(self) -> str:
+        return ai_perm.SCOPE_GLOBAL if self.scope_all.isChecked() else ai_perm.SCOPE_INSTANCE
+
+    def _done(self, note: str, emit):
+        for b in (self.yes_btn, self.always_btn, self.no_btn, self.scope_inst, self.scope_all):
+            b.setEnabled(False)
+        self.state.setText(note)
+        emit()
 
     def restyle(self):
         el_bg = "#3A2E10" if Theme.dark else "#FFF8E8"
@@ -300,6 +600,9 @@ class ConfirmCard(QFrame):
         self.setStyleSheet(
             f"ConfirmCard {{ background: {el_bg}; border: 1px solid {el_border}; border-radius: 10px; }}"
         )
+        self.hint.setStyleSheet(f"color: {Theme.muted};")
+        self.state.setStyleSheet(f"color: {Theme.muted};")
+        self._icon.set_color(_AMBER)
 
 
 class AskCard(QFrame):
@@ -430,90 +733,194 @@ class _AskBlock(QWidget):
         }
 
 
-class PermissionDialog(MessageBoxBase):
-    """AI 助手权限管理：档位下拉 + 自定义规则列表。
+# 五档权限：值、标题、一句人话、图标。Qt / WPF 两端同一张表。
+PERM_MODES = (
+    ("default", "每次确认", "安装、删除、改配置、启动，所有写操作都先问你", "shield-alert"),
+    ("acceptEdits", "写直接执行", "安装 / 改配置直接做，删除前仍会先问", "file-pen-line"),
+    ("plan", "只看不动", "只能查看和诊断，任何写操作都被拦下", "eye"),
+    ("yolo", "全自动", "一切直接执行，不再弹确认", "sparkles"),
+    ("custom", "自定义规则", "按「每次确认」判定，再叠加下面的规则表", "sliders-horizontal"),
+)
+_BEHAVIOR_ICONS = {"allow": ("circle-check", None), "deny": ("ban", _RED),
+                   "ask": ("shield-alert", _AMBER)}
 
-    两个控件改完立即落盘，不用点额外保存；on_changed 用来让 AI 页
-    同步输入框旁的状态标签和快捷下拉。旧的「变更前确认」开关由档位
-    取代（「全自动」即原开关关闭的语义）。
+
+class _ModeCard(QFrame):
+    """档位卡片：图标 + 标题 + 一句说明，整块可点，选中亮绿边。"""
+
+    clicked = Signal(str)
+
+    def __init__(self, value: str, title: str, desc: str, icon: str, parent=None):
+        super().__init__(parent)
+        self.value = value
+        self._selected = False
+        self.setCursor(Qt.PointingHandCursor)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 9, 12, 9)
+        lay.setSpacing(10)
+        self.icon = IconLabel(icon, 18, Theme.muted)
+        lay.addWidget(self.icon, 0, Qt.AlignVCenter)
+        text = QVBoxLayout()
+        text.setSpacing(1)
+        self.title = BodyLabel(title)
+        self.desc = CaptionLabel(desc)
+        self.desc.setWordWrap(True)
+        text.addWidget(self.title)
+        text.addWidget(self.desc)
+        lay.addLayout(text, 1)
+        self.check = IconLabel("circle-check", 16, Theme.green)
+        self.check.setVisible(False)
+        lay.addWidget(self.check, 0, Qt.AlignVCenter)
+        self.restyle()
+
+    def set_selected(self, on: bool):
+        self._selected = bool(on)
+        self.check.setVisible(self._selected)
+        self.restyle()
+
+    def restyle(self):
+        border = Theme.green if self._selected else Theme.line
+        bg = ("#1E3A2E" if Theme.dark else "#EEF7F2") if self._selected else Theme.card
+        self.setStyleSheet(
+            f"_ModeCard {{ background: {bg}; border: 1px solid {border}; border-radius: 8px; }}")
+        self.title.setStyleSheet(f"color: {Theme.text}; font-weight: 600; background: transparent;")
+        self.desc.setStyleSheet(f"color: {Theme.muted}; background: transparent;")
+        self.icon.set_color(Theme.green if self._selected else Theme.muted)
+        self.check.set_color(Theme.green)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.clicked.emit(self.value)
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+
+class PermissionDialog(MessageBoxBase):
+    """AI 助手权限管理：五张档位卡片 + 规则表格。
+
+    档位点哪张立即落盘；规则表每行「范围 / 工具 / 参数 / 行为 / 删除」，下面一行
+    加规则（可选记到全局或当前实例）。on_changed 让 AI 页同步输入框旁的快捷下拉。
     """
 
-    _MODES = ("default", "acceptEdits", "plan", "yolo", "custom")
+    _MODES = tuple(m[0] for m in PERM_MODES)
     _BEHAVIORS = (Behavior.ALLOW, Behavior.DENY, Behavior.ASK)
 
     def __init__(self, backend, on_changed=None, parent=None):
         super().__init__(parent)
         self.backend = backend
         self._on_changed = on_changed
-        self.viewLayout.addWidget(SubtitleLabel(tr("权限管理"), self))
+        s = backend.get_settings()
+        self._instance = str(s.get("default_instance") or "default")
+        mode = s.get("ai_permission_mode") or "default"
+        if mode not in self._MODES:
+            mode = "default"
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        head.addWidget(IconLabel("shield-alert", 18, Theme.green), 0, Qt.AlignVCenter)
+        head.addWidget(SubtitleLabel(tr("权限管理"), self), 1)
+        self.viewLayout.addLayout(head)
         self.viewLayout.addWidget(CaptionLabel(tr("控制 AI 助手改东西前要不要先问你")))
         self.viewLayout.addSpacing(8)
 
-        s = backend.get_settings()
-        mode = s.get("ai_permission_mode") or "default"
+        self._cards: dict[str, _ModeCard] = {}
+        for value, title, desc, icon in PERM_MODES:
+            card = _ModeCard(value, tr(title), tr(desc), icon)
+            card.clicked.connect(self._pick_mode)
+            self._cards[value] = card
+            self.viewLayout.addWidget(card)
+        self._mode = mode
+        self._cards[mode].set_selected(True)
 
-        self.mode_card = SettingCard(FIF.FINGERPRINT, tr("权限档位"), tr("写操作要确认到什么程度"))
-        self.mode_box = ComboBox(self.mode_card)
-        self.mode_box.addItems([tr("每次确认"), tr("写直接执行"), tr("只看不动"),
-                                tr("全自动"), tr("自定义规则")])
-        self.mode_box.setCurrentIndex(self._MODES.index(mode) if mode in self._MODES else 0)
-        self.mode_box.setFixedWidth(150)
-        self.mode_card.hBoxLayout.addWidget(self.mode_box, 0, Qt.AlignRight)
-        self.mode_card.hBoxLayout.addSpacing(16)
-        self.viewLayout.addWidget(self.mode_card)
-
-        self.viewLayout.addSpacing(4)
-        tip = CaptionLabel(tr(
-            "「只看不动」下 AI 不能安装/删除/改配置；「写直接执行」下删除前仍会问；"
-            "「自定义规则」配合下面的规则列表生效。"))
-        tip.setWordWrap(True)
-        self.viewLayout.addWidget(tip)
-
-        self.viewLayout.addSpacing(8)
+        self.viewLayout.addSpacing(10)
         self.viewLayout.addWidget(SubtitleLabel(tr("自定义规则"), self))
-        self.rule_list = QListWidget(self)
-        self.rule_list.setMinimumHeight(120)
-        self.viewLayout.addWidget(self.rule_list)
+        self.viewLayout.addWidget(CaptionLabel(tr(
+            "规则永远优先于档位：禁止 > 允许 > 每次问。「始终允许」点出来的也记在这里。")))
+        self.table = TableWidget(self)
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels([tr("范围"), tr("工具"), tr("参数"), tr("行为"), ""])
+        self.table.verticalHeader().hide()
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.setMinimumHeight(150)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(2, QHeaderView.Stretch)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(4, QHeaderView.Fixed)
+        self.table.setColumnWidth(4, 40)
+        self.viewLayout.addWidget(self.table)
 
         add_row = QHBoxLayout()
+        add_row.setSpacing(6)
         self.rule_tool = ComboBox(self)
         self.rule_tool.addItems(sorted(TOOL_META))
         self.rule_tool.setFixedWidth(170)
         self.rule_behavior = ComboBox(self)
         self.rule_behavior.addItems([tr("允许"), tr("禁止"), tr("每次问")])
+        self.rule_behavior.setFixedWidth(96)
         self.rule_content = LineEdit(self)
         self.rule_content.setPlaceholderText(tr("限定参数（留空 = 整个工具）"))
+        self.rule_scope = ComboBox(self)
+        self.rule_scope.addItems([tr("所有实例"), tr("仅实例 {0}").format(self._instance)])
+        self.rule_scope.setFixedWidth(150)
         add_btn = PushButton(tr("添加"), self)
         add_btn.clicked.connect(self._add_rule)
         add_row.addWidget(self.rule_tool)
         add_row.addWidget(self.rule_behavior)
         add_row.addWidget(self.rule_content, 1)
+        add_row.addWidget(self.rule_scope)
         add_row.addWidget(add_btn)
         self.viewLayout.addLayout(add_row)
 
-        del_row = QHBoxLayout()
-        del_btn = PushButton(tr("删除选中规则"), self)
-        del_btn.clicked.connect(self._del_rule)
-        del_row.addWidget(del_btn)
-        del_row.addStretch(1)
-        self.viewLayout.addLayout(del_row)
-
         self._reload_rules()
-        self.mode_box.currentIndexChanged.connect(self._save)
 
         self.yesButton.setText(tr("关闭"))
         self.cancelButton.hide()
-        self.widget.setMinimumWidth(520)
+        self.widget.setMinimumWidth(620)
+
+    def _pick_mode(self, value: str):
+        if value == self._mode:
+            return
+        self._cards[self._mode].set_selected(False)
+        self._mode = value
+        self._cards[value].set_selected(True)
+        self._save()
 
     def _reload_rules(self):
-        self.rule_list.clear()
-        for row in ai_perm.list_stored_rules():
-            label = f"[{row['scope']}] {row['behavior_label']} {row['toolName']}"
-            if row.get("ruleContent"):
-                label += f" · {row['ruleContent']}"
-            item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, row["key"])
-            self.rule_list.addItem(item)
+        rows = ai_perm.list_stored_rules()
+        self.table.clearSpans()
+        self.table.setRowCount(0)
+        self.table.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            scope = tr("所有实例") if not row.get("instance") \
+                else tr("实例 {0}").format(row["instance"])
+            self.table.setItem(i, 0, QTableWidgetItem(scope))
+            self.table.setItem(i, 1, QTableWidgetItem(row["toolName"]))
+            self.table.setItem(i, 2, QTableWidgetItem(row.get("ruleContent") or tr("（整个工具）")))
+            icon, color = _BEHAVIOR_ICONS.get(row["behavior"], ("shield-alert", _AMBER))
+            cell = QWidget()
+            cl = QHBoxLayout(cell)
+            cl.setContentsMargins(6, 0, 6, 0)
+            cl.setSpacing(6)
+            cl.addWidget(IconLabel(icon, 14, color or Theme.green), 0, Qt.AlignVCenter)
+            cl.addWidget(CaptionLabel(row["behavior_label"]), 0, Qt.AlignVCenter)
+            cl.addStretch(1)
+            self.table.setCellWidget(i, 3, cell)
+            btn = TransparentToolButton(QIcon(lucide_pixmap("trash-2", 16, Theme.muted)))
+            btn.setFixedSize(30, 30)
+            btn.setToolTip(tr("删除这条规则"))
+            btn.clicked.connect(lambda *_a, k=row["key"], inst=row.get("instance") or "":
+                                self._del_rule(k, inst))
+            self.table.setCellWidget(i, 4, btn)
+            self.table.setRowHeight(i, 34)
+        if not rows:
+            self.table.setRowCount(1)
+            empty = QTableWidgetItem(tr("还没有规则。确认卡上点「始终允许」，或在下面手动加一条。"))
+            self.table.setItem(0, 0, empty)
+            self.table.setSpan(0, 0, 1, 5)
 
     def _add_rule(self):
         tool = self.rule_tool.currentText()
@@ -521,8 +928,9 @@ class PermissionDialog(MessageBoxBase):
             return
         behavior = self._BEHAVIORS[self.rule_behavior.currentIndex()]
         content = self.rule_content.text().strip() or None
+        instance = self._instance if self.rule_scope.currentIndex() == 1 else None
         try:
-            ai_perm.append_rule(Rule(tool, content, behavior), instance=None)
+            ai_perm.append_rule(Rule(tool, content, behavior), instance=instance)
         except Exception as exc:  # noqa: BLE001
             InfoBar.error(tr("保存失败"), str(exc), parent=self,
                           position=InfoBarPosition.TOP, duration=4000)
@@ -530,15 +938,12 @@ class PermissionDialog(MessageBoxBase):
         self.rule_content.clear()
         self._reload_rules()
 
-    def _del_rule(self):
-        item = self.rule_list.currentItem()
-        if not item:
-            return
-        ai_perm.remove_rule(item.data(Qt.UserRole))
+    def _del_rule(self, key: str, instance: str):
+        ai_perm.remove_rule(key, instance=instance)
         self._reload_rules()
 
     def _save(self, *_a):
-        mode = self._MODES[self.mode_box.currentIndex()]
+        mode = self._mode
         try:
             self.backend.save_settings({
                 "ai_confirm_writes": mode != "yolo",
@@ -589,6 +994,8 @@ class AiPage(QWidget):
         self.setObjectName("aiPage")
         self.backend = backend
         self._store = chat_store.load()
+        # 早年每次进页面都建新会话，攒下一长串空「新对话」；这里收一次尾
+        chat_store.prune_empty(self._store)
         self._history = []
         self._worker = None
         self._assistant_bubble = None
@@ -845,7 +1252,12 @@ class AiPage(QWidget):
             for m in self._history:
                 role = m.get("role") or "assistant"
                 if role in ("user", "assistant", "error"):
-                    self._add_bubble(role, m.get("content") or "")
+                    text = m.get("content") or ""
+                    # 「为什么停」的提示单独存在 note 里（不喂模型），渲染时再拼回去
+                    note = str(m.get("note") or "")
+                    if note and note not in text:
+                        text = (text + "\n\n" + note).strip()
+                    self._add_bubble(role, text)
         self._scroll_bottom()
 
     def _persist(self):
@@ -853,25 +1265,59 @@ class AiPage(QWidget):
         chat_store.upsert_messages(self._store, cid, self._history)
         self._reload_list()
 
+    def _abandon_run(self):
+        """切换 / 新建 / 删除对话前，把还在跑的回合整个收掉。
+
+        只 cancel + wait 不够：worker 的 done / failed 是排队信号，会在 _load_active
+        之后才送到，那时 `_finish` 里 `_pending_user` 还在，就把旧回合的提问和
+        「已停止」写进**新对话**并落盘，`_on_fail` 还会往新对话里贴一个报错气泡。
+        这里把信号断开、回合痕迹清零、按钮复位，后面那一帖到了也没人接。
+        （WPF 端同一处按 chat_id 分流，语义一致：切走 = 放弃上一回合。）
+        """
+        worker = self._worker
+        if worker is None:
+            return
+        worker.cancel()
+        for sig, slot in ((worker.delta, self._on_delta), (worker.status, self._on_status),
+                          (worker.need_confirm, self._on_confirm), (worker.need_ask, self._on_ask),
+                          (worker.done, self._on_done), (worker.failed, self._on_fail)):
+            try:
+                sig.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        worker.wait(2500)
+        self._flush_timer.stop()
+        self._worker = None
+        self._pending_user = None
+        self._assistant_bubble = None
+        self._stream = ""
+        self._queue.clear()
+        self._busy(False)
+        InfoBar.info(tr("已停止上一个对话的回合"), tr("切换对话时正在运行的那一轮已中断"),
+                     parent=self.window() or self, position=InfoBarPosition.TOP, duration=2200)
+
     def _new_chat(self):
-        self._stop(wait=True)
+        self._abandon_run()
         chat_store.new_chat(self._store)
         self._load_active()
         self._reload_list()
 
     def _delete_chat(self):
-        self._stop(wait=True)
+        self._abandon_run()
         cid = self._store.get("active_id")
         chat_store.delete_chat(self._store, cid)
         self._load_active()
         self._reload_list()
 
     def _on_pick_chat(self, item, _prev=None):
-        if item is None or self._worker:
+        if item is None:
             return
         cid = item.data(Qt.UserRole)
         if cid == self._store.get("active_id"):
             return
+        # 以前在跑时直接 return：列表高亮已经跳到新对话、内容却还是旧的，按钮也停在「忙」。
+        # 现在跟新建 / 删除一致：切走就放弃上一回合，新对话从干净状态开始。
+        self._abandon_run()
         chat_store.set_active(self._store, cid)
         self._load_active()
 
@@ -964,9 +1410,15 @@ class AiPage(QWidget):
         self._notes = []
         self._tool_lines = {}
         self._task_lines = {}
-        self._assistant_bubble = self._add_bubble("assistant", tr("正在想…"))
+        self._assistant_bubble = self._add_bubble("assistant", "")
+        self._assistant_bubble.set_placeholder(tr("正在想…"))
         settings = self.backend.get_settings()
         settings["ai_session_id"] = str(self._store.get("active_id") or "active")
+        # 首条消息一发就把会话名从「新对话」换成摘要，不用等落盘
+        chat = chat_store.get_chat(self._store, str(self._store.get("active_id") or ""))
+        if chat and chat.get("title") in ("", "新对话", "对话"):
+            chat["title"] = text.replace("\n", " ")[:24]
+            self._reload_list()
         self.backend._ui_launch = self._launch_prefs()
         # 工具轨迹也在历史里（批次 5），截取上限交给 store.MAX_MESSAGES；
         # agent 侧 _trim_history 保证不从孤立的 tool 消息开切
@@ -1012,7 +1464,7 @@ class AiPage(QWidget):
                 else:
                     tip = tr("正在想…")
                 if self._assistant_bubble:
-                    self._assistant_bubble.set_text(tip)
+                    self._assistant_bubble.set_placeholder(tip)
             return
         if kind == "tool":
             if name == "ask_user":
@@ -1023,25 +1475,28 @@ class AiPage(QWidget):
             if line:
                 line.set_text(tr("准备：") + label)
             else:
-                line = ToolLine(tr("准备：") + label)
+                line = ToolLine(tr("准备：") + label, tool=name)
                 self._tool_lines[name] = line
                 self._add_widget(line)
+            line.set_state("prepare")
             return
         line = self._tool_lines.get(name)
         if kind == "tool_run":
             if line:
                 line.set_text(tr("执行中：") + label)
             else:
-                line = ToolLine(tr("执行中：") + label)
+                line = ToolLine(tr("执行中：") + label, tool=name)
                 self._tool_lines[name] = line
                 self._add_widget(line)
+            line.set_state("run")
         elif kind == "tool_done":
             if line:
                 line.set_text(tr("完成：") + label)
             else:
-                line = ToolLine(tr("完成：") + label)
+                line = ToolLine(tr("完成：") + label, tool=name)
                 self._tool_lines[name] = line
                 self._add_widget(line)
+            line.set_state("done")
             tid = payload.get("task_id") or ""
             if not tid:
                 raw = payload.get("result") or ""
@@ -1059,7 +1514,9 @@ class AiPage(QWidget):
             if line:
                 line.set_text(tr("已跳过：") + label)
             else:
-                self._add_widget(ToolLine(tr("已跳过：") + label))
+                line = ToolLine(tr("已跳过：") + label, tool=name)
+                self._add_widget(line)
+            line.set_state("skip")
         self._scroll_bottom()
 
     def _on_confirm(self, name: str, args: dict, label: str, reason: str = ""):
@@ -1070,24 +1527,30 @@ class AiPage(QWidget):
             detail = tr("删掉后文件找不回来。")
         if reason:
             detail = (detail + "\n" + reason).strip()
-        card = ConfirmCard(label, detail)
+        card = ConfirmCard(label, detail, name=name, args=args)
+        # 删除类不给「始终允许」：这些工具的参数键不在 RULE_CONTENT_KEYS 里，
+        # 记一次就是整工具级放行，等于以后删什么都不问（permission.decide 也不吃这种规则）
+        meta = TOOL_META.get(name)
+        if meta is not None and getattr(meta, "side_effect", "") == "delete":
+            for w in (card.always_btn, card.hint, card.scope_inst, card.scope_all):
+                w.setVisible(False)
         worker = self._worker
 
         def yes():
-            card.setEnabled(False)
             if worker:
-                if card.allow_always.isChecked():
-                    worker.answer_confirm(Rule(
-                        name, rule_content_from_input(args or {}), Behavior.ALLOW))
-                else:
-                    worker.answer_confirm(True)
+                worker.answer_confirm(True)
+
+        def always(scope: str):
+            if worker:
+                worker.answer_confirm(Rule(
+                    name, rule_content_from_input(args or {}), Behavior.ALLOW, scope=scope))
 
         def no():
-            card.setEnabled(False)
             if worker:
                 worker.answer_confirm(False)
 
         card.accepted.connect(yes)
+        card.always.connect(always)
         card.rejected.connect(no)
         self._add_widget(card)
 
@@ -1169,12 +1632,23 @@ class AiPage(QWidget):
         user = getattr(self, "_pending_user", None)
         if user:
             self._history.append({"role": "user", "content": user})
-            # 本回合的工具轨迹一并入库（W5-1）：重开程序模型才知道上次做到哪
-            for m in (getattr(result, "messages", None) or []):
+            # 本回合的工具轨迹一并入库（W5-1）：重开程序模型才知道上次做到哪。
+            # 只取 turn_messages（本回合新增那一段）：result.messages 是模型侧完整历史，
+            # 里面还有上几轮的工具消息，照抄进来每轮都会把旧轨迹重复存一遍。
+            for m in (getattr(result, "turn_messages", None) or []):
                 role = m.get("role") if isinstance(m, dict) else None
                 if role == "tool" or (role == "assistant" and m.get("tool_calls")):
                     self._history.append(dict(m))
-            self._history.append({"role": "assistant" if ok else "error", "content": shown or ""})
+            # 「为什么停」的提示不进正文（模型下一轮会读到自己上一句后面挂着
+            # 「没有真的开始执行」），拆成 note 字段存，渲染历史时再拼回去
+            content = shown or ""
+            note = self._stop_note(result) if (ok and result is not None) else ""
+            if note and note in content:
+                content = re.sub(r"\n{3,}", "\n\n", content.replace(note, "")).strip()
+            entry = {"role": "assistant" if ok else "error", "content": content}
+            if note:
+                entry["note"] = note
+            self._history.append(entry)
             self._persist()
         self._pending_user = None
         self._worker = None
@@ -1240,6 +1714,7 @@ class AiPage(QWidget):
         line = self._task_lines.get(task_id)
         if line:
             line.set_text((tr("完成：") if success else tr("失败：")) + (message or ""))
+            line.set_state("done" if success else "fail")
             if hasattr(line, "bar"):
                 line.bar.setValue(100 if success else line.bar.value())
         if pending_name is None:

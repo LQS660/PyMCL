@@ -1870,6 +1870,14 @@ class MainWindow(FluentWindowBase):
         self._sync_background_playback()
 
     def closeEvent(self, event):
+        ai_page = getattr(self, "_pages", {}).get("ai") or getattr(self, "ai_page", None)
+        if ai_page is not None:
+            abandon = getattr(ai_page, "_abandon_run", None)
+            if callable(abandon):
+                try:
+                    abandon()
+                except Exception:
+                    pass
         layer = getattr(self, "_bg_layer", None)
         if layer is not None:
             try:
