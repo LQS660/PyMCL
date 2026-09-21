@@ -537,6 +537,12 @@ def build_parser():
 
 
 def gui_main():
+    # 语言必须在 import app.* 之前定下来：app/ 里一批默认参数与模块级常量
+    # （backend 的 tr("无") / tr("自动选择")、ai_page 的 _STOP/_CHIPS、各页 SPEC、
+    # first_run 的 HIGHLIGHTS）在 import 时就把 tr() 求值了；以前 init_language()
+    # 放在 MainWindow 之后，这些全冻结成出厂中文，英文界面下混着中文且比对失手。
+    from mclauncher.i18n import init_language
+    init_language()
     try:
         from PySide6.QtCore import Qt
         from PySide6.QtWidgets import QApplication
@@ -555,8 +561,6 @@ def gui_main():
     qt_app.setApplicationName("PyMCL")
     setTheme(Theme.LIGHT)
     setThemeColor(PCL_GREEN, save=False)
-    from mclauncher.i18n import init_language
-    init_language()
     window = MainWindow()
 
     def _ui_hook(kind, text, path):

@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from mclauncher import mods as mods_mod
 from mclauncher.config import CONFIG
 from mclauncher.downloader import DownloadManager
-from mclauncher.instances import Instance, unique_instance_name
+from mclauncher.i18n import tr
+from mclauncher.instances import JAVA_AUTO, Instance, unique_instance_name
 from mclauncher.mods import detect_loader, detect_mc_version
 
 from . import artifacts
@@ -292,6 +293,67 @@ def normalize_ask_args(args: dict) -> list[dict]:
     return out
 
 
+def normalize_ask_answer(questions: list, answered):
+    """把两端形状不同的 ask_user 应答归一成一种，再喂给模型。
+
+    Qt 发 ``{qid: {ids, labels, other_text}}``，WPF 发 ``{qid: {picked: [{id,label}], other}}``；
+    以前原样 json.dumps 给模型，没有 schema，模型两边都要猜。统一成
+    ``{"answers": {qid: {ids, labels, other_text}}, "summary": "问题: 选项, …"}``。
+    字符串 / None 原样返回（None = 用户取消）。
+    """
+    if answered is None or isinstance(answered, str):
+        return answered
+    if not isinstance(answered, dict):
+        return answered
+    qmap = {}
+    for q in questions or []:
+        if isinstance(q, dict):
+            qmap[str(q.get("id") or "")] = q
+    answers = {}
+    lines = []
+    for qid, val in answered.items():
+        ids: list[str] = []
+        labels: list[str] = []
+        other = ""
+        picked = None
+        if isinstance(val, dict):
+            if "picked" in val:
+                picked = val.get("picked") or []
+            else:
+                ids = [str(x) for x in (val.get("ids") or [])]
+                labels = [str(x) for x in (val.get("labels") or [])]
+            other = str(val.get("other_text") or val.get("other") or "").strip()
+        elif isinstance(val, list):
+            picked = val
+        elif val is not None:
+            ids = [str(val)]
+        if picked is not None:
+            for p in picked:
+                if isinstance(p, dict):
+                    pid = str(p.get("id") or "")
+                    ids.append(pid)
+                    labels.append(str(p.get("label") or pid))
+                elif p is not None:
+                    ids.append(str(p))
+        q = qmap.get(str(qid)) or {}
+        opt_labels = {
+            str(o.get("id") or ""): str(o.get("label") or "")
+            for o in (q.get("options") or []) if isinstance(o, dict)
+        }
+        if len(labels) < len(ids):
+            labels = [opt_labels.get(i) or i for i in ids]
+        if other and "other" not in ids:
+            ids.append("other")
+            labels.append(opt_labels.get("other") or tr("其他"))
+        answers[str(qid)] = {"ids": ids, "labels": labels, "other_text": other}
+        prompt = str(q.get("prompt") or qid)
+        shown = ", ".join(x for x in labels if x) or "（未选）"
+        if other:
+            shown += f"（补充：{other}）"
+        lines.append(f"{prompt}: {shown}")
+    return {"answers": answers, "summary": "\n".join(lines)}
+
+
 def _clip(obj, tool_name: str = "") -> str:
     if isinstance(obj, str):
         text = obj
@@ -452,27 +514,70 @@ def _search_modpacks(backend, query, source):
     return _trim_hits(backend.search_modpacks(query, src))
 
 
+# 「离线模式」是两端后端共用的协议哨兵：Qt 门面比对 tr() 后的译文，桥两种都认。
+# 这里两种写法都排除，英文界面下才不会把 "Offline mode" 当成一个正版账号选中。
+_OFFLINE_KEY = "离线模式"
+
+
+def _is_offline_name(name) -> bool:
+    text = str(name or "")
+    return not text or text == _OFFLINE_KEY or text == tr(_OFFLINE_KEY)
+
+
+def _default_account(backend, accounts) -> str:
+    """launch_game 没指明账号时的选法：当前激活账号 > 第一个非离线账号 > 离线。"""
+    mgr = getattr(backend, "accounts", None)
+    get_active = getattr(mgr, "get_active", None)
+    if callable(get_active):
+        try:
+            acc = get_active()
+        except Exception:
+            acc = None
+        name = acc.get("name") if isinstance(acc, dict) else ""
+        if name and not _is_offline_name(name) and name in (accounts or []):
+            return name
+    ms = [a for a in (accounts or []) if not _is_offline_name(a)]
+    return ms[0] if ms else tr(_OFFLINE_KEY)
+
+
 def confirm_label(name: str, args: dict) -> str:
-    inst = args.get("instance") or "默认实例"
-    mapping = {
-        "install_game": f"安装游戏 {args.get('version')} {args.get('loader') or ''} → {inst}",
-        "install_mod": f"安装模组 {args.get('name')} → {inst}",
-        "install_modpack": f"安装整合包 {args.get('name')} → {inst}",
-        "install_shader": f"安装光影 {args.get('name')} → {inst}",
-        "install_resourcepack": f"安装资源包 {args.get('name')} → {inst}",
-        "install_datapack": f"安装数据包 {args.get('name')} → {inst}",
-        "install_world": f"安装地图 {args.get('name')} → {inst}",
-        "download_java": f"下载 Java {args.get('major')}",
-        "launch_game": f"启动 {args.get('version') or '当前版本'} @ {inst}",
-        "create_instance": f"新建实例 {args.get('name')}",
-        "delete_instance": f"删除实例 {args.get('name')}（不可恢复）",
-        "delete_mod": f"删除模组 {args.get('filename')} @ {inst}",
-        "disable_mod": f"禁用模组 {args.get('filename')} @ {inst}",
-        "enable_mod": f"启用模组 {args.get('filename')} @ {inst}",
-        "write_mod_config": f"改配置 {args.get('path')} @ {inst}",
-        "ask_user": (args.get("prompt") or args.get("title") or "请选择"),
+    """确认卡上的一句话。原样透传到 Qt / WPF 的确认卡，所以在这里就要按界面语言翻好。"""
+    inst = args.get("instance") or tr("默认实例")
+    fmt = {
+        "install_game": tr("安装游戏 {version} {loader} → {inst}"),
+        "install_mod": tr("安装模组 {name} → {inst}"),
+        "install_modpack": tr("安装整合包 {name} → {inst}"),
+        "install_shader": tr("安装光影 {name} → {inst}"),
+        "install_resourcepack": tr("安装资源包 {name} → {inst}"),
+        "install_datapack": tr("安装数据包 {name} → {inst}"),
+        "install_world": tr("安装地图 {name} → {inst}"),
+        "download_java": tr("下载 Java {major}"),
+        "launch_game": tr("启动 {version} @ {inst}"),
+        "create_instance": tr("新建实例 {name}"),
+        "delete_instance": tr("删除实例 {name}（不可恢复）"),
+        "delete_mod": tr("删除模组 {filename} @ {inst}"),
+        "disable_mod": tr("禁用模组 {filename} @ {inst}"),
+        "enable_mod": tr("启用模组 {filename} @ {inst}"),
+        "write_mod_config": tr("改配置 {path} @ {inst}"),
     }
-    return mapping.get(name, f"执行 {name}")
+    if name == "ask_user":
+        return args.get("prompt") or args.get("title") or tr("请选择")
+    template = fmt.get(name)
+    if template is None:
+        return tr("执行 {name}").format(name=name)
+    fields = {
+        "inst": inst,
+        "version": args.get("version") or (tr("当前版本") if name == "launch_game" else ""),
+        "loader": args.get("loader") or "",
+        "name": args.get("name") or "",
+        "major": args.get("major") or "",
+        "filename": args.get("filename") or "",
+        "path": args.get("path") or "",
+    }
+    try:
+        return " ".join(template.format(**fields).split())
+    except (KeyError, IndexError, ValueError):
+        return template
 
 
 def execute_tool(backend, name: str, args: dict, wait=True, cancelled=None):
@@ -513,8 +618,13 @@ def execute_tool(backend, name: str, args: dict, wait=True, cancelled=None):
     if name == "list_mods":
         return mods_mod.list_instance_mod_entries(backend._instance(inst_name))
     if name == "install_game":
+        # 不装加载器就传空串：两个后端和 game_install 都认 ""，而硬编码「无」在英文
+        # 界面下会原样拼进任务标题（"Install game 1.20.1 + 无"）。
+        loader = str(args.get("loader") or "").strip()
+        if loader.lower() in ("无", "none", "vanilla"):
+            loader = ""
         tid = backend.install_game(
-            args.get("version"), args.get("loader") or "无",
+            args.get("version"), loader,
             args.get("loader_version") or "", inst_name)
         return backend.wait_task(tid, cancelled=cancelled) if wait else {"task_id": tid, "queued": True}
     if name == "install_mod":
@@ -614,13 +724,12 @@ def execute_tool(backend, name: str, args: dict, wait=True, cancelled=None):
         accounts = backend.get_accounts()
         account = args.get("account") or prefs.get("account") or ""
         if not account:
-            ms = [a for a in accounts if a and a != "离线模式"]
-            account = ms[0] if ms else "离线模式"
+            account = _default_account(backend, accounts)
         username = args.get("username") or prefs.get("username") or "Player"
         memory = int(args.get("memory_mb") or prefs.get("memory_mb") or CONFIG.get("memory_mb") or 4096)
         width = int(prefs.get("width") or CONFIG.get("width") or 854)
         height = int(prefs.get("height") or CONFIG.get("height") or 480)
-        java = prefs.get("java") or "自动选择"
+        java = prefs.get("java") or JAVA_AUTO
         inst = args.get("instance") or prefs.get("instance") or inst_name
         tid = backend.launch_game(
             inst, version, account, username, memory, width, height, java,

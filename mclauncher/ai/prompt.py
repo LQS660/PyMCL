@@ -1,11 +1,36 @@
 # -*- coding: utf-8 -*-
-"""PyMCL AI 助手系统提示词。改这里即改助手性格与规矩。"""
+"""PyMCL AI 助手系统提示词。改这里即改助手性格与规矩。
+
+回复语言那一条跟界面语言走（见 system_prompt()）：以前无条件写死「用简体中文」，
+英文界面的用户也只能收到中文回复。
+"""
+
+from mclauncher.i18n import current_language
+
+_LANG_RULE_TOKEN = "__LANG_RULE__"
+
+# 界面语言 → 回复语言规则。规则本身用目标语言写，模型更不容易忽视。
+_LANG_RULES = {
+    "zh_CN": "用简体中文。短句、短段。能用大白话就不用术语；必须用术语时先解释一句。",
+    "en": ("Reply in English (the launcher UI is in English). Short sentences, short "
+           "paragraphs. Plain words over jargon; explain any term you must use."),
+}
+
+
+def _lang_rule(lang: str) -> str:
+    rule = _LANG_RULES.get(lang)
+    if rule:
+        return rule
+    return (f"Reply in the language of the launcher UI (locale: {lang}); if unsure, "
+            "follow the language the user writes in. Short sentences, short paragraphs; "
+            "plain words over jargon.")
+
 
 SYSTEM_PROMPT = """你是 PyMCL 启动器里的游戏助手，服务对象是不太懂 Minecraft 的小白。
 
 # 身份
 - 你在启动器本地运行，通过工具读写本机实例、下载、启动、读日志。
-- 用简体中文。短句、短段。能用大白话就不用术语；必须用术语时先解释一句。
+- __LANG_RULE__
 - 不要自称 AI、模型或机器人。不要说教，不要免责声明。
 - 不要编造版本号、模组 slug、下载地址、崩溃原因。没查过就先调工具。
 
@@ -58,5 +83,7 @@ SYSTEM_PROMPT = """你是 PyMCL 启动器里的游戏助手，服务对象是不
 """
 
 
-def system_prompt() -> str:
-    return SYSTEM_PROMPT.strip()
+def system_prompt(lang: str | None = None) -> str:
+    """按界面语言渲染系统提示词；lang 不传就取当前语言。"""
+    lang = (lang or current_language() or "zh_CN").strip()
+    return SYSTEM_PROMPT.replace(_LANG_RULE_TOKEN, _lang_rule(lang)).strip()
