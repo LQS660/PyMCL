@@ -13,6 +13,7 @@ import uuid
 from mclauncher.i18n import tr
 
 from . import compact
+from . import checkpoint
 from . import permission
 from . import scheduler
 from . import store as chat_store
@@ -25,7 +26,7 @@ from .prompt import system_prompt
 from .result import AgentResult, StopReason
 from .state import IllegalTransition, ToolCall, ToolCallStatus, TurnPhase, TurnState
 from .tools import (
-    TOOL_META, TOOL_SCHEMAS, ToolCancelled, confirm_label, is_ask_tool,
+    TOOL_META, TOOL_SCHEMAS, ToolCancelled, affected_paths, confirm_label, is_ask_tool,
     normalize_ask_answer, normalize_ask_args, parse_args, run_tool, runtime_context,
 )
 
@@ -390,6 +391,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
         return res
 
     session_id = str((settings or {}).get("ai_session_id") or "active")
+    checkpoint.begin_chat(session_id)
     chat_store.log_event(session_id, "TurnStarted", turn_id=turn.id,
                          user_len=len(user_text or ""))
 
@@ -754,6 +756,19 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     meta = TOOL_META.get(obj.name)
                     label = confirm_label(obj.name, obj.args)
                     _status("tool_run", {"name": obj.name, "label": label})
+                    # 写/删落盘前先打检查点（变更可逆性）：快照失败不阻断本操作，
+                    # 但这一轮标记为不可回滚并明确告警
+                    if meta and meta.side_effect in ("write_local", "delete"):
+                        snap = checkpoint.snapshot(
+                            session_id, turn.id,
+                            affected_paths(backend, obj.name, obj.args))
+                        if not snap.get("ok"):
+                            _status("checkpoint_warn", {
+                                "name": obj.name,
+                                "message": tr("检查点不可用（{reason}），本轮改动无法一键撤回")
+                                           .format(reason=snap.get("reason") or "")})
+                            trace.record("checkpoint_unavailable", tool_name=obj.name,
+                                         reason=str(snap.get("reason") or ""))
                     wait = not (meta and (meta.long_running or meta.side_effect == "launch"))
                     result = run_tool(backend, obj.name, obj.args, wait=wait,
                                       cancelled=cancelled)

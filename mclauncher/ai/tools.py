@@ -7,6 +7,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from mclauncher import mods as mods_mod
 from mclauncher.config import CONFIG
@@ -376,6 +377,60 @@ def _inst_name(backend, args) -> str:
 
 def _inst(backend, args) -> Instance:
     return backend._instance(_inst_name(backend, args))
+
+
+def affected_paths(backend, name: str, args: dict) -> list:
+    """写/删工具将会触及的路径；目录条目按「目录范围」快照（回滚清新增项）。
+
+    checkpoint 快照用；返回空 = 该工具没有已知的落盘目标（如老后端缺方法）。
+    """
+    args = args or {}
+    try:
+        inst = _inst(backend, args)
+        inst_dir = inst.path
+    except Exception:  # noqa: BLE001
+        inst_dir = None
+    if inst_dir is None:
+        return []
+    mods_dir = inst_dir / "mods"
+    if name == "write_mod_config":
+        rel = str(args.get("path") or "").replace("\\", "/").lstrip("/")
+        if not rel or ".." in Path(rel).parts:
+            return []
+        return [inst_dir / "config" / rel]
+    if name == "delete_mod":
+        fname = str(args.get("filename") or "")
+        return [mods_dir / fname, mods_dir / (fname + ".disabled")]
+    if name in ("disable_mod", "enable_mod"):
+        fname = str(args.get("filename") or "")
+        return [mods_dir / fname, mods_dir / (fname + ".disabled")]
+    if name == "delete_instance":
+        return [inst_dir]
+    if name == "create_instance":
+        try:
+            return [inst_dir.parent / unique_instance_name(str(args.get("name") or "游戏"))]
+        except Exception:  # noqa: BLE001
+            return []
+    if name == "install_mod":
+        return [mods_dir]
+    if name == "install_shader":
+        return [inst_dir / "shaderpacks"]
+    if name == "install_resourcepack":
+        return [inst_dir / "resourcepacks"]
+    if name == "install_datapack":
+        return [inst_dir / "datapacks"]
+    if name == "install_world":
+        return [inst_dir / "saves"]
+    if name == "install_modpack":
+        return [inst_dir]
+    if name == "install_game":
+        return [inst.versions_dir()]
+    if name == "download_java":
+        try:
+            return [CONFIG.java_dir]
+        except Exception:  # noqa: BLE001
+            return []
+    return []
 
 
 def _merge_cache(old, rows):
