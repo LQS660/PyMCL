@@ -13,9 +13,21 @@ from PySide6.QtCore import QObject, Signal  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 from PySide6.QtCore import Qt  # noqa: E402
 
+import qfluentwidgets  # noqa: E402
 from app.pages.ai_page import AiPage  # noqa: E402
 from mclauncher.ai import store as chat_store  # noqa: E402
 from mclauncher.ai.result import AgentResult  # noqa: E402
+
+
+class _FakeBtn:
+    def setText(self, text):
+        pass
+
+    def setDefault(self, on):
+        pass
+
+    def setFocus(self):
+        pass
 
 
 class FakeBackend(QObject):
@@ -121,7 +133,22 @@ class AiChatSwitchTests(unittest.TestCase):
         worker = self._running()
         old_id = self.page._store["active_id"]
 
-        self.page._delete_chat()
+        # 契约变更（2026-09-21）：删除对话现在先过确认框（防误触丢历史）。
+        # 这里自动点「删除」，被测行为不变：确认后收掉回合、切到下一对话。
+        class _YesBox:
+            def __init__(self, *args):
+                self.yesButton = _FakeBtn()
+                self.cancelButton = _FakeBtn()
+
+            def exec(self):
+                return True
+
+        real_box = qfluentwidgets.MessageBox
+        qfluentwidgets.MessageBox = _YesBox
+        try:
+            self.page._delete_chat()
+        finally:
+            qfluentwidgets.MessageBox = real_box
         self.app.processEvents()
 
         self.assertTrue(worker.cancelled)
