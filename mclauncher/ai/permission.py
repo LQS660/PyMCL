@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -122,12 +123,23 @@ def _coerce_rule(raw) -> Rule | None:
 
 # ---------------------------------------------------------------- 判权
 
+def _norm_content(text) -> str:
+    """规则内容比对前的归一：去首尾空白、压掉连续空白、忽略大小写。
+
+    以前是精确字符串相等：用户定的 deny 规则 `name="jei"` 挡不住 `name="JEI"` /
+    `"jei "`；default 档下只是回落成 ASK，但 acceptEdits 档下回落成 ALLOW——模型换个
+    大小写就绕过了用户的禁用规则。模组 slug / 文件名 / 版本号都不区分大小写，
+    Windows 路径也不区分，所以统一 casefold 比对。
+    """
+    return " ".join(str(text or "").split()).casefold()
+
+
 def _matches(rule: Rule, tname: str, content: str | None) -> bool:
     if rule.tool_name != tname:
         return False
     if not rule.rule_content:
         return True
-    return rule.rule_content == (content or "")
+    return _norm_content(rule.rule_content) == _norm_content(content)
 
 
 def decide(tool_meta, args, mode, rules) -> PermissionResult:
@@ -263,6 +275,10 @@ def permission_note(settings: dict) -> str:
 
 PERMISSIONS_FILE = None   # None = 默认 utils.ROOT/ai_permissions.json；测试可覆盖
 _STORE_VERSION = 1
+# 规则库的读-改-写要在一把锁里做：agent 线程点「以后都允许」(append_rule) 与 UI 线程
+# 在权限对话框增删规则 (append_rule / remove_rule) 各自整库快照再落盘，后落盘者会
+# 吞掉对方的改动。进程内一把可重入锁就够（两端后端都是单进程多线程）。
+_STORE_LOCK = threading.RLock()
 
 
 def _store_path():
@@ -279,7 +295,8 @@ def _blank_store() -> dict:
 
 
 def load_rule_store() -> dict:
-    data = utils.read_json(_store_path(), None)
+    with _STORE_LOCK:
+        data = utils.read_json(_store_path(), None)
     if not isinstance(data, dict):
         return _blank_store()
     store = _blank_store()
@@ -298,7 +315,8 @@ def load_rule_store() -> dict:
 
 
 def save_rule_store(store: dict):
-    utils.write_json(_store_path(), store)
+    with _STORE_LOCK:
+        utils.write_json(_store_path(), store)
 
 
 def _rules_of(store: dict, section: dict) -> list:
@@ -324,18 +342,19 @@ def load_rules(instance: str | None = None) -> list:
 
 def append_rule(rule: Rule, instance: str | None = None):
     """把一条规则写进 store：有实例名进 per_instance，否则进 global。"""
-    store = load_rule_store()
-    bucket = rule.behavior.value
-    entry = {"toolName": rule.tool_name}
-    if rule.rule_content:
-        entry["ruleContent"] = rule.rule_content
-    target = store["per_instance"].setdefault(instance, {"allow": [], "deny": [], "ask": []}) \
-        if instance else store["global"]
-    lst = target.setdefault(bucket, [])
-    keys = {f"{r.get('toolName')}\0{r.get('ruleContent') or ''}" for r in lst}
-    if rule.key() not in keys:
-        lst.append(entry)
-    save_rule_store(store)
+    with _STORE_LOCK:
+        store = load_rule_store()
+        bucket = rule.behavior.value
+        entry = {"toolName": rule.tool_name}
+        if rule.rule_content:
+            entry["ruleContent"] = rule.rule_content
+        target = store["per_instance"].setdefault(instance, {"allow": [], "deny": [], "ask": []}) \
+            if instance else store["global"]
+        lst = target.setdefault(bucket, [])
+        keys = {f"{r.get('toolName')}\0{r.get('ruleContent') or ''}" for r in lst}
+        if rule.key() not in keys:
+            lst.append(entry)
+        save_rule_store(store)
 
 
 def rules_to_json(rules) -> list:
@@ -400,25 +419,26 @@ def remove_rule(key: str, instance: str | None = None) -> bool:
     该实例那条——同一条规则可能全局、实例各存一份，界面上点删哪行就该只删哪行。
     返回是否删到了。
     """
-    store = load_rule_store()
-    if instance is None:
-        sections = [store["global"]] + list(store["per_instance"].values())
-    elif instance == "":
-        sections = [store["global"]]
-    else:
-        sections = [store["per_instance"].get(instance) or {}]
-    removed = False
-    for section in sections:
-        for bucket in ("allow", "deny", "ask"):
-            lst = section.get(bucket) or []
-            keep = []
-            for raw in lst:
-                r = _coerce_rule(raw)
-                if r is not None and r.key() == key:
-                    removed = True
-                    continue
-                keep.append(raw)
-            section[bucket] = keep
-    if removed:
-        save_rule_store(store)
-    return removed
+    with _STORE_LOCK:
+        store = load_rule_store()
+        if instance is None:
+            sections = [store["global"]] + list(store["per_instance"].values())
+        elif instance == "":
+            sections = [store["global"]]
+        else:
+            sections = [store["per_instance"].get(instance) or {}]
+        removed = False
+        for section in sections:
+            for bucket in ("allow", "deny", "ask"):
+                lst = section.get(bucket) or []
+                keep = []
+                for raw in lst:
+                    r = _coerce_rule(raw)
+                    if r is not None and r.key() == key:
+                        removed = True
+                        continue
+                    keep.append(raw)
+                section[bucket] = keep
+        if removed:
+            save_rule_store(store)
+        return removed
