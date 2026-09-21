@@ -577,7 +577,7 @@ class SettingsPage(QWidget):
         row.addWidget(self.test_ai_btn)
         row.addStretch(1)
         root.addLayout(row)
-        root.addWidget(CaptionLabel(f"启动器主目录: {settings.get('root', '')}"))
+        root.addWidget(CaptionLabel(tr("启动器主目录: {0}").format(settings.get("root", ""))))
         root.addStretch(1)
 
         self.save_btn.clicked.connect(self._save)
@@ -985,6 +985,11 @@ class SettingsPage(QWidget):
         from PySide6.QtCore import QProcess
         from PySide6.QtWidgets import QApplication
         args = list(sys.argv)
+        # python + main.py：argv[0] 是 main.py，必须原样带给新进程；
+        # 冻结 exe：argv[0] 就是 exe 自身，startDetached 的 program 已经是它，
+        # 再传会变成多余的位置参数，重启出来的实例解析参数就报错
+        if getattr(sys, "frozen", False):
+            args = args[1:]
         # pythonw/python + main.py … 或打包后的 exe
         ok = QProcess.startDetached(sys.executable, args)
         if not ok:
