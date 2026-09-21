@@ -7,6 +7,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from mclauncher import mods as mods_mod
@@ -938,16 +939,76 @@ class ToolCancelled(Exception):
     """用户点了停止：工具执行里抛出，agent 捕获后转 StopReason.CANCELLED。"""
 
 
+# ---------------------------------------------------------------- 5.2 错误面
+
+class ToolErrorCode(str, Enum):
+    """内置工具的错误码枚举（批次 5.2）：错误面统一走 结构化回执，不再把
+    原始异常字符串直接喂给模型。完整堆栈留在 trace（tool_exception）。"""
+
+    BAD_ARGUMENTS = "bad_arguments"
+    NOT_FOUND = "not_found"
+    PERMISSION_DENIED = "permission_denied"
+    TIMEOUT = "timeout"
+    CANCELLED = "cancelled"
+    IO_ERROR = "io_error"
+    UPSTREAM_ERROR = "upstream_error"
+    UNKNOWN = "unknown"
+
+
+_ERROR_READABLE = {
+    ToolErrorCode.BAD_ARGUMENTS: "工具参数不合法",
+    ToolErrorCode.NOT_FOUND: "目标不存在",
+    ToolErrorCode.PERMISSION_DENIED: "没有权限执行",
+    ToolErrorCode.TIMEOUT: "执行超时",
+    ToolErrorCode.CANCELLED: "已被用户停止",
+    ToolErrorCode.IO_ERROR: "读写文件失败",
+    ToolErrorCode.UPSTREAM_ERROR: "上游服务出错",
+    ToolErrorCode.UNKNOWN: "执行失败",
+}
+
+
+def classify_exception(exc: BaseException) -> ToolErrorCode:
+    if isinstance(exc, ToolCancelled):
+        return ToolErrorCode.CANCELLED
+    if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired if False else TimeoutError)):
+        return ToolErrorCode.TIMEOUT
+    if isinstance(exc, (FileNotFoundError, LookupError)):
+        return ToolErrorCode.NOT_FOUND
+    if isinstance(exc, PermissionError):
+        return ToolErrorCode.PERMISSION_DENIED
+    if isinstance(exc, OSError):
+        return ToolErrorCode.IO_ERROR
+    if isinstance(exc, (json.JSONDecodeError, ValueError, KeyError)):
+        return ToolErrorCode.UPSTREAM_ERROR
+    return ToolErrorCode.UNKNOWN
+
+
+def tool_error_payload(exc: BaseException, name: str,
+                       code: ToolErrorCode | None = None) -> str:
+    """异常 → 结构化回执（错误码 + 用户可读文案 + 一句短原因）。堆栈只进 trace。"""
+    code = code or classify_exception(exc)
+    payload = {
+        "ok": False,
+        "error_code": code.value,
+        "message": _ERROR_READABLE[code],
+        "detail": f"{type(exc).__name__}: {exc}"[:200],
+        "tool": name,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def bad_args_payload(name: str, message: str) -> str:
+    return json.dumps({"ok": False, "error_code": ToolErrorCode.BAD_ARGUMENTS.value,
+                       "message": message, "tool": name}, ensure_ascii=False)
+
+
 def run_tool(backend, name: str, raw_args, wait=True, cancelled=None) -> str:
     if cancelled is not None and cancelled():
         raise ToolCancelled("已停止")
-    if isinstance(raw_args, str):
-        try:
-            args = json.loads(raw_args or "{}")
-        except json.JSONDecodeError:
-            args = {}
-    else:
-        args = dict(raw_args or {})
+    args, parse_err = parse_args(raw_args, name)
+    if parse_err:
+        trace.record("tool_bad_args", tool_name=name, detail=parse_err[:200])
+        return bad_args_payload(name, parse_err)
     try:
         result = execute_tool(backend, name, args, wait=wait, cancelled=cancelled)
         if cancelled is not None and cancelled():
@@ -957,20 +1018,86 @@ def run_tool(backend, name: str, raw_args, wait=True, cancelled=None) -> str:
         raise
     except Exception as exc:  # noqa: BLE001
         trace.record("tool_exception", tool_name=name, exc=exc)
-        return f"工具失败: {exc}"
+        return tool_error_payload(exc, name)
 
 
-def parse_args(raw) -> dict:
+# ---- 5.1 参数校验：不合 schema 返回结构化错误（含字段名），不再以空参数静默执行
+
+_TYPE_CHECK = {
+    "string": lambda v: isinstance(v, str),
+    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "boolean": lambda v: isinstance(v, bool),
+    "array": lambda v: isinstance(v, list),
+    "object": lambda v: isinstance(v, dict),
+}
+
+
+def _schema_of(name: str) -> dict | None:
+    for s in TOOL_SCHEMAS:
+        if s["function"]["name"] == name:
+            return s["function"].get("parameters") or {}
+    return None
+
+
+def _validate_schema(name: str, args: dict) -> str | None:
+    """按 schema 校验入参。返回 None = 通过；否则给含字段名的错误描述。"""
+    params = _schema_of(name)
+    if not params:
+        return None
+    required = params.get("required") or []
+    missing = [k for k in required if k not in args or args[k] in (None, "")]
+    if missing:
+        return f"缺少必填字段: {', '.join(missing)}。请补齐后重新调用 {name}。"
+    props = params.get("properties") or {}
+    wrong = []
+    for key, spec in props.items():
+        if key not in args or not isinstance(spec, dict):
+            continue
+        want = spec.get("type")
+        check = _TYPE_CHECK.get(want)
+        if check and not check(args[key]):
+            got = type(args[key]).__name__
+            wrong.append(f"{key}（应为 {want}，实际 {got}）")
+    if wrong:
+        return "字段类型不对: " + "; ".join(wrong) + f"。请修正后重新调用 {name}。"
+    return None
+
+
+def parse_args(raw, name: str = "") -> tuple[dict, str | None]:
+    """解析模型给的工具参数。返回 (args, error)：error 非 None 就是给模型的结构化错误。
+
+    - JSON 截断 / 非法：不再静默 {}；key=value 风格抢救出来但明确要求重发；
+    - 值带多余空格：字符串自动去首尾空白（回执里不用提，直接修好）；
+    - 缺必填 / 类型错：按 schema 给含字段名的错误。
+    """
     if isinstance(raw, dict):
-        return raw
-    if not raw:
-        return {}
-    try:
-        data = json.loads(raw)
-        return data if isinstance(data, dict) else {}
-    except json.JSONDecodeError:
-        # 模型有时吐出 key=value
-        out = {}
-        for m in re.finditer(r'"(\w+)"\s*:\s*"([^"]*)"', raw):
-            out[m.group(1)] = m.group(2)
-        return out
+        args = dict(raw)
+        err = None
+    elif raw is None or not str(raw).strip():
+        args, err = {}, None
+    else:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                args, err = data, None
+            else:
+                args, err = {}, f"参数必须是 JSON 对象，收到的是 {type(data).__name__}。请用 {{}} 包裹字段重发。"
+        except json.JSONDecodeError:
+            # 模型有时吐出 key=value（name="jei"）或半截 JSON：先抢救，再明确
+            # 告诉模型这不算数、要按标准 JSON 重发
+            out = {}
+            for m in re.finditer(r'"?(\w+)"?\s*[:=]\s*"([^"]*)"', raw):
+                out.setdefault(m.group(1), m.group(2))
+            for m in re.finditer(r'"?(\w+)"?\s*[:=]\s*([-\w.]+)', raw):
+                out.setdefault(m.group(1), m.group(2))
+            if out:
+                args = out
+                err = (f"参数不是合法 JSON，已按 key=value 抢救出 {len(out)} 个字段"
+                       f"（{', '.join(sorted(out))}）。请改用标准 JSON 重新调用。")
+            else:
+                args, err = {}, "参数不是合法 JSON（疑似被截断）。请把参数作为合法 JSON 对象重发。"
+    if err is None and args:
+        args = {k: (v.strip() if isinstance(v, str) else v) for k, v in args.items()}
+        err = _validate_schema(name, args)
+    return args, err

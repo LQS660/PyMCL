@@ -33,7 +33,7 @@ from .state import IllegalTransition, ToolCall, ToolCallStatus, TurnPhase, TurnS
 from .tools import (
     TOOL_META, TOOL_SCHEMAS, ToolCancelled, affected_paths, confirm_label, is_ask_tool,
     normalize_ask_answer, normalize_ask_args, parse_args, run_tool, runtime_context,
-    select_tool_schemas,
+    select_tool_schemas, tool_error_payload, ToolErrorCode,
 )
 
 
@@ -765,12 +765,16 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             acted = True
 
             tool_objs = []
+            parse_errors: dict = {}
             for i, tc in enumerate(tool_calls):
                 fn = tc.get("function") or {}
+                parsed_args, parse_err = parse_args(fn.get("arguments"), fn.get("name") or "")
                 obj = turn.add_tool_call(ToolCall(
                     id=tc["id"],
                     name=fn.get("name") or "",
-                    args=parse_args(fn.get("arguments"))))
+                    args=parsed_args))
+                if parse_err:
+                    parse_errors[obj.id] = parse_err
                 tool_objs.append(obj)
                 _status("tool", {"name": obj.name, "args": obj.args,
                                  "label": confirm_label(obj.name, obj.args)})
@@ -848,6 +852,15 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             turn.transition(TurnPhase.EXECUTING_TOOLS)
 
             def _execute(obj: ToolCall) -> str:
+                # 5.1 参数不合 schema：给模型结构化回执，绝不用空参数静默执行
+                if obj.id in parse_errors:
+                    err = parse_errors[obj.id]
+                    trace.record("tool_bad_args", tool_name=obj.name, detail=err[:200])
+                    payload = tool_error_payload(ValueError(err), obj.name,
+                                                 code=ToolErrorCode.BAD_ARGUMENTS)
+                    turn.set_tool_status(obj.id, ToolCallStatus.FAILED,
+                                         error=err, result=payload)
+                    return payload
                 try:
                     _check()
                     turn.set_tool_status(obj.id, ToolCallStatus.RUNNING)
@@ -934,7 +947,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     chat_store.log_event(session_id, "ToolFailed",
                                          turn_id=turn.id, round=round_no[0],
                                          tool=obj.name, error=str(exc)[:200])
-                    return f"工具失败: {exc}"
+                    return tool_error_payload(exc, obj.name)
 
             runnable = [obj for obj in tool_objs if decisions[obj.id][0] == "allow"]
             groups = scheduler.group(runnable, TOOL_META, max_concurrency=4)

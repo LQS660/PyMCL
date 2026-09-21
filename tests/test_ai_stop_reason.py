@@ -164,7 +164,9 @@ class TraceTests(StopReasonTestBase):
     def test_tool_exception_is_traced(self):
         """W0-4：工具执行异常带 tool_name 落盘。"""
         out = ai_tools.run_tool(SimpleNamespace(), "list_mods", {})
-        self.assertTrue(str(out).startswith("工具失败"))
+        # 契约变化（批次 5.2）：原始异常串换成结构化回执（错误码 + 可读文案）
+        self.assertIn("error_code", str(out))
+        self.assertIn("tool", str(out))
         hit = [e for e in self._trace_events() if e.get("event") == "tool_exception"]
         self.assertTrue(hit)
         self.assertEqual(hit[0]["tool_name"], "list_mods")
