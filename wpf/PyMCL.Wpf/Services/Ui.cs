@@ -31,6 +31,7 @@ public static class Ico
     public const string Folder = "\uE8B7";
     public const string Trash = "\uE74D";
     public const string Refresh = "\uE72C";
+    public const string Back = "\uE72B";
     public const string Search = "\uE721";
     public const string Add = "\uE710";
     public const string Check = "\uE73E";

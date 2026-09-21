@@ -2710,6 +2710,24 @@ class BackendAPI:
         chat_store.set_active(data, chat_id)
         return self._localize_chats(data)
 
+    def ai_rewind(self, chat_id: str = "") -> dict:
+        """撤回最近一轮：对话截回上一轮之前，该轮写/删改动用检查点还原。
+
+        与 Qt 端 app/pages/ai_page.py 的 _rewind 走同一个 rewind.rewind_last_round，
+        两端行为一致。busy 时不给撤（回合还在跑，截了也会被结果覆盖）。
+        """
+        from mclauncher.ai import rewind as ai_rewind_mod
+        if self._ai_busy:
+            return {"ok": False, "truncated": False, "restored_files": 0,
+                    "restored_bytes": 0, "rollbackable": False, "disk_changed": False,
+                    "message": tr("回合还在跑，先停止再撤回")}
+        cid = str(chat_id or "").strip()
+        if not cid:
+            from mclauncher.ai import store as chat_store
+            data = chat_store.load()
+            cid = str(data.get("active_id") or "")
+        return ai_rewind_mod.rewind_last_round(cid)
+
     @staticmethod
     def _localize_chats(data: dict) -> dict:
         """对话列表吐给前端前把默认标题「新对话」翻掉。
@@ -2888,8 +2906,15 @@ class BackendAPI:
             # 记下这张卡对应的工具与参数：前端点「始终允许」时 ai_confirm 靠它拼 Rule
             self._ai_confirm_ctx = (name, dict(args or {}))
             from mclauncher.ai.permission import rule_content_from_input
+            # 变更预览与 Qt 端同一函数：两端确认卡渲染同一份 lines，信息量一致
+            try:
+                from mclauncher.ai import preview as ai_preview
+                pv = ai_preview.change_preview(self, name, args or {})
+            except Exception:
+                pv = None
             payload = {"name": name, "args": args or {}, "label": label, "reason": reason or "",
                        "rule_content": rule_content_from_input(args or {}) or "",
+                       "preview": pv or {},
                        "chat_id": run_cid}
             # 卡片在 SSE 断线窗口里发出去就丢了，前端看不到卡、内核却在这儿等；
             # 存一份「待回答的卡」，前端重连后拿 ai_pending_card / ai_list_chats 对账补画。

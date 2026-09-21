@@ -179,7 +179,8 @@ class BridgeAiPayloadParityTests(unittest.TestCase):
     # 的说明文案靠它，不用把键表抄进 C#。
     # chat_id 随 payload 进确认卡：SSE 断线重连后，前端靠它判断这张待回答的卡
     # 是不是当前对话的，别把旧对话的确认卡补画进新对话。
-    CONFIRM_KEYS = {"name", "args", "label", "reason", "rule_content"} | ROUTING_KEYS
+    # preview：写工具的变更预览（diff / 文件数字节数 / 目标路径），Qt 与 WPF 渲染同一份。
+    CONFIRM_KEYS = {"name", "args", "label", "reason", "rule_content", "preview"} | ROUTING_KEYS
 
     def _payload_keys(self, event: str) -> set:
         """AST 抽出 bridge/api.py 里 emit("<event>", {…}) 的键集合。

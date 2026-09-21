@@ -27,7 +27,7 @@ public sealed class AiPage : PageBase
     {
         L("每次确认"), L("写直接执行"), L("只看不动"), L("全自动"), L("自定义")
     }, width: 112);
-    private readonly Button _send, _stop, _retry;
+    private readonly Button _send, _stop, _retry, _rewind;
     private readonly TextBlock _status = Ui.Small("");
     private bool _syncPerm;
     private readonly StringBuilder _stream = new();
@@ -49,6 +49,8 @@ public sealed class AiPage : PageBase
         _send = Ui.Btn(L("发送"), BtnKind.Primary, (_, _) => Run(SendAsync), Ico.Send);
         _stop = Ui.Btn(L("停止"), BtnKind.Danger, (_, _) => Run(StopAsync), Ico.Stop);
         _retry = Ui.Btn(L("重试"), BtnKind.Chip, (_, _) => Run(RetryAsync), Ico.Refresh);
+        // 撤回最近一轮（对齐 Qt _rewind）：对话截回上一轮之前，该轮写/删改动一并还原
+        _rewind = Ui.Btn(L("撤回"), BtnKind.Chip, (_, _) => Run(RewindAsync), Ico.Back);
         _stop.IsEnabled = false;
         _retry.IsEnabled = false;
         _perm.ToolTip = L("AI 权限等级");
@@ -86,7 +88,7 @@ public sealed class AiPage : PageBase
             _input,
             Ui.G(null, "*,Auto")
                 .Add(_status.VCenter(), 0, 0)
-                .Add(Ui.H(8, _perm, _retry, _stop, _send), 0, 1)), 14);
+                .Add(Ui.H(8, _perm, _rewind, _retry, _stop, _send), 0, 1)), 14);
 
         var main = Ui.G("*,Auto");
         main.Add(Ui.Card(_scroll, 10), 0, 0);
@@ -266,6 +268,7 @@ public sealed class AiPage : PageBase
             _messages.Children.Add(Ui.Empty(Ico.Robot, L("问点什么吧"),
                 L("「下一款 1.20.1 Fabric」「装钠和光影」「启动闪退了帮我看看」——写操作前会先弹确认。")));
             _retry.IsEnabled = false;
+            _rewind.IsEnabled = false;
             return;
         }
         foreach (var m in chat.Messages)
@@ -278,6 +281,7 @@ public sealed class AiPage : PageBase
         }
         Motion.Stagger(_messages, 18, 200, 8);
         _retry.IsEnabled = !_busy && LastUserText().Length > 0;
+        _rewind.IsEnabled = _retry.IsEnabled;
         ScrollDown();
     }
 
@@ -357,11 +361,33 @@ public sealed class AiPage : PageBase
         }
     }
 
+    /// <summary>撤回最近一轮（对齐 Qt _rewind）：对话截回上一轮之前，该轮写/删改动一并还原。</summary>
+    private async Task RewindAsync()
+    {
+        var r = await Api.TryCallAsync<JsonElement>("ai_rewind",
+            new { chat_id = _store.ActiveId ?? "" });
+        _store = await Api.TryCallAsync<AiStoreDto>("ai_list_chats", null, _store) ?? _store;
+        RenderMessages();
+        var ok = r.ValueKind == JsonValueKind.Object && r.TryGetProperty("ok", out var okEl) && okEl.GetBoolean();
+        var diskChanged = r.ValueKind == JsonValueKind.Object
+                          && r.TryGetProperty("disk_changed", out var dcEl) && dcEl.GetBoolean();
+        var restored = 0;
+        if (r.ValueKind == JsonValueKind.Object && r.TryGetProperty("restored_files", out var rfEl)
+            && rfEl.TryGetInt32(out var n)) restored = n;
+        if (diskChanged && ok)
+            _status.Text = string.Format(L("已撤回：{0} 个文件的改动已还原"), restored);
+        else if (diskChanged)
+            _status.Text = L("对话已回退，但磁盘改动没能全部还原，请手动检查相关文件");
+        else
+            _status.Text = L("已撤回：只回退了对话，这一轮没有可还原的磁盘改动");
+    }
+
     private void SetBusy(bool on)
     {
         _busy = on;
         _send.IsEnabled = !on;
         _stop.IsEnabled = on;
+        _rewind.IsEnabled = !on && LastUserText().Length > 0;
         _retry.IsEnabled = !on && LastUserText().Length > 0;
     }
 
@@ -592,13 +618,27 @@ public sealed class AiPage : PageBase
                      && ev.Payload.TryGetProperty("reason", out var rr)
                      && rr.ValueKind == JsonValueKind.String
             ? rr.GetString() ?? "" : "";
-        var args = "";
-        if (ev.Payload.ValueKind == JsonValueKind.Object && ev.Payload.TryGetProperty("args", out var a))
-            args = a.ToString();
+        // 变更预览：桥端与 Qt 用同一函数生成 preview.lines，这里逐行展示，两端信息量一致
+        var detail = reason ?? "";
+        if (ev.Payload.ValueKind == JsonValueKind.Object
+            && ev.Payload.TryGetProperty("preview", out var pv)
+            && pv.ValueKind == JsonValueKind.Object
+            && pv.TryGetProperty("lines", out var pvLines)
+            && pvLines.ValueKind == JsonValueKind.Array)
+        {
+            var lines = new List<string>();
+            if (pv.TryGetProperty("head", out var pvHead) && pvHead.ValueKind == JsonValueKind.String)
+                lines.Add(pvHead.GetString() ?? "");
+            foreach (var line in pvLines.EnumerateArray())
+                if (line.ValueKind == JsonValueKind.String) lines.Add(line.GetString() ?? "");
+            var preview = string.Join("\n", lines.Where(l => l.Length > 0));
+            if (preview.Length > 0)
+                detail = string.IsNullOrWhiteSpace(detail) ? preview : preview + "\n" + detail;
+        }
         var allowAlways = !string.Equals(name, "delete_instance", StringComparison.Ordinal)
                           && !string.Equals(name, "delete_mod", StringComparison.Ordinal);
         var card = new ConfirmCard(label,
-            string.IsNullOrWhiteSpace(reason) ? args : reason,
+            detail,
             allowAlways,
             (ok, always, scope) =>
                 Run(async () => await Api.TryCallAsync<object>("ai_confirm",
