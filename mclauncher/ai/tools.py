@@ -235,6 +235,22 @@ TOOL_SCHEMAS = [
         "task": {"type": "string", "description": "子任务一句话说清楚要干什么"},
         "context": {"type": "string", "description": "相关背景（实例名/报错原文等），可选"},
     }, ["task"], readonly=True, side_effect="none"),
+    _schema("update_plan",
+            "维护本次任务的待办清单并在界面展示。三步以上的活先出计划再动手；"
+            "每次更新都传完整清单，状态只能是 pending / in_progress / completed。", {
+        "items": {
+            "type": "array",
+            "description": "完整待办列表",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "这一步要干什么"},
+                    "status": {"type": "string",
+                               "description": "pending / in_progress / completed"},
+                },
+            },
+        },
+    }, ["items"], readonly=True, side_effect="none"),
 ]
 
 
@@ -252,7 +268,7 @@ _CORE_TOOLS = (
     "ask_user", "get_launcher_state", "list_instances", "list_mods",
     "search_mods", "install_mod", "install_modpack", "create_instance",
     "launch_game", "diagnose_launch", "get_latest_log", "get_crash_report",
-    "write_mod_config", "dispatch_subagent",
+    "write_mod_config", "dispatch_subagent", "update_plan",
 )
 
 # (关键词组, 追加工具组)：命中任一关键词就整组声明
@@ -712,6 +728,7 @@ def confirm_label(name: str, args: dict) -> str:
         "disable_mod": tr("禁用模组 {filename} @ {inst}"),
         "enable_mod": tr("启用模组 {filename} @ {inst}"),
         "write_mod_config": tr("改配置 {path} @ {inst}"),
+        "plan_approval": tr("批准这份计划并继续？{n} 项待办"),
     }
     if name == "ask_user":
         return args.get("prompt") or args.get("title") or tr("请选择")
@@ -726,6 +743,7 @@ def confirm_label(name: str, args: dict) -> str:
         "major": args.get("major") or "",
         "filename": args.get("filename") or "",
         "path": args.get("path") or "",
+        "n": len(args.get("items") or []) if name == "plan_approval" else "",
     }
     try:
         return " ".join(template.format(**fields).split())

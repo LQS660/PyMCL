@@ -16,6 +16,7 @@ from . import compact
 from . import checkpoint
 from . import hooks as hook_mod
 from . import mcp as mcp_mod
+from . import memory as memory_mod
 from . import permission
 from . import scheduler
 from . import store as chat_store
@@ -124,6 +125,14 @@ def _system_messages(backend, settings: dict) -> list:
     note = permission.permission_note(settings or {})
     if note:
         msgs.append({"role": "system", "content": note})
+    # 3.5 长期记忆插槽：默认 NoopMemory 返回空串，不追加任何消息——
+    # 启用与否模型请求逐字一致（空实现一致性由 tests 钉死）
+    try:
+        mem_text = memory_mod.get_memory().load(str((settings or {}).get("ai_session_id") or "active"))
+    except Exception:  # noqa: BLE001
+        mem_text = ""
+    if mem_text:
+        msgs.append({"role": "system", "content": f"长期记忆：\n{mem_text}"})
     return msgs
 
 
@@ -368,6 +377,9 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
     fallback_model = str((settings or {}).get("ai_fallback_model") or "").strip()
     fallback_active = [False]
 
+    # ---- 3.4 计划工作流：模型出的结构化待办 + plan 档批准门禁 ----
+    plan_holder = {"items": [], "turn_id": "", "approved": False}
+
     def _maybe_fallback(exc: AIClientError) -> bool:
         if not fallback_model or fallback_active[0]:
             return False
@@ -406,6 +418,8 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
         res = AgentResult(text, stop_reason=reason, **kw)
         # 用量口径给 UI：provider_usage = 真实回执；estimate = 公益网关拿不到 usage 的估算
         res.usage_source = token_state.source
+        # 3.4 本回合最新的待办计划（UI 持久化用）
+        res.plan = list(plan_holder["items"]) if plan_holder["turn_id"] == turn.id else []
         try:
             # 本回合完整轨迹（不含 system 头），供 UI 持久化（W5-1）
             export = [dict(m) for m in messages
@@ -420,16 +434,17 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             # 只属于本回合的那一段（用户这句 + 工具轨迹 + 最终正文）：UI 往历史里
             # 追加时用它，别把 messages 里抄来的旧历史再存一遍。压缩过就取不准了，
             # 退回「用户这句 + 最终正文」。
+            # 局部名用 turn_slice，别遮蔽外层的 TurnState（plan 归属判定要用 turn.id）
             if compacted[0]:
-                turn = [{"role": "user", "content": user_text}]
+                turn_slice = [{"role": "user", "content": user_text}]
             else:
-                turn = [dict(m) for m in messages[base_len:]
-                        if isinstance(m, dict) and m.get("role") != "system"]
-            if text and (not turn
-                         or turn[-1].get("role") != "assistant"
-                         or turn[-1].get("tool_calls")):
-                turn.append({"role": "assistant", "content": str(text)})
-            res.turn_messages = turn
+                turn_slice = [dict(m) for m in messages[base_len:]
+                              if isinstance(m, dict) and m.get("role") != "system"]
+            if text and (not turn_slice
+                         or turn_slice[-1].get("role") != "assistant"
+                         or turn_slice[-1].get("tool_calls")):
+                turn_slice.append({"role": "assistant", "content": str(text)})
+            res.turn_messages = turn_slice
         except Exception:  # noqa: BLE001
             res.messages = []
             res.turn_messages = []
@@ -862,7 +877,16 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                         trace.record("hook_errors", tool_name=obj.name,
                                      phase="before", count=len(hb_errs))
                     obj.args = hooked_args
-                    if obj.name == "dispatch_subagent":
+                    if obj.name == "update_plan":
+                        # 3.4 计划工作流：结构化待办进 UI，不落任何后端操作
+                        items = [it for it in (obj.args.get("items") or [])
+                                 if isinstance(it, dict) and str(it.get("title") or "").strip()]
+                        plan_holder["items"] = items
+                        plan_holder["turn_id"] = turn.id
+                        plan_holder["approved"] = False
+                        _status("plan", {"items": items, "turn_id": turn.id})
+                        result = f"已更新计划（共 {len(items)} 项）"
+                    elif obj.name == "dispatch_subagent":
                         # 3.3 子代理：独立轮数上限、只读工具、结构化结论回主对话
                         result = run_subagent(backend, settings, obj.args,
                                               cancelled=cancelled)
@@ -924,6 +948,34 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     "name": obj.name,
                     "content": obj.result or "",
                 })
+
+            # 3.4 plan 权限档门禁：模型出了计划必须等用户批准才继续；
+            # 拒绝 → 本轮立刻结束。plan 模式下写操作本来就被判权 DENY，
+            # 这里再验证一遍，保证「拒绝后未执行任何写操作」可证明。
+            if mode == permission.PermissionMode.PLAN and plan_holder["items"] \
+                    and plan_holder["turn_id"] == turn.id \
+                    and not plan_holder["approved"]:
+                approval = _call_confirm(confirm_fn, "plan_approval",
+                                         {"items": plan_holder["items"]},
+                                         confirm_label("plan_approval",
+                                                       {"items": plan_holder["items"]}),
+                                         "")
+                if isinstance(approval, Rule):
+                    approval = True
+                plan_holder["approved"] = bool(approval)
+                _status("plan_approval", {"approved": bool(approval),
+                                          "turn_id": turn.id})
+                if not approval:
+                    write_calls = [o.name for o in tool_objs
+                                   if TOOL_META.get(o.name)
+                                   and not TOOL_META[o.name].readonly]
+                    trace.record("plan_rejected", writes=write_calls)
+                    _to_phase(turn, TurnPhase.COMPLETING)
+                    return _result(
+                        "计划未获批准，本轮到此为止"
+                        + ("。（本轮没有执行任何写操作）" if not write_calls else ""),
+                        StopReason.COMPLETED, rounds_used=round_no[0])
+
             turn.transition(TurnPhase.AWAITING_MODEL)
             cstate.tool_turns_since_compact += 1
     except AgentCancelled:

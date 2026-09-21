@@ -65,7 +65,7 @@ def load() -> dict:
     for raw in data["chats"]:
         if not isinstance(raw, dict) or not raw.get("id"):
             continue
-        chats.append({
+        entry = {
             "id": str(raw["id"]),
             "title": str(raw.get("title") or "对话")[:40],
             "updated": int(raw.get("updated") or 0),
@@ -75,7 +75,10 @@ def load() -> dict:
                 if isinstance(m, dict)
                 and m.get("role") in ("user", "assistant", "error", "tool")
             ][-MAX_MESSAGES:],
-        })
+        }
+        if isinstance(raw.get("plan"), dict):
+            entry["plan"] = raw["plan"]     # 3.4 待办计划随会话持久化
+        chats.append(entry)
     if not chats:
         data = _empty()
         save(data)
@@ -202,6 +205,21 @@ def delete_chat(data: dict, cid: str) -> dict:
         data["active_id"] = data["chats"][0]["id"]
     save(data)
     return get_chat(data, data["active_id"])
+
+
+def set_plan(data: dict, cid: str, plan: dict | None) -> None:
+    """存/清一条对话的待办计划（批次 3.4）：{"turn_id", "items": [{title,status}]}。
+
+    重开程序后 load() 原样带回，UI 恢复渲染。
+    """
+    chat = get_chat(data, cid)
+    if not chat:
+        return
+    if plan is None:
+        chat.pop("plan", None)
+    else:
+        chat["plan"] = plan
+    save(data)
 
 
 # ---------------------------------------------------------------- 会话事件日志

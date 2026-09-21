@@ -1246,13 +1246,15 @@ class AiPage(QWidget):
         chat = chat_store.get_chat(self._store, self._store.get("active_id") or "")
         self._history = list((chat or {}).get("messages") or [])
         self._wipe_messages()
+        self._plan_card = None
+        self._active_plan = None
         if not self._history:
             s = self.backend.get_settings()
             welcome = _WELCOME if bool(s.get("ai_confirm_writes", True)) else _WELCOME_NOCONFIRM
             self._add_bubble("assistant", welcome)
         else:
             for m in self._history:
-                role = m.get("role") or "assistant"
+                role = m.get("role") if isinstance(m, dict) else None
                 if role in ("user", "assistant", "error"):
                     text = m.get("content") or ""
                     # 「为什么停」的提示单独存在 note 里（不喂模型），渲染时再拼回去
@@ -1260,6 +1262,11 @@ class AiPage(QWidget):
                     if note and note not in text:
                         text = (text + "\n\n" + note).strip()
                     self._add_bubble(role, text)
+            # 3.4 恢复持久化的计划卡
+            plan = (chat or {}).get("plan")
+            if isinstance(plan, dict) and plan.get("items"):
+                self._render_plan(plan.get("items") or [])
+                self._active_plan = plan
         self._scroll_bottom()
 
     def _persist(self):
@@ -1446,6 +1453,8 @@ class AiPage(QWidget):
         self._notes = []
         self._tool_lines = {}
         self._task_lines = {}
+        self._plan_card = None
+        self._active_plan = None
         self._assistant_bubble = self._add_bubble("assistant", "")
         self._assistant_bubble.set_placeholder(tr("正在想…"))
         settings = self.backend.get_settings()
@@ -1499,6 +1508,19 @@ class AiPage(QWidget):
                 str(payload.get("message") or tr("检查点不可用，本轮改动无法一键撤回")),
                 parent=self.window() or self,
                 position=InfoBarPosition.TOP, duration=6000)
+            return
+        if kind == "model_fallback":
+            InfoBar.warning(
+                tr("已切换备用模型"),
+                tr("主模型连续失败，本回合改用 {model} 完成").format(
+                    model=payload.get("model") or ""),
+                parent=self.window() or self,
+                position=InfoBarPosition.TOP, duration=6000)
+            return
+        if kind == "plan":
+            self._render_plan(payload.get("items") or [])
+            self._active_plan = {"turn_id": str(payload.get("turn_id") or ""),
+                                 "items": list(payload.get("items") or [])}
             return
         if kind == "think":
             if not self._stream:
@@ -1582,8 +1604,9 @@ class AiPage(QWidget):
         card = ConfirmCard(label, detail, name=name, args=args)
         # 删除类不给「始终允许」：这些工具的参数键不在 RULE_CONTENT_KEYS 里，
         # 记一次就是整工具级放行，等于以后删什么都不问（permission.decide 也不吃这种规则）
+        # 计划审批卡同样不给：批准与否是一次性的，没有「记住」可言
         meta = TOOL_META.get(name)
-        if meta is not None and getattr(meta, "side_effect", "") == "delete":
+        if meta is None or getattr(meta, "side_effect", "") == "delete":
             for w in (card.always_btn, card.hint, card.scope_inst, card.scope_all):
                 w.setVisible(False)
         worker = self._worker
@@ -1604,6 +1627,41 @@ class AiPage(QWidget):
         card.accepted.connect(yes)
         card.always.connect(always)
         card.rejected.connect(no)
+        self._add_widget(card)
+
+    def _render_plan(self, items: list):
+        """3.4 计划卡：结构化待办清单（待办 / 进行中 / 完成）。"""
+        # 先移掉上一张计划卡，只显示最新一份
+        if getattr(self, "_plan_card", None) is not None:
+            try:
+                self._plan_card.setParent(None)
+                self._plan_card.deleteLater()
+            except RuntimeError:
+                pass
+            self._plan_card = None
+        if not items:
+            return
+        mark = {"completed": tr("完成"), "in_progress": tr("进行中")}
+        rows = []
+        for it in items:
+            title = str(it.get("title") or "").strip()
+            if not title:
+                continue
+            status = str(it.get("status") or "pending")
+            rows.append(f"[{mark.get(status, tr('待办'))}] {title}")
+        if not rows:
+            return
+        card = QFrame()
+        card.setObjectName("planCard")
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(2)
+        head = CaptionLabel(tr("计划"))
+        head.setStyleSheet(f"color: {Theme.muted};")
+        lay.addWidget(head)
+        for row in rows:
+            lay.addWidget(BodyLabel(row))
+        self._plan_card = card
         self._add_widget(card)
 
     def _on_ask(self, questions: list, title: str):
@@ -1701,6 +1759,13 @@ class AiPage(QWidget):
             if note:
                 entry["note"] = note
             self._history.append(entry)
+            # 3.4 本回合出了待办计划就随会话持久化，重开程序还能看到
+            if getattr(self, "_active_plan", None):
+                try:
+                    chat_store.set_plan(self._store, str(self._store.get("active_id") or ""),
+                                        self._active_plan)
+                except Exception:
+                    pass
             self._persist()
         self._pending_user = None
         self._worker = None

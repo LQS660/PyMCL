@@ -172,7 +172,9 @@ class BridgeAiPayloadParityTests(unittest.TestCase):
     # 新建 / 删除对话时，前端靠它判断「这帖收尾是不是我正看着的对话」，
     # 别把旧对话的报错气泡贴进新对话、也别在切走之后按钮还卡在「忙」上。
     ROUTING_KEYS = {"chat_id"}
-    DONE_KEYS = {"text", "store", "stop_reason", "detail", "pending_tasks", "note"} | ROUTING_KEYS
+    # plan：批次 3.4 模型本回合出的待办计划，桥随 ai.done 转发并持久化
+    DONE_KEYS = {"text", "store", "stop_reason", "detail", "pending_tasks", "note",
+                 "plan"} | ROUTING_KEYS
     UI_KEYS = {"note"}
     FAIL_KEYS = {"text", "stopped"} | ROUTING_KEYS
     # rule_content：内核按 RULE_CONTENT_KEYS 从 args 里抽出来的那一项，前端「始终允许」

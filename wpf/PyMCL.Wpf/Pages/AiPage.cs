@@ -550,6 +550,10 @@ public sealed class AiPage : PageBase
         var label = string.IsNullOrWhiteSpace(ev.Label) ? ev.Name : ev.Label;
         switch (ev.Kind)
         {
+            case "plan":
+                // 3.4 计划卡：模型出的结构化待办直接进对话流
+                ShowPlan(ev);
+                return;
             case "thinking":
             case "think":
                 _status.Text = L("思考中…");
@@ -607,6 +611,34 @@ public sealed class AiPage : PageBase
                 ? inner.GetString() ?? "" : "";
         }
         catch { return ""; }
+    }
+
+    // ==================== 内联计划卡 ====================
+    private PlanCard? _planCard;
+
+    private void ShowPlan(BridgeEvent ev)
+    {
+        var items = new List<(string Title, string Status)>();
+        if (ev.Payload.ValueKind == JsonValueKind.Object
+            && ev.Payload.TryGetProperty("items", out var arr)
+            && arr.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var it in arr.EnumerateArray())
+            {
+                if (it.ValueKind != JsonValueKind.Object) continue;
+                var title = it.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
+                var status = it.TryGetProperty("status", out var s) ? s.GetString() ?? "pending" : "pending";
+                if (!string.IsNullOrWhiteSpace(title)) items.Add((title, status));
+            }
+        }
+        if (items.Count == 0) return;
+        if (_planCard != null)
+        {
+            _messages.Children.Remove(_planCard);
+            _planCard = null;
+        }
+        _planCard = new PlanCard(items);
+        Add(_planCard);
     }
 
     // ==================== 内联确认卡 ====================
@@ -1131,9 +1163,36 @@ internal sealed class ToolLine : Border
 }
 
 /// <summary>内联确认卡，替掉原来的模态框：连着问几轮也只是往下长几张卡。</summary>
-internal sealed class ConfirmCard : Border
+/// <summary>
+/// 计划卡（批次 3.4）：模型出的结构化待办清单，每项带 待办 / 进行中 / 完成 状态。
+/// </summary>
+internal sealed class PlanCard : Border
 {
-    public ConfirmCard(string label, string detail, bool allowAlways,
+    public PlanCard(List<(string Title, string Status)> items)
+    {
+        var mark = new Dictionary<string, string>
+        {
+            ["pending"] = L("待办"),
+            ["in_progress"] = L("进行中"),
+            ["completed"] = L("完成"),
+        };
+        var body = Ui.V(4, Ui.Txt(L("计划"), 12, true, "B.InkMuted"));
+        foreach (var (title, status) in items)
+        {
+            var tag = mark.TryGetValue(status, out var m) ? m : L("待办");
+            body.Children.Add(Ui.Txt($"[{tag}] {title}", 12.5).Wrap());
+        }
+        Child = body;
+        Padding = new Thickness(12, 8, 12, 9);
+        BorderThickness = new Thickness(1);
+        CornerRadius = new CornerRadius(10);
+        MaxWidth = 760;
+        HorizontalAlignment = HorizontalAlignment.Stretch;
+    }
+}
+
+internal sealed class ConfirmCard : Border
+{    public ConfirmCard(string label, string detail, bool allowAlways,
         Action<bool, bool, string> answer)
     {
         var body = Ui.V(8,

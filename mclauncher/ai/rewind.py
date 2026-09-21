@@ -62,6 +62,18 @@ def _mark_rewound(chat_id: str, turn_id: str) -> None:
         pass
 
 
+def _clear_plan_of(chat_id: str, turn_id: str) -> None:
+    """3.4：被撤回那一轮出的计划一并清掉。"""
+    try:
+        data = chat_store.load()
+        c = chat_store.get_chat(data, chat_id)
+        plan = (c or {}).get("plan")
+        if isinstance(plan, dict) and str(plan.get("turn_id") or "") == str(turn_id):
+            chat_store.set_plan(data, chat_id, None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def rewind_last_round(chat_id: str) -> dict:
     """撤回 chat_id 会话的最近一轮。返回给 UI 的字段：
 
@@ -108,11 +120,14 @@ def rewind_last_round(chat_id: str) -> dict:
     if not has_ops and candidates:
         # 最近一轮没有磁盘改动：只标记，不动磁盘
         _mark_rewound(chat_id, target)
+        _clear_plan_of(chat_id, target)
         return res
     if has_ops:
         rb = checkpoint.rollback(chat_id, turn_id=target)
         res.update(restored_files=rb.get("restored_files") or 0,
                    restored_bytes=rb.get("restored_bytes") or 0,
                    ok=bool(rb.get("ok")), disk_changed=True)
+    # 3.4 被撤回那一轮出的计划也一并清掉
+    _clear_plan_of(chat_id, target)
     _mark_rewound(chat_id, target)
     return res

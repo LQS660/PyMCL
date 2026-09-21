@@ -3028,6 +3028,15 @@ class BackendAPI:
             fresh = persist([{"role": "user", "content": text}]
                             + _turn_trajectory(reply) + [final])
             release()
+            # 3.4 本回合出了待办计划就随会话持久化，WPF 重开程序也能恢复
+            try:
+                plan = getattr(reply, "plan", None)
+                if plan:
+                    chat_store.set_plan(chat_store.load(), run_cid,
+                                        {"turn_id": run_cid,
+                                         "items": list(plan)})
+            except Exception:
+                pass
             self._bus.emit("ai.done", {
                 "text": shown,
                 "note": note,
@@ -3038,6 +3047,7 @@ class BackendAPI:
                 "stop_reason": getattr(reply, "stop_reason", None) and reply.stop_reason.value,
                 "detail": getattr(reply, "detail", ""),
                 "pending_tasks": list(getattr(reply, "pending_tasks", []) or []),
+                "plan": list(getattr(reply, "plan", []) or []),
             })
         except AgentCancelled:
             fail(tr("已停止"), True)

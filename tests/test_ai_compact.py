@@ -244,8 +244,8 @@ class ArtifactTests(unittest.TestCase):
         self.assertIn("read_artifact", TOOL_META)
         self.assertTrue(TOOL_META["read_artifact"].readonly)
         self.assertEqual(TOOL_META["read_artifact"].side_effect, "read")
-        # 批次 3 新增 read_artifact 后 33→34；批次 3.3 新增 dispatch_subagent 后 34→35
-        self.assertEqual(len(TOOL_META), 35)
+        # 批次 3 新增 read_artifact 后 33→34；批次 3.3/3.4 新增 dispatch_subagent/update_plan 后 34→36
+        self.assertEqual(len(TOOL_META), 36)
 
 
 if __name__ == "__main__":

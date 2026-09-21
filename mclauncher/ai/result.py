@@ -39,6 +39,8 @@ class AgentResult(str):
         # UI 往聊天记录里追加时用后者，别把旧历史再抄一遍。
         obj.messages = []
         obj.turn_messages = []
+        # 3.4 本回合模型出的待办计划（run_agent 填实际内容；UI 持久化用）
+        obj.plan = []
         return obj
 
     @property
