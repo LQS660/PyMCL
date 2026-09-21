@@ -125,11 +125,11 @@ def tween(setter, start, end, ms: int = 240, on_done=None, context=None):
     _TWEENS.append(a)
 
     def _drop():
-        if a in _TWEENS:
-            _TWEENS.remove(a)
+        # 摘除只能用身份比较：排队的这一拍里 a 的 C++ 部分可能已随 context
+        # 先死，`a in _TWEENS` 会踩已析构包装器的 __eq__，直接 RuntimeError。
+        _TWEENS[:] = [t for t in _TWEENS if t is not a]
         # 挂了 context 的，C++ 那边归 context 管；跑完就把所有权还给 Python，
         # 调用方手里的引用一松它就释放，不会在 context 名下越积越多。
-        # context 先死的场合 a 已经没了，摸它就是 RuntimeError，先验一下。
         from shiboken6 import isValid
         if isValid(a) and a.parent() is not None:
             a.setParent(None)
