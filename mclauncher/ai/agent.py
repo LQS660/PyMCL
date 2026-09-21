@@ -14,6 +14,7 @@ from mclauncher.i18n import tr
 
 from . import compact
 from . import checkpoint
+from . import hooks as hook_mod
 from . import permission
 from . import scheduler
 from . import store as chat_store
@@ -433,6 +434,8 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
 
     session_id = str((settings or {}).get("ai_session_id") or "active")
     checkpoint.begin_chat(session_id)
+    # 3.1 工具 hooks：settings 一键总闸（默认开），关闭后透传、行为与无 hook 一致
+    hook_mod.set_enabled(bool((settings or {}).get("ai_hooks_enabled", True)))
     chat_store.log_event(session_id, "TurnStarted", turn_id=turn.id,
                          user_len=len(user_text or ""))
 
@@ -831,8 +834,19 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                             trace.record("checkpoint_unavailable", tool_name=obj.name,
                                          reason=str(snap.get("reason") or ""))
                     wait = not (meta and (meta.long_running or meta.side_effect == "launch"))
+                    # 3.1 前置钩子：可改写入参；钩子异常只进 trace，绝不中断
+                    hooked_args, hb_errs = hook_mod.run_before(obj.name, obj.args)
+                    if hb_errs:
+                        trace.record("hook_errors", tool_name=obj.name,
+                                     phase="before", count=len(hb_errs))
+                    obj.args = hooked_args
                     result = run_tool(backend, obj.name, obj.args, wait=wait,
                                       cancelled=cancelled)
+                    # 3.1 后置钩子：可改写结果文本
+                    result, ha_errs = hook_mod.run_after(obj.name, str(result))
+                    if ha_errs:
+                        trace.record("hook_errors", tool_name=obj.name,
+                                     phase="after", count=len(ha_errs))
                     if meta and not meta.readonly:
                         try:
                             parsed = json.loads(result) if isinstance(result, str) \
