@@ -1336,7 +1336,20 @@ class Installer:
     # ================================================================ 卸载
 
     def uninstall_version(self, version_id):
-        vdir = self.instance.versions_dir() / version_id
+        # version_id 只能是 versions/ 下的一个目录名：带路径分隔符、"."/".." 或解析后
+        # 落到 versions/ 之外的一律拒绝——remove_tree 是整棵删，这里不能靠调用方自觉。
+        vid = str(version_id or "").strip()
+        if not vid or vid in (".", "..") or any(ch in vid for ch in "/\\") or ":" in vid:
+            raise InstallError(f"非法的版本 ID: {version_id!r}")
+        base = self.instance.versions_dir()
+        vdir = base / vid
+        try:
+            resolved = vdir.resolve()
+            base_resolved = base.resolve()
+            if resolved != base_resolved and base_resolved not in resolved.parents:
+                raise InstallError(f"非法的版本 ID: {version_id!r}")
+        except OSError as exc:
+            raise InstallError(f"非法的版本 ID: {version_id!r}") from exc
         if not vdir.is_dir():
             raise InstallError(f"版本 {version_id} 未安装")
         utils.remove_tree(vdir)

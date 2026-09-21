@@ -160,7 +160,7 @@ def _from_fabric(data: dict, loader: str) -> dict:
         "name": str(data.get("name") or data.get("id") or ""),
         "version": str(data.get("version") or ""),
         "loader": loader,
-        "depends": _as_map(data.get("depends") or data.get("depends".upper()) or {}),
+        "depends": _as_map(data.get("depends") or {}),
         "breaks": _as_map(data.get("breaks") or {}),
         "conflicts": _as_map(data.get("conflicts") or {}),
         "provides": list(data.get("provides") or []),

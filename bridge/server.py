@@ -8,6 +8,7 @@ import hmac
 import inspect
 import ipaddress
 import json
+import logging
 import os
 import queue
 import secrets
@@ -278,16 +279,30 @@ def make_handler(state: BridgeState):
     return Handler
 
 
+_log = logging.getLogger("pymcl.bridge")
+
+
 def _call_kwargs(fn, params: dict):
     sig = inspect.signature(fn)
     accepted = {}
+    takes_var_kw = False
     for name, p in sig.parameters.items():
         if name == "self":
             continue
         if name in params:
             accepted[name] = params[name]
         elif p.kind == inspect.Parameter.VAR_KEYWORD:
+            takes_var_kw = True
             accepted.update({k: v for k, v in params.items() if k not in accepted})
+    if not takes_var_kw:
+        # 以前对不上形参名的键被静默丢掉：前端把参数名打错 = 功能静默退化，两边都报成功
+        # （WPF 的壁纸 / first_run 就是这么「保存成功」却什么都没写的）。只记键名不记值，
+        # 参数里可能带 api_key。
+        dropped = sorted(k for k in params if k not in accepted)
+        if dropped:
+            _log.warning("rpc %s: 忽略了未知参数 %s（形参只有 %s）",
+                         getattr(fn, "__name__", str(fn)), dropped,
+                         [n for n in sig.parameters if n != "self"])
     return fn(**accepted)
 
 
