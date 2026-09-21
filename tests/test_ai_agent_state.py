@@ -184,8 +184,12 @@ class AgentLoopTests(unittest.TestCase):
 
     def _run(self, streams, ask_fn=None, run_tool="ok", confirm_fn=None,
              settings=None, **kw):
+        # 批次 2.2 起工具按需声明；这里打桩的 tool_calls 不一定在核心集里，
+        # 直接声明全量 schema，避免触发「漏选→全量重发」把流序列错位
         with mock.patch.object(agent_mod, "chat_stream",
                                side_effect=self._fake_stream(streams)), \
+             mock.patch.object(agent_mod, "select_tool_schemas",
+                               return_value=ai_tools.TOOL_SCHEMAS), \
              mock.patch.object(agent_mod, "chat_once",
                                return_value={"content": "", "tool_calls": [],
                                              "finish_reason": "stop"}), \

@@ -237,6 +237,77 @@ def is_write_tool(name: str) -> bool:
     return not (meta and meta.readonly) if name in TOOL_META else False
 
 
+# ---------------------------------------------------------------- 工具按需加载
+# 每轮全量声明 34 个 schema 的固定开销太大（见改造报告实测：全量 ≈5.3k token）。
+# 策略：高频核心常驻，其余按对话关键词整组追加；选漏了由 agent 全量重发兜底，
+# 宁可多声明也不能让模型的调用悬空。
+
+_CORE_TOOLS = (
+    "ask_user", "get_launcher_state", "list_instances", "list_mods",
+    "search_mods", "install_mod", "install_modpack", "create_instance",
+    "launch_game", "diagnose_launch", "get_latest_log", "get_crash_report",
+    "write_mod_config",
+)
+
+# (关键词组, 追加工具组)：命中任一关键词就整组声明
+_KEYWORD_TOOLS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("版本", "快照", "version", "snapshot", "release", "更新到", "升级到"),
+     ("search_versions", "list_installed_versions", "install_game")),
+    (("整合包", "modpack", "难必安", "RLCraft"),
+     ("search_modpacks", "install_modpack")),
+    (("光影", "shader", "BSL", "Complementary"),
+     ("search_content", "install_shader")),
+    (("资源包", "材质", "resourcepack", "texture"),
+     ("search_content", "install_resourcepack")),
+    (("数据包", "datapack"),
+     ("search_content", "install_datapack")),
+    (("地图", "存档", "world", "saves"),
+     ("search_worlds", "install_world")),
+    (("java", "Java", "JAVA", "运行时", "JRE"),
+     ("get_java_list", "download_java")),
+    (("冲突", "缺依赖", "不兼容", "conflict", "inspect"),
+     ("scan_mod_conflicts", "inspect_mod")),
+    (("配置", "toml", ".ini", ".cfg", "选项文件"),
+     ("list_mod_configs", "read_mod_config", "write_mod_config")),
+    (("删除", "删掉", "卸载", "移除", "delete", "uninstall", "remove"),
+     ("delete_mod", "delete_instance", "disable_mod", "enable_mod")),
+    (("禁用", "启用", "disable", "enable"),
+     ("disable_mod", "enable_mod", "list_mods")),
+)
+
+
+def _selection_text(messages: list, limit_per: int = 4000, last_n: int = 12) -> str:
+    """拼关键词扫描面：最近若干条 user / tool 消息的正文。"""
+    rows = []
+    for m in (messages or [])[-last_n:]:
+        if not isinstance(m, dict):
+            continue
+        if m.get("role") in ("user", "tool"):
+            rows.append(str(m.get("content") or "")[:limit_per])
+    return "\n".join(rows)
+
+
+def select_tool_schemas(messages: list) -> list:
+    """按对话内容声明本轮需要的工具 schema（2.2 按需加载）。
+
+    兜底：核心集为空或过滤后一无所有时回退全量——选择器永远只降开销，不降能力。
+    """
+    text = _selection_text(messages)
+    names: list[str] = list(_CORE_TOOLS)
+    for keys, extra in _KEYWORD_TOOLS:
+        if any(k in text for k in keys):
+            for t in extra:
+                if t not in names:
+                    names.append(t)
+    # 上一轮结果过长存了文件 → 必须能 read_artifact 回读
+    if "cache/ai_results/" in text or "[结果过长" in text:
+        if "read_artifact" not in names:
+            names.append("read_artifact")
+    wanted = set(names)
+    out = [s for s in TOOL_SCHEMAS if s["function"]["name"] in wanted]
+    return out or list(TOOL_SCHEMAS)
+
+
 def is_ask_tool(name: str) -> bool:
     return name == "ask_user"
 
