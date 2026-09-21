@@ -119,7 +119,9 @@ class SubagentIsolationTests(unittest.TestCase):
         # 主对话 = 用户句 + assistant(tool_calls) + tool(结论) + assistant(正文)
         self.assertEqual(roles, ["user", "assistant", "tool", "assistant"])
         tool_row = [m for m in res.turn_messages if m.get("role") == "tool"][0]
-        payload = json.loads(tool_row["content"])
+        # 4.2 起工具回执带来源标注前缀，JSON 在首行之后
+        body = tool_row["content"].split("\n", 1)[-1]
+        payload = json.loads(body)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["answer"], "结论：没有错误")
         # 隔离性证据：子代理的任何中间步骤（角色/内容）都不在主对话里

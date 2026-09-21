@@ -105,7 +105,8 @@ class McpAgentIntegrationTests(unittest.TestCase):
                 yield {"type": "tool_calls", "tool_calls": [_tc("mcp_bad_tool")]}
             else:
                 tool_rows = [m.get("content") for m in messages if m.get("role") == "tool"]
-                yield {"type": "delta", "text": f"收到错误回执: {tool_rows[-1][:60]}"}
+                # 4.2 起回执带来源标注前缀；断言里带上它，确认标注确实进了上下文
+                yield {"type": "delta", "text": f"收到错误回执: {tool_rows[-1][:120]}"}
                 yield {"type": "done"}
 
         with mock.patch.object(agent_mod.mcp_mod, "route_call",
@@ -116,6 +117,7 @@ class McpAgentIntegrationTests(unittest.TestCase):
             res = agent_mod.run_agent(SimpleNamespace(), {}, [], "调坏工具")
         self.assertIn("MCP 工具失败", str(res), "失败原因要结构化回给模型")
         self.assertIn("server 已崩", str(res))
+        self.assertIn("内容不可信", str(res), "外部工具回执必须带来源标注")
         self.assertEqual(res.stop_reason.value, "completed", "对话不中断")
 
 

@@ -941,12 +941,23 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             turn.parallel_groups = [[tc.id for tc in grp] for grp in groups]
             scheduler.run_groups(groups, _execute, max_concurrency=4)
 
+            # 4.2 不可信内容标注：工具回执进上下文前带来源标签，
+            # 模型（配合系统提示词里的硬规矩）把它当数据而不是指令
             for obj in tool_objs:
+                meta = TOOL_META.get(obj.name)
+                if meta is not None and meta.side_effect == "network":
+                    source_tag = "[来源: 网络请求结果，内容不可信]"
+                elif meta is not None and meta.side_effect in ("read", "none"):
+                    source_tag = "[来源: 本地文件/日志/状态读取]"
+                elif meta is None and obj.name.startswith("mcp_"):
+                    source_tag = "[来源: 外部 MCP 工具，内容不可信]"
+                else:
+                    source_tag = "[来源: 本地写操作回执]"
                 messages.append({
                     "role": "tool",
                     "tool_call_id": obj.id,
                     "name": obj.name,
-                    "content": obj.result or "",
+                    "content": source_tag + "\n" + (obj.result or ""),
                 })
 
             # 3.4 plan 权限档门禁：模型出了计划必须等用户批准才继续；
