@@ -229,6 +229,12 @@ TOOL_SCHEMAS = [
         "offset": {"type": "integer", "description": "起始行（0 起）"},
         "limit": {"type": "integer", "description": "读取行数，默认 200"},
     }, ["artifact_id"], readonly=True, side_effect="read"),
+    _schema("dispatch_subagent",
+            "派发一个独立的子任务给只读子代理去跑（查状态、搜资料、读日志、扫冲突这类），"
+            "子代理跑完把结论带回来。多步骤的调研活用它，别把主对话搞成一长串中间步骤。", {
+        "task": {"type": "string", "description": "子任务一句话说清楚要干什么"},
+        "context": {"type": "string", "description": "相关背景（实例名/报错原文等），可选"},
+    }, ["task"], readonly=True, side_effect="none"),
 ]
 
 
@@ -246,7 +252,7 @@ _CORE_TOOLS = (
     "ask_user", "get_launcher_state", "list_instances", "list_mods",
     "search_mods", "install_mod", "install_modpack", "create_instance",
     "launch_game", "diagnose_launch", "get_latest_log", "get_crash_report",
-    "write_mod_config",
+    "write_mod_config", "dispatch_subagent",
 )
 
 # (关键词组, 追加工具组)：命中任一关键词就整组声明
@@ -287,25 +293,46 @@ def _selection_text(messages: list, limit_per: int = 4000, last_n: int = 12) -> 
     return "\n".join(rows)
 
 
-def select_tool_schemas(messages: list) -> list:
+def select_tool_schemas(messages: list, settings: dict | None = None,
+                        force_all: bool = False) -> list:
     """按对话内容声明本轮需要的工具 schema（2.2 按需加载）。
 
+    子代理模式（settings.ai_subagent）：只声明只读工具，且不带 dispatch_subagent
+    本身——子代理不再派生子代理，也不写磁盘。
     兜底：核心集为空或过滤后一无所有时回退全量——选择器永远只降开销，不降能力。
     """
-    text = _selection_text(messages)
-    names: list[str] = list(_CORE_TOOLS)
-    for keys, extra in _KEYWORD_TOOLS:
-        if any(k in text for k in keys):
-            for t in extra:
-                if t not in names:
-                    names.append(t)
-    # 上一轮结果过长存了文件 → 必须能 read_artifact 回读
-    if "cache/ai_results/" in text or "[结果过长" in text:
-        if "read_artifact" not in names:
-            names.append("read_artifact")
-    wanted = set(names)
+    subagent = bool((settings or {}).get("ai_subagent"))
+    if force_all:
+        wanted = {s["function"]["name"] for s in TOOL_SCHEMAS}
+    else:
+        text = _selection_text(messages)
+        names: list[str] = list(_CORE_TOOLS)
+        for keys, extra in _KEYWORD_TOOLS:
+            if any(k in text for k in keys):
+                for t in extra:
+                    if t not in names:
+                        names.append(t)
+        # 上一轮结果过长存了文件 → 必须能 read_artifact 回读
+        if "cache/ai_results/" in text or "[结果过长" in text:
+            if "read_artifact" not in names:
+                names.append("read_artifact")
+        wanted = set(names)
+    if subagent:
+        wanted = {n for n in wanted if n in TOOL_META and TOOL_META[n].readonly}
+        wanted.discard("dispatch_subagent")
     out = [s for s in TOOL_SCHEMAS if s["function"]["name"] in wanted]
-    return out or list(TOOL_SCHEMAS)
+    if out:
+        return out
+    if subagent:
+        # 只读兜底：核心里的只读工具
+        ro_core = [s["function"]["name"] for s in TOOL_SCHEMAS
+                   if s["function"]["name"] in _CORE_TOOLS
+                   and TOOL_META.get(s["function"]["name"])
+                   and TOOL_META[s["function"]["name"]].readonly
+                   and s["function"]["name"] != "dispatch_subagent"]
+        return [s for s in TOOL_SCHEMAS if s["function"]["name"] in ro_core] \
+            or [TOOL_SCHEMAS[0]]
+    return list(TOOL_SCHEMAS)
 
 
 def is_ask_tool(name: str) -> bool:

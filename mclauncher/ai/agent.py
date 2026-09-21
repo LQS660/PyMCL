@@ -22,7 +22,9 @@ from . import store as chat_store
 from . import tokens as tokens_mod
 from . import trace
 from .client import AIClientError, chat_once, chat_stream, is_context_overflow
-from .defaults import MAX_HISTORY, MAX_TOOL_ROUNDS
+from .defaults import (
+    MAX_HISTORY, MAX_TOOL_ROUNDS, MAX_TOOL_ROUNDS_SUBAGENT,
+)
 from .permission import Behavior, Decision, Rule
 from .prompt import system_prompt
 from .result import AgentResult, StopReason
@@ -449,11 +451,13 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
 
     try:
         turn.transition(TurnPhase.PROCESSING_INPUT)
+        # 3.3 子代理用独立轮数上限（MAX_TOOL_ROUNDS_SUBAGENT），主循环保持 MAX_TOOL_ROUNDS
+        max_rounds = int((settings or {}).get("ai_max_rounds") or 0) or MAX_TOOL_ROUNDS
         # 2.2 按需声明：核心集 + 关键词扩展；模型想调没声明的工具时全量重发一次
         # （回合级只重发一次，schema_override 放循环外，别每轮都重置）
         schema_override: list | None = None
         schemas: list = TOOL_SCHEMAS
-        for _round in range(MAX_TOOL_ROUNDS):
+        for _round in range(max_rounds):
             round_no[0] = _round + 1
             turn.rounds_used = round_no[0]
             _check()
@@ -479,8 +483,8 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             if state_base:
                 extra = ""
                 if _round > 0:
-                    extra += f"\n\n[进度] 本轮已用 {round_no[0]}/{MAX_TOOL_ROUNDS} 步。"
-                    if MAX_TOOL_ROUNDS - round_no[0] < 4:
+                    extra += f"\n\n[进度] 本轮已用 {round_no[0]}/{max_rounds} 步。"
+                    if max_rounds - round_no[0] < 4:
                         extra += "剩余不足 4 步时请优先收尾并说明当前状态。"
                 if continuation_pending:
                     extra += ("\n用户刚在选项里做出选择：若需要执行操作，"
@@ -546,7 +550,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 text_parts = []
                 truncated = False
                 stream_failed = False
-                schemas = schema_override or select_tool_schemas(messages)
+                schemas = schema_override or select_tool_schemas(messages, settings)
                 if mcp_schemas:
                     schemas = list(schemas) + [s for s in mcp_schemas
                                                if s not in schemas]
@@ -655,7 +659,8 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 declared = {s["function"]["name"] for s in schemas}
                 if any((tc.get("function") or {}).get("name") not in declared
                        for tc in tool_calls):
-                    schema_override = TOOL_SCHEMAS
+                    schema_override = select_tool_schemas(messages, settings,
+                                                           force_all=True)
                     trace.record("tool_schema_miss",
                                  tools=[(tc.get("function") or {}).get("name")
                                         for tc in tool_calls])
@@ -857,7 +862,11 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                         trace.record("hook_errors", tool_name=obj.name,
                                      phase="before", count=len(hb_errs))
                     obj.args = hooked_args
-                    if obj.name.startswith("mcp_"):
+                    if obj.name == "dispatch_subagent":
+                        # 3.3 子代理：独立轮数上限、只读工具、结构化结论回主对话
+                        result = run_subagent(backend, settings, obj.args,
+                                              cancelled=cancelled)
+                    elif obj.name.startswith("mcp_"):
                         # 3.2 MCP 工具调用：失败返回结构化错误给模型，不影响内置工具
                         try:
                             result = mcp_mod.route_call(mcp_clients, obj.name, obj.args)
@@ -944,12 +953,50 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             chat_store.log_event(session_id, "TurnCompleted", turn_id=turn.id,
                                  rounds=turn.rounds_used)
 
-    trace.record("max_rounds", round_=MAX_TOOL_ROUNDS, text_len=len(final))
+    trace.record("max_rounds", round_=max_rounds, text_len=len(final))
     _to_phase(turn, TurnPhase.COMPLETING)
     return _result(
         _full(final) or "步骤有点多，先停在这里。你再说一下接下来要哪一步。",
         StopReason.MAX_ROUNDS,
-        detail=f"已用 {turn.rounds_used}/{MAX_TOOL_ROUNDS} 回合",
+        detail=f"已用 {turn.rounds_used}/{max_rounds} 回合",
         pending_tasks=pending,
         rounds_used=turn.rounds_used,
     )
+
+
+# ---------------------------------------------------------------- 子代理（3.3）
+
+def run_subagent(backend, settings: dict, args: dict, cancelled=None) -> str:
+    """派发子任务给独立子代理：中间步骤留在子代理自己的上下文里。
+
+    - 轮数上限用 defaults.MAX_TOOL_ROUNDS_SUBAGENT（经 settings.ai_max_rounds 传入）；
+    - 子代理只声明只读工具、不能再派发（tools.select_tool_schemas 的子代理过滤）；
+    - 主对话只收到结构化结论 {"ok": true/false, "answer"/"error"}，不吞失败。
+    """
+    task = str((args or {}).get("task") or "").strip()
+    context = str((args or {}).get("context") or "").strip()
+    if not task:
+        return json.dumps({"ok": False, "error": "缺少子任务描述（task 字段）"},
+                          ensure_ascii=False)
+    user_text = f"[子任务] {task}" + (f"\n相关背景：{context}" if context else "")
+    sub_settings = dict(settings or {},
+                        ai_subagent=True,
+                        ai_max_rounds=MAX_TOOL_ROUNDS_SUBAGENT,
+                        ai_session_id=f"{(settings or {}).get('ai_session_id') or 'active'}-sub")
+    try:
+        res = run_agent(backend, sub_settings, [], user_text, cancelled=cancelled)
+    except AgentCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        trace.record("subagent_failed", exc=exc, task=task[:100])
+        return json.dumps({"ok": False, "error": f"子代理执行失败: {exc}"},
+                          ensure_ascii=False)
+    answer = str(res)
+    if res.stop_reason not in (StopReason.COMPLETED, StopReason.NO_TOOL_CALL) \
+            and not answer.strip():
+        return json.dumps({"ok": False,
+                           "error": f"子代理未得出结论（停止原因: {res.stop_reason.value}）"},
+                          ensure_ascii=False)
+    return json.dumps({"ok": True, "answer": answer,
+                       "stop_reason": res.stop_reason.value},
+                      ensure_ascii=False)
