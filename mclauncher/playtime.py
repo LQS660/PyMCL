@@ -59,26 +59,31 @@ def _ensure_instance(data: dict, instance_name: str) -> dict:
 
 
 def record_session(instance_name: str, version_id: str, duration: int):
-    """记录一次游戏会话。duration 为秒数。"""
+    """记录一次游戏会话。duration 为秒数。
+
+    读-改-写整段都在锁内：以前只有落盘那一步加锁，多开两局同时退出时，
+    后写者拿的是旧快照，整份覆盖掉先写者，先退那一局的时长就丢了。
+    """
     if duration <= 0:
         return
-    data = _load()
-    inst = _ensure_instance(data, instance_name)
-    inst["total"] = inst.get("total", 0) + duration
-    versions = inst.get("versions", {})
-    versions[version_id] = versions.get(version_id, 0) + duration
-    inst["versions"] = versions
-    sessions = inst.get("sessions", [])
-    sessions.append({
-        "start": int(time.time()) - duration,
-        "duration": duration,
-        "version": version_id,
-    })
-    # 保留最近 500 条会话记录
-    if len(sessions) > 500:
-        sessions = sessions[-500:]
-    inst["sessions"] = sessions
-    _save(data)
+    with _lock:
+        data = _load()
+        inst = _ensure_instance(data, instance_name)
+        inst["total"] = inst.get("total", 0) + duration
+        versions = inst.get("versions", {})
+        versions[version_id] = versions.get(version_id, 0) + duration
+        inst["versions"] = versions
+        sessions = inst.get("sessions", [])
+        sessions.append({
+            "start": int(time.time()) - duration,
+            "duration": duration,
+            "version": version_id,
+        })
+        # 保留最近 500 条会话记录
+        if len(sessions) > 500:
+            sessions = sessions[-500:]
+        inst["sessions"] = sessions
+        _write_safe(data)
 
 
 def get_playtime(instance_name: str) -> dict:
@@ -128,27 +133,28 @@ def format_duration(seconds: int) -> str:
 
 def clear_playtime(instance_name: str = "", version_id: str = ""):
     """清除时长统计。instance_name 为空则清除全部。"""
-    data = _load()
-    if not instance_name:
-        data["instances"] = {}
-    elif instance_name in data.get("instances", {}):
-        if version_id:
-            inst = data["instances"][instance_name]
-            inst["total"] = 0
-            inst["versions"] = {}
-            # 重新计算
-            sessions = inst.get("sessions", [])
-            remaining = []
-            for s in sessions:
-                if s.get("version") != version_id:
-                    remaining.append(s)
-                    inst["total"] += s.get("duration", 0)
-                    ver = s.get("version", "?")
-                    inst["versions"][ver] = inst["versions"].get(ver, 0) + s.get("duration", 0)
-            inst["sessions"] = remaining
-        else:
-            del data["instances"][instance_name]
-    _save(data)
+    with _lock:
+        data = _load()
+        if not instance_name:
+            data["instances"] = {}
+        elif instance_name in data.get("instances", {}):
+            if version_id:
+                inst = data["instances"][instance_name]
+                inst["total"] = 0
+                inst["versions"] = {}
+                # 重新计算
+                sessions = inst.get("sessions", [])
+                remaining = []
+                for s in sessions:
+                    if s.get("version") != version_id:
+                        remaining.append(s)
+                        inst["total"] += s.get("duration", 0)
+                        ver = s.get("version", "?")
+                        inst["versions"][ver] = inst["versions"].get(ver, 0) + s.get("duration", 0)
+                inst["sessions"] = remaining
+            else:
+                del data["instances"][instance_name]
+        _write_safe(data)
 
 
 class PlaytimeTracker:

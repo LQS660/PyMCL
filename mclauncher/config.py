@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """启动器全局配置。"""
+import threading
 from pathlib import Path
 
 from . import utils
@@ -163,6 +164,11 @@ class Config:
         # 每次改动 +1。上层（如 app.backend.get_setting）据此判断缓存是否还新鲜，
         # 不用每取一个键就把整份设置字典重建一遍。
         self.revision = 0
+        # 后台 worker（启动时写 default_instance、任务里记 last_installed）与 UI 线程的
+        # save_settings 整包 update 会撞在一起：save() 正在 json.dumps 遍历 data，另一头
+        # 改了键数，直接 RuntimeError: dictionary changed size during iteration，
+        # 那一次保存 / 任务就失败了。读-改-写都在这把锁里做。
+        self._lock = threading.RLock()
         self.load()
 
     def load(self):
@@ -221,18 +227,21 @@ class Config:
         return True
 
     def save(self):
-        utils.write_json(CONFIG_FILE, self.data)
+        with self._lock:
+            utils.write_json(CONFIG_FILE, self.data)
 
     def get(self, key, default=None):
         return self.data.get(key, default)
 
     def set(self, key, value):
-        self.data[key] = value
-        self.revision += 1
+        with self._lock:
+            self.data[key] = value
+            self.revision += 1
 
     def update(self, mapping):
-        self.data.update(mapping)
-        self.revision += 1
+        with self._lock:
+            self.data.update(mapping)
+            self.revision += 1
 
     # ---- 路径 ----
     @property
