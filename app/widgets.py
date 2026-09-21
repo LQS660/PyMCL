@@ -3,6 +3,7 @@
 
 import math
 import os
+import zlib
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRectF, QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal
@@ -202,7 +203,8 @@ PALETTE = [
 
 
 def pick_color(name: str) -> str:
-    return PALETTE[hash(name) % len(PALETTE)]
+    # 内建 hash() 对 str 有进程级随机化，同名飞字每次启动换色；crc32 跨进程稳定
+    return PALETTE[zlib.crc32(name.encode("utf-8")) % len(PALETTE)]
 
 
 def grid_columns(scroll, page, card_w: int, spacing: int = 12, gutter: int = 8) -> int:
