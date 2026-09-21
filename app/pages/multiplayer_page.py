@@ -202,7 +202,8 @@ class MultiplayerPage(QWidget):
             if w is not None:
                 w.deleteLater()
 
-    def _copy(self, text: str, title=tr("已复制")):
+    def _copy(self, text: str, title=None):
+        title = title or tr("已复制")
         text = (text or "").strip()
         if not text:
             return

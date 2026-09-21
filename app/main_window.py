@@ -1914,12 +1914,13 @@ class MainWindow(FluentWindowBase):
             target=target, duration=duration,
         )
 
-    def queue_launch_after(self, task_id, instance: str, version: str, loader: str = tr("无")):
+    def queue_launch_after(self, task_id, instance: str, version: str, loader: str | None = None):
         if not task_id:
             return
         self._launch_after[task_id] = (instance, version, loader or tr("无"))
 
-    def _launch_installed(self, instance: str, version: str, loader: str = tr("无")):
+    def _launch_installed(self, instance: str, version: str, loader: str | None = None):
+        loader = loader or tr("无")
         last = getattr(self.backend, "_last_installed", None) or {}
         vid = last.get("version") or version
         self.switchTo(self.launch_page)
