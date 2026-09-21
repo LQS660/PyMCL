@@ -10,6 +10,8 @@ import re
 import time
 import uuid
 
+from mclauncher.i18n import tr
+
 from . import compact
 from . import permission
 from . import scheduler
@@ -24,7 +26,7 @@ from .result import AgentResult, StopReason
 from .state import IllegalTransition, ToolCall, ToolCallStatus, TurnPhase, TurnState
 from .tools import (
     TOOL_META, TOOL_SCHEMAS, ToolCancelled, confirm_label, is_ask_tool,
-    normalize_ask_args, parse_args, run_tool, runtime_context,
+    normalize_ask_answer, normalize_ask_args, parse_args, run_tool, runtime_context,
 )
 
 
@@ -51,6 +53,60 @@ def _current_instance() -> str:
         return CONFIG.get("default_instance", "default") or "default"
     except Exception:  # noqa: BLE001
         return "default"
+
+
+# wait_task 超时的哨兵原文；两端 wait_task 现在都带 timeout=True，这里是老后端的兜底
+_WAIT_TIMEOUT_KEY = "等待任务超时"
+
+
+def _task_still_running(res) -> bool:
+    """wait_task 的返回是「还在跑」还是「已出结果」。
+
+    以前只认 `msg == "等待任务超时"` 这一句中文，英文界面下 wait_task 回的是
+    tr() 过的译文，长任务被当成失败摘出 pending、模型收到「失败」，实际任务还在跑。
+    """
+    if not isinstance(res, dict):
+        return True
+    if res.get("timeout") or res.get("running"):
+        return True
+    if res.get("ok") is None:
+        return True
+    msg = str(res.get("message") or "")
+    return msg == _WAIT_TIMEOUT_KEY or msg == tr(_WAIT_TIMEOUT_KEY)
+
+
+def _summary_input(slice_messages, limit: int = 60000) -> str:
+    """压缩摘要的输入：控制体量但别把 JSON 切在中间。
+
+    单条过长的内容先截，整体仍超限就从第二条起丢最早的（第一条通常是用户最初
+    的诉求，摘要提示词要求保留它）。
+    """
+    rows = []
+    for m in slice_messages or []:
+        if not isinstance(m, dict):
+            continue
+        row = {"role": m.get("role")}
+        content = m.get("content")
+        if isinstance(content, str) and len(content) > 4000:
+            content = content[:4000] + "…(已截断)"
+        row["content"] = content
+        if m.get("name"):
+            row["name"] = m.get("name")
+        calls = []
+        for tc in m.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") or {}
+            calls.append({"name": fn.get("name"),
+                          "arguments": str(fn.get("arguments") or "")[:500]})
+        if calls:
+            row["tool_calls"] = calls
+        rows.append(row)
+    text = json.dumps(rows, ensure_ascii=False)
+    while len(text) > limit and len(rows) > 2:
+        rows.pop(1)
+        text = json.dumps(rows, ensure_ascii=False)
+    return text if len(text) <= limit else text[:limit]
 
 
 def _system_messages(backend, settings: dict) -> list:
@@ -227,8 +283,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
         _check()
         prompt = [
             {"role": "system", "content": compact._SUMMARY_PROMPT},
-            {"role": "user", "content": json.dumps(
-                slice_messages, ensure_ascii=False)[:60000]},
+            {"role": "user", "content": _summary_input(slice_messages)},
         ]
         data = chat_once(settings, prompt, None, http_cancel=http_cancel)
         _check()
@@ -275,7 +330,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 trace.record("wait_task_error", tool_name=task["name"], exc=exc)
                 continue
             msg = str(res.get("message") or "")
-            if res.get("ok") is None or msg == "等待任务超时":
+            if _task_still_running(res):
                 continue   # 还在跑
             pending.remove(task)
             got.append({"name": task["name"], "ok": bool(res.get("ok")), "message": msg})
@@ -372,6 +427,9 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 if continuation_pending:
                     extra += ("\n用户刚在选项里做出选择：若需要执行操作，"
                               "请立刻调用对应工具；若无需操作，请说明原因。")
+                    # 只提醒紧接着的这一次模型调用；之前从不复位，ask 之后的每一轮
+                    # （哪怕已经跑了十几轮工具）都还挂着「请立刻调用工具」。
+                    continuation_pending = False
                 messages[1]["content"] = state_base + extra
 
             _status("think", {"after_tools": any(m.get("role") == "tool" for m in messages)})
@@ -653,6 +711,8 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     questions = normalize_ask_args(obj.args)
                     title = obj.args.get("title") or ""
                     answered = ask_fn(questions, title) if ask_fn else None
+                    # Qt / WPF 两端应答形状不同，统一成一种再给模型（见 normalize_ask_answer）
+                    answered = normalize_ask_answer(questions, answered)
                     if not answered:
                         turn.set_tool_status(obj.id, ToolCallStatus.COMPLETED,
                                              result="用户取消了选择")

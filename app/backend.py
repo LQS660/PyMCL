@@ -400,7 +400,10 @@ class BackendAPI(QObject):
                     return {"ok": False, "message": tr("已停止"), "task_id": task_id}
                 timeout -= 0.4
                 if timeout <= 0:
-                    return {"ok": False, "message": tr("等待任务超时"), "task_id": task_id}
+                    # timeout=True 是给调用方（AI agent）判「还在跑」用的结构化位：
+                    # 光靠比对 message 文案，英文界面下就认不出来了
+                    return {"ok": False, "message": tr("等待任务超时"), "task_id": task_id,
+                            "timeout": True}
         finally:
             try:
                 self.finished.disconnect(on_finished)
