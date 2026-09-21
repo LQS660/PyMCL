@@ -16,6 +16,17 @@ jobs:
       # 纯标准库，不导入 Qt，所以这一步不用装任何依赖，几秒就出结果
       - run: python scripts/check_qt_parent.py
 
+  tool-parity:
+    name: 跨端 AI 工具集差异报告（只报告不挡门）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # 桌面 36 / Android 19 的差集每次可见（含 ask_user 缺席），对齐为后续事项
+      - run: python scripts/check_tool_parity.py
+
   tests:
     name: pytest
     runs-on: ubuntu-latest

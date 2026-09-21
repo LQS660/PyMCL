@@ -1,0 +1,30 @@
+{
+  "desktop_count": 36,
+  "android_count": 19,
+  "missing_on_android": [
+    "ask_user",
+    "dispatch_subagent",
+    "download_java",
+    "get_crash_report",
+    "get_java_list",
+    "get_latest_log",
+    "inspect_mod",
+    "install_datapack",
+    "install_resourcepack",
+    "install_shader",
+    "install_world",
+    "list_mod_configs",
+    "read_artifact",
+    "read_mod_config",
+    "search_content",
+    "search_modpacks",
+    "search_versions",
+    "search_worlds",
+    "update_plan"
+  ],
+  "android_only": [
+    "get_settings",
+    "list_accounts"
+  ],
+  "readonly_mismatch": []
+}
