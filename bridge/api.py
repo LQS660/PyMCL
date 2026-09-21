@@ -35,6 +35,26 @@ _tls = threading.local()
 _NAV_SECTIONS = ("download", "more")
 
 
+def _clamp_int(value, lo: int, hi: int, fallback: int) -> int:
+    try:
+        return max(lo, min(hi, int(value)))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _clamp_opacity(value) -> int:
+    """侧栏/标题栏不透明度夹到 30–100（与 app/backend.py 同一档）。"""
+    return _clamp_int(value, 30, 100, 100)
+
+
+_WINDOW_ASPECTS = ("4:3", "16:9", "free")
+
+
+def _window_aspect(value) -> str:
+    key = str(value or "").strip()
+    return key if key in _WINDOW_ASPECTS else "4:3"
+
+
 def _nav_keys(raw) -> list[str]:
     seen: set[str] = set()
     out = []
@@ -212,12 +232,24 @@ class BackendAPI:
         self._ai_confirm_ctx = None     # (tool_name, args)：正在等回答的那张确认卡
         self._ai_ask_ev = threading.Event()
         self._ai_ask_result = None
+        self._ai_pending_card: dict | None = None   # 正在等回答的确认 / 选择卡（断线对账用）
         self._ai_busy = False
         self._ai_steer: list[str] = []   # 跑动中插话（ai_steer），下一轮模型请求前取走
         self._ui_launch = {}
+        # get_instances 的 2.5s TTL 缓存（对齐 app/backend.py）：每次 ui_changed 前端都会
+        # 重读一遍实例表，桥这边以前每次都全量扫盘 + 逐实例 Java 扫描。数据一变
+        # （finished / ui_changed）就失效，TTL 只合并「没人改数据」时的重复扫描。
+        self._inst_cache: list[dict] | None = None
+        self._inst_cache_at: float = 0.0
         self._ensure_default_instance()
 
+    def invalidate_instances(self):
+        """清掉实例表缓存（对齐 app/backend.py）。"""
+        self._inst_cache = None
+
     def _emit(self, event: str, data: dict):
+        if event in ("ui_changed", "finished", "instance_changed"):
+            self._inst_cache = None
         if event == "crash":
             tid = (data or {}).get("task_id")
             if tid:
@@ -825,7 +857,9 @@ class BackendAPI:
                 self.cancel_task(task_id)
                 return {"ok": False, "message": tr("已停止"), "task_id": task_id}
             if time.time() - start > timeout:
-                return {"ok": False, "message": tr("等待任务超时"), "task_id": task_id}
+                # timeout=True 是结构化的「还在跑」标记，AI agent 不再靠比对文案判断
+                return {"ok": False, "message": tr("等待任务超时"), "task_id": task_id,
+                        "timeout": True}
             time.sleep(0.3)
 
     def get_settings(self) -> dict:
@@ -878,6 +912,31 @@ class BackendAPI:
             "default_java": CONFIG.get("default_java") or "",
             "default_instance": CONFIG.get("default_instance") or "default",
             "ui_dark": bool(CONFIG.get("ui_dark", False)),
+            # 外观 / 壁纸 / 动效 / 首次运行：Qt 门面（app/backend.py get_settings）一直回这些键，
+            # 桥这边漏了——WPF 拖图设壁纸后 Wallpaper.ReloadAsync() 读回空串、设置页外观项
+            # 重启即丢、首次运行向导永不弹出，而两端都提示「已保存」。与 save_settings 成对补齐。
+            "theme_color": CONFIG.get("theme_color") or "#2E9B6B",
+            "ui_background": CONFIG.get("ui_background") or "",
+            "ui_background_folder": CONFIG.get("ui_background_folder") or "",
+            "ui_background_shuffle": bool(CONFIG.get("ui_background_shuffle", False)),
+            "ui_background_interval": _clamp_int(
+                CONFIG.get("ui_background_interval", 10), 1, 1440, 10),
+            "ui_background_history": list(CONFIG.get("ui_background_history") or []),
+            "ui_background_blur": _clamp_int(CONFIG.get("ui_background_blur", 0), 0, 40, 0),
+            "ui_background_dim": _clamp_int(CONFIG.get("ui_background_dim", 0), 0, 80, 0),
+            "ui_sidebar_opacity": _clamp_opacity(CONFIG.get("ui_sidebar_opacity", 100)),
+            "ui_window_aspect": _window_aspect(CONFIG.get("ui_window_aspect")),
+            "ui_motion": bool(CONFIG.get("ui_motion", True)),
+            "ui_fly_animation": bool(CONFIG.get("ui_fly_animation", True)),
+            "ui_fly_duration_ms": int(CONFIG.get("ui_fly_duration_ms", 620) or 620),
+            "first_run": bool(CONFIG.get("first_run", True)),
+            "skip_assets": bool(CONFIG.get("skip_assets", False)),
+            "allow_multi_instance": bool(CONFIG.get("allow_multi_instance", False)),
+            "show_hidden_versions": bool(CONFIG.get("show_hidden_versions", False)),
+            "export_dir": CONFIG.get("export_dir") or "",
+            "default_priority": CONFIG.get("default_priority") or "normal",
+            "global_mods_dir": CONFIG.get("global_mods_dir") or "",
+            "instances_dir": str(CONFIG.get("instances_dir") or ".minecraft"),
             # 侧栏编排：Qt 版一直在写这几个键，之前没暴露给桥，非 Qt 前端只能
             # 画一套写死的侧栏，用户在 Qt 里排好的顺序被静默忽略。
             "ui_nav_order": list(CONFIG.get("ui_nav_order") or []),
@@ -989,6 +1048,47 @@ class BackendAPI:
             patch["skip_assets"] = bool(data.get("skip_assets"))
         if "ui_dark" in data:
             patch["ui_dark"] = bool(data.get("ui_dark"))
+        # 外观 / 壁纸 / 动效 / 首次运行（与 get_settings 成对；键表照 app/backend.py save_settings）。
+        # 之前这些键不在白名单里，WPF 写了桥静默丢、_call_kwargs 也不报——两端都报成功。
+        if "theme_color" in data:
+            color = str(data.get("theme_color") or "").strip()
+            if color:
+                patch["theme_color"] = color
+        for key in ("ui_motion", "ui_fly_animation", "allow_multi_instance",
+                    "show_hidden_versions", "first_run", "ui_background_shuffle"):
+            if key in data:
+                patch[key] = bool(data.get(key))
+        if "ui_fly_duration_ms" in data:
+            patch["ui_fly_duration_ms"] = _clamp_int(data.get("ui_fly_duration_ms"), 1, 10000, 620)
+        if "ui_background_interval" in data:
+            patch["ui_background_interval"] = _clamp_int(data.get("ui_background_interval"), 1, 1440, 10)
+        if "ui_background_blur" in data:
+            patch["ui_background_blur"] = _clamp_int(data.get("ui_background_blur"), 0, 40, 0)
+        if "ui_background_dim" in data:
+            patch["ui_background_dim"] = _clamp_int(data.get("ui_background_dim"), 0, 80, 0)
+        if "ui_sidebar_opacity" in data:
+            patch["ui_sidebar_opacity"] = _clamp_opacity(data.get("ui_sidebar_opacity"))
+        if "ui_window_aspect" in data:
+            patch["ui_window_aspect"] = _window_aspect(data.get("ui_window_aspect"))
+        for key in ("export_dir", "global_mods_dir"):
+            if key in data:
+                patch[key] = str(data.get(key) or "").strip()
+        if "default_priority" in data:
+            patch["default_priority"] = str(data.get("default_priority") or "normal")
+        # 壁纸：单图 / 文件夹动了哪个都把旧的那一组压进历史栈，「撤销上一张」才有得退
+        # （与 app/backend.py 一致；undo_background / reset_background 已经在读这两个栈）。
+        if "ui_background" in data or "ui_background_folder" in data:
+            from mclauncher.config import push_background_history as _push_bg_history
+            old_bg = str(CONFIG.get("ui_background") or "")
+            old_dir = str(CONFIG.get("ui_background_folder") or "")
+            new_bg = str(data.get("ui_background", old_bg) or "")
+            new_dir = str(data.get("ui_background_folder", old_dir) or "")
+            if (new_bg, new_dir) != (old_bg, old_dir):
+                images, folders = _push_bg_history(old_bg, old_dir)
+                patch["ui_background_history"] = images
+                patch["ui_background_folder_history"] = folders
+            patch["ui_background"] = new_bg
+            patch["ui_background_folder"] = new_dir
         # 侧栏编排：空列表要能写进去（「一项都不隐藏」是合法状态，不是没提交），
         # 所以按「键在不在 data 里」判断，不按值真假。
         for key in ("ui_nav_order", "ui_nav_pinned", "ui_nav_hidden"):
@@ -1012,6 +1112,8 @@ class BackendAPI:
             patch["ui_sidebar_width"] = width or None
         CONFIG.update(patch)
         CONFIG.save()
+        if "instances_dir" in patch:
+            self._inst_cache = None
 
     def collect_sysinfo(self, force: bool = False, scan_system_java: bool = False) -> dict:
         from mclauncher import sysinfo as sysinfo_mod
@@ -1416,6 +1518,11 @@ class BackendAPI:
         return out
 
     def get_instances(self) -> list[dict]:
+        """实例表快照（带 2.5s TTL 缓存，对齐 app/backend.py.get_instances）。"""
+        now = time.monotonic()
+        cached = self._inst_cache
+        if cached is not None and now - self._inst_cache_at < 2.5:
+            return [dict(r) for r in cached]
         self._ensure_default_instance()
         rows = []
         for name in list_instances():
@@ -1435,7 +1542,9 @@ class BackendAPI:
                 "java": inst.java_pref(),
                 "java_label": self.instance_java_label(name),
             })
-        return rows
+        self._inst_cache = rows
+        self._inst_cache_at = now
+        return [dict(r) for r in rows]
 
     def _modpack_row(self, hit: dict, default_source: str = "") -> dict:
         src = (hit.get("source") or default_source or "").lower()
@@ -2558,7 +2667,30 @@ class BackendAPI:
         # 前端重进页面 / 刷新时靠这一位把「发送 / 停止」按钮对回后端的真实状态：
         # 桥进程重启、事件漏掉一帖，前端自己那份 busy 就永远卡在上一回合。
         out["busy"] = bool(self._ai_busy)
+        # 正在等回答的确认 / 选择卡（没有就是 None）：SSE 断线期间丢掉的 ai.confirm /
+        # ai.ask 靠这一位补画，否则用户只看到「卡住」，内核却在等他点。
+        out["pending_card"] = self.ai_pending_card()
         return out
+
+    def ai_pending_card(self) -> dict | None:
+        """当前正在等用户回答的卡片：{kind: confirm|ask, …原事件字段, chat_id}；没有则 None。"""
+        card = getattr(self, "_ai_pending_card", None)
+        if not card or not self._ai_busy:
+            return None
+        return dict(card)
+
+    def list_tasks(self) -> dict:
+        """断线对账：正在跑的任务与最近完成的结果。
+
+        SSE 重连窗口里丢掉的 finished 事件没有别的地方能补回来——前端重连后拿这一份
+        把「运行中」的行对回真实状态。finished 只保留最近几十条（见 _emit 的裁剪）。
+        """
+        with self._lock:
+            running = [{"task_id": tid, "title": self._titles.get(tid, tid)}
+                       for tid in list(self._workers)]
+        finished = [{"task_id": tid, "success": bool(ok), "message": str(msg or "")}
+                    for tid, (ok, msg) in list(self._task_results.items())]
+        return {"running": running, "finished": finished}
 
     def ai_new_chat(self) -> dict:
         from mclauncher.ai import store as chat_store
@@ -2756,22 +2888,34 @@ class BackendAPI:
             # 记下这张卡对应的工具与参数：前端点「始终允许」时 ai_confirm 靠它拼 Rule
             self._ai_confirm_ctx = (name, dict(args or {}))
             from mclauncher.ai.permission import rule_content_from_input
-            self._bus.emit("ai.confirm",
-                           {"name": name, "args": args or {}, "label": label, "reason": reason or "",
-                            "rule_content": rule_content_from_input(args or {}) or ""})
-            if not _wait_card(self._ai_confirm_ev):
-                return False
-            return self._ai_confirm_ok
+            payload = {"name": name, "args": args or {}, "label": label, "reason": reason or "",
+                       "rule_content": rule_content_from_input(args or {}) or "",
+                       "chat_id": run_cid}
+            # 卡片在 SSE 断线窗口里发出去就丢了，前端看不到卡、内核却在这儿等；
+            # 存一份「待回答的卡」，前端重连后拿 ai_pending_card / ai_list_chats 对账补画。
+            self._ai_pending_card = {"kind": "confirm", **payload}
+            self._bus.emit("ai.confirm", payload)
+            try:
+                if not _wait_card(self._ai_confirm_ev):
+                    return False
+                return self._ai_confirm_ok
+            finally:
+                self._ai_pending_card = None
 
         def ask_fn(questions, title):
             if self._ai_cancel:
                 return None
             self._ai_ask_ev.clear()
             self._ai_ask_result = None
-            self._bus.emit("ai.ask", {"questions": questions or [], "title": title or ""})
-            if not _wait_card(self._ai_ask_ev):
-                return None
-            return self._ai_ask_result
+            payload = {"questions": questions or [], "title": title or "", "chat_id": run_cid}
+            self._ai_pending_card = {"kind": "ask", **payload}
+            self._bus.emit("ai.ask", payload)
+            try:
+                if not _wait_card(self._ai_ask_ev):
+                    return None
+                return self._ai_ask_result
+            finally:
+                self._ai_pending_card = None
 
         def drain_inputs():
             with self._ai_lock:
@@ -2824,9 +2968,13 @@ class BackendAPI:
                 pass
             self._bus.emit("ai.fail", {"text": text_shown, "stopped": stopped, "chat_id": run_cid})
 
+        # 事件日志按对话分文件（对齐 app/pages/ai_page.py）：以前桥不设 ai_session_id，
+        # trace 全落 active.jsonl 一份，几条对话的轨迹搅在一起。
+        settings = dict(self.get_settings())
+        settings["ai_session_id"] = run_cid or "active"
         try:
             reply = run_agent(
-                self, self.get_settings(), history, text,
+                self, settings, history, text,
                 on_delta=on_delta, on_status=on_status,
                 confirm_fn=confirm_fn, ask_fn=ask_fn, cancelled=cancelled,
                 http_cancel=http, drain_inputs_fn=drain_inputs,
@@ -2880,12 +3028,10 @@ class BackendAPI:
     # app/backend.py 修得一样，否则同一批缺陷在 eziapp / WinUI / WPF 上原样存在。
     # 实现一律照搬同名方法，不另起炉灶——两边行为不一致比缺失更难查。
     #
-    # 没有搬过来的三个及其原因：
+    # 没有搬过来的两个及其原因（invalidate_instances 已随 get_instances 的 TTL 缓存一起补上）：
     #   call_async            形参 fn / on_ok / on_err 要的是 Python 可调用对象，
     #                         JSON 送不过去（与 start_task 同类，见决策 d-398）。
     #                         桥这边「后台跑一件事」由 start_task + 事件流承担。
-    #   invalidate_instances  清的是 Qt 进程内的 _inst_cache；桥的 _instance()
-    #                         每次现建 Instance，没有那层缓存，暴露出去就是个空动作。
     #   take_migration_report 读的是 Qt 启动时写下的 _migration_report；桥的启动
     #                         路径不跑那次单目录合并，永远只会返回 {}。
     # ==================================================================

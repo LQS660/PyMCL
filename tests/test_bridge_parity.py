@@ -177,23 +177,59 @@ class BridgeAiPayloadParityTests(unittest.TestCase):
     FAIL_KEYS = {"text", "stopped"} | ROUTING_KEYS
     # rule_content：内核按 RULE_CONTENT_KEYS 从 args 里抽出来的那一项，前端「始终允许」
     # 的说明文案靠它，不用把键表抄进 C#。
-    CONFIRM_KEYS = {"name", "args", "label", "reason", "rule_content"}
+    # chat_id 随 payload 进确认卡：SSE 断线重连后，前端靠它判断这张待回答的卡
+    # 是不是当前对话的，别把旧对话的确认卡补画进新对话。
+    CONFIRM_KEYS = {"name", "args", "label", "reason", "rule_content"} | ROUTING_KEYS
 
     def _payload_keys(self, event: str) -> set:
-        """AST 抽出 bridge/api.py 里 emit("<event>", {字面量 dict}) 的键集合。"""
+        """AST 抽出 bridge/api.py 里 emit("<event>", {…}) 的键集合。
+
+        payload 是字面量 dict 直接取键；是变量（如 ai.confirm 的 payload 先存一份
+        给断线对账 _ai_pending_card 复用）则解析同函数里对该变量的 {字面量} 赋值。
+        """
         import ast
         src = Path(bridge_api.__file__).read_text("utf-8")
+        tree = ast.parse(src)
+        var_keys: dict[tuple, list[set]] = {}   # (所属函数节点或 None, 变量名) -> 键集合列表
+        emits: list[tuple[object, str, ast.expr]] = []   # (所属函数, 事件名, payload 表达式)
+
+        def _lit_keys(node) -> set | None:
+            if isinstance(node, ast.Dict):
+                return {k.value for k in node.keys if isinstance(k, ast.Constant)}
+            return None
+
+        def _visit(node, owner):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                owner = node
+            if isinstance(node, ast.Call) and node.args and isinstance(node.func, ast.Attribute) \
+                    and node.func.attr == "emit" and node.args:
+                ev = node.args[0]
+                if isinstance(ev, ast.Constant) and isinstance(ev.value, str) \
+                        and len(node.args) > 1:
+                    emits.append((owner, ev.value, node.args[1]))
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                    and isinstance(node.targets[0], ast.Name):
+                keys = _lit_keys(node.value)
+                if keys is not None:
+                    var_keys.setdefault((owner, node.targets[0].id), []).append(keys)
+            for child in ast.iter_child_nodes(node):
+                _visit(child, owner)
+
+        _visit(tree, None)
         keys: set = set()
-        for node in ast.walk(ast.parse(src)):
-            if not (isinstance(node, ast.Call) and node.args
-                    and isinstance(node.func, ast.Attribute) and node.func.attr == "emit"):
+        for owner, ev_name, payload in emits:
+            if ev_name != event:
                 continue
-            ev = node.args[0]
-            if not (isinstance(ev, ast.Constant) and ev.value == event):
-                continue
-            payload = node.args[1] if len(node.args) > 1 else None
             if isinstance(payload, ast.Dict):
                 keys |= {k.value for k in payload.keys if isinstance(k, ast.Constant)}
+            elif isinstance(payload, ast.Name):
+                # 取同函数里对这个变量名的字面量赋值；没有（模块级赋值等）就退回
+                # 全文件所有同名赋值的并集。
+                local = var_keys.get((owner, payload.id)) or [
+                    ks for (own, name), parts in var_keys.items()
+                    if name == payload.id for ks in parts]
+                for part in local:
+                    keys |= part
         return keys
 
     def test_done_payload_forwards_kernel_metadata(self):
