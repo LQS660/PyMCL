@@ -391,7 +391,8 @@ public sealed class AiPage : PageBase
             case "ai.delta":
                 if (_streamBubble is null || !RunIsDisplayed(ev)) return;
                 _stream.Append(ev.Text);
-                _streamBubble.SetText(_stream.ToString());
+                // live：<think> 没闭合时思考块自动展开走流光，闭合了就收起、正文接着长
+                _streamBubble.SetText(_stream.ToString(), live: true);
                 ScrollDown();
                 break;
 
@@ -408,7 +409,8 @@ public sealed class AiPage : PageBase
                 // 流式气泡先就地补上「为什么停」；随后重拉的会话里已带同一条提示
                 // （bridge 端照 Qt 入了库），重建后不丢。
                 var note = StopNote(ev);
-                if (note.Length > 0 && _streamBubble != null && RunIsDisplayed(ev))
+                // 这一发同时把流式态收掉（live=false）：思考块该折的折起来、流光停下
+                if (_streamBubble != null && RunIsDisplayed(ev) && (_stream.Length > 0 || note.Length > 0))
                     _streamBubble.SetText(_stream.ToString() + note);
                 ResetRunState();
                 Run(async () =>
@@ -426,6 +428,8 @@ public sealed class AiPage : PageBase
                 var mine = RunIsDisplayed(ev);
                 var quiet = _abandoned;
                 _status.Text = ev.Stopped ? "" : ev.Text;
+                // 半路断掉的流式气泡也要收成终态：思考块别一直亮着「思考中…」
+                if (mine && _streamBubble != null && _stream.Length > 0) _streamBubble.SetText(_stream.ToString());
                 if (ev.Stopped)
                 {
                     if (mine && _streamBubble != null && _stream.Length == 0) _streamBubble.SetText(L("已停止"));
@@ -732,18 +736,163 @@ internal sealed class AiPermissionPanel : Border
 }
 
 // ======================================================================
+/// <summary>
+/// 可折叠的思考过程块，与 Qt 端 app/pages/ai_page.py 的 ThinkFold 同款：平时一行收起，点开看全文；
+/// 流式期间模型还在想（&lt;think&gt; 没闭合）时自动展开、文字走流光，闭合后自动收起。
+/// 标题行照 ZCode 的 Reasoning 行：左 brain 图标，中间文字，右侧 chevron 展开时转 90°。
+/// 不折叠的话思考原文会直接铺满气泡，正文被顶到看不见。
+/// </summary>
+internal sealed class ThinkFold : Border
+{
+    private readonly TextBlock _label;
+    private readonly System.Windows.Shapes.Path _chevron;
+    private readonly TextBox _body;
+    private bool _open;
+    private bool _thinking;
+
+    /// <summary>当前是否展开（默认收起）。</summary>
+    public bool IsOpen => _open;
+    /// <summary>思考原文（只给面板显示，复制正文时不带）。</summary>
+    public string Text => _body.Text;
+    /// <summary>标题行此刻的文字（「思考中…」/「思考过程（N）」）；--think-check 用。</summary>
+    internal string Header => _label.Text;
+    /// <summary>思考原文那块此刻是否展开着；--think-check 用。</summary>
+    internal bool BodyShown => _body.Visibility == Visibility.Visible;
+
+    public ThinkFold()
+    {
+        _label = Ui.Txt("", 12, true, "B.Ink");
+        _chevron = Lucide.Icon(Lucide.ChevronRight, 16, "B.InkMuted");
+        var head = Ui.G(null, "Auto,*,Auto");
+        head.Add(Lucide.Icon(Lucide.Brain, 16, "B.InkMuted").VCenter(), 0, 0);
+        head.Add(_label.M(8, 0, 8, 0).VCenter(), 0, 1);
+        head.Add(_chevron.VCenter(), 0, 2);
+        // 整行可点：Grid 没底色时空白处不吃鼠标，得铺一层透明底
+        head.Background = Brushes.Transparent;
+        head.Cursor = Cursors.Hand;
+        head.MinHeight = 22;
+        head.MouseLeftButtonUp += (_, e) => { Toggle(); e.Handled = true; };
+
+        _body = new TextBox
+        {
+            IsReadOnly = true,
+            BorderThickness = new Thickness(0),
+            Background = Brushes.Transparent,
+            TextWrapping = TextWrapping.Wrap,
+            FontSize = 12,
+            Padding = new Thickness(0),
+            Margin = new Thickness(0, 4, 0, 0),
+            Visibility = Visibility.Collapsed,
+        };
+        _body.SetResourceReference(Control.ForegroundProperty, "B.InkMuted");
+
+        CornerRadius = new CornerRadius(8);
+        Padding = new Thickness(10, 5, 10, 6);
+        BorderThickness = new Thickness(1);
+        SetResourceReference(BackgroundProperty, "B.Hover");
+        SetResourceReference(BorderBrushProperty, "B.Line");
+        Child = Ui.V(0, head, _body);
+        SyncHead();
+    }
+
+    public void Toggle() => SetOpen(!_open);
+
+    public void SetOpen(bool on)
+    {
+        if (_open == on)
+        {
+            SyncHead();
+            return;
+        }
+        _open = on;
+        _body.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        SyncHead();
+    }
+
+    /// <summary>live = 整条消息还在流式；open = 思考块还没闭合（模型仍在想）。</summary>
+    public void SetThink(string text, bool live, bool open)
+    {
+        _thinking = live && open;
+        _body.Text = text ?? "";
+        SetOpen(open);
+    }
+
+    private void SyncHead()
+    {
+        var n = _body.Text.Length;
+        _label.Text = _thinking
+            ? L("思考中…")
+            : L("思考过程") + (n > 0 ? L("（") + n + L("）") : "");
+        Lucide.Shimmer(_label, _thinking, "B.Ink");
+        Lucide.Rotate(_chevron, _open);
+    }
+}
+
+// ======================================================================
 /// <summary>一条消息。助手 / 出错的消息带「复制」，用户的消息带「重发」。</summary>
 internal sealed class Bubble : Border
 {
     private readonly TextBox _body;
     private readonly SPanel _thinking;
     private readonly TextBlock _thinkingLabel;
+    private readonly ThinkFold? _think;
+    private readonly bool _mine;
     private string _plain;
+    // 去掉 <think> 块之后的正文：复制拿的是它，不把推理原文一起贴进 issue
+    private string _answer;
+
+    // ---- 只给 --think-check（Shell/ThinkCheck.cs）量状态用，界面代码别拿 ----
+    internal ThinkFold? Think => _think;
+    internal string Answer => _answer;
+    internal string BodyText => _body.Text;
+    internal bool BodyShown => _body.Visibility == Visibility.Visible;
+
+    /// <summary>
+    /// 把 &lt;think&gt;…&lt;/think&gt; 块从回复里摘出来（与 Qt 端 _split_think 同一套规则）。
+    /// 流式期间可能只有开头没有收尾（模型还在想），这种情况把未闭合块整体算作思考内容、
+    /// 答案为空；收尾出现后答案从 &lt;/think&gt; 之后起算。标签大小写不敏感。
+    /// </summary>
+    internal static (List<string> Parts, string Answer) SplitThink(string? text)
+    {
+        var parts = new List<string>();
+        var answer = new System.Text.StringBuilder();
+        var rest = text ?? "";
+        while (true)
+        {
+            var i = rest.IndexOf("<think>", StringComparison.OrdinalIgnoreCase);
+            if (i < 0) break;
+            answer.Append(rest, 0, i);
+            var j = rest.IndexOf("</think>", i + 7, StringComparison.OrdinalIgnoreCase);
+            if (j < 0)
+            {
+                parts.Add(rest[(i + 7)..]);
+                rest = "";
+                break;
+            }
+            parts.Add(rest[(i + 7)..j]);
+            rest = rest[(j + 8)..];
+        }
+        answer.Append(rest);
+        return (parts, answer.ToString().Trim());
+    }
+
+    /// <summary>思考块还没闭合：开头比收尾多。</summary>
+    private static bool ThinkOpen(string text)
+    {
+        static int Count(string s, string tag)
+        {
+            int n = 0, at = 0;
+            while ((at = s.IndexOf(tag, at, StringComparison.OrdinalIgnoreCase)) >= 0) { n++; at += tag.Length; }
+            return n;
+        }
+        return Count(text, "<think>") > Count(text, "</think>");
+    }
 
     public Bubble(string role, string text, Action<string> resend)
     {
         _plain = text ?? "";
-        var mine = role == "user";
+        _answer = _plain;
+        var mine = _mine = role == "user";
         var err = role == "error";
 
         _body = new TextBox
@@ -762,6 +911,8 @@ internal sealed class Bubble : Border
         _thinkingLabel = Ui.Txt("", 13, true, "B.Ink");
         _thinking = Ui.H(8, Lucide.Icon(Lucide.Brain, 16, "B.InkMuted").VCenter(), _thinkingLabel.VCenter());
         _thinking.Visibility = Visibility.Collapsed;
+        // 思考折叠只有助手 / 出错的消息才会有；用户自己的话原样显示
+        if (!mine) _think = new ThinkFold { Visibility = Visibility.Collapsed };
 
         var who = Ui.Small(mine ? L("我") : err ? L("出错") : L("助手"));
         if (mine) who.SetResourceReference(TextBlock.ForegroundProperty, "B.OnAccent");
@@ -779,35 +930,67 @@ internal sealed class Bubble : Border
         Padding = new Thickness(13, 8, 13, 11);
         MaxWidth = 760;
         HorizontalAlignment = mine ? HorizontalAlignment.Right : HorizontalAlignment.Left;
-        Child = Ui.V(4, head, _thinking, _body);
+        Child = Ui.V(4, head, _thinking, _think, _body);
         SetResourceReference(BackgroundProperty, mine ? "B.Accent" : err ? "B.DangerSoft" : "B.Paper2");
         if (err)
         {
             BorderThickness = new Thickness(1);
             SetResourceReference(BorderBrushProperty, "B.Danger");
         }
+        // 历史重载也走同一条路：存过的回复里带 <think> 一样折起来
+        Render(live: false);
     }
 
-    public void SetText(string text)
+    /// <summary>live = 还在流式：思考块没闭合时展开并走流光，正文就地追加。</summary>
+    public void SetText(string text, bool live = false)
     {
         _plain = text ?? "";
-        _body.Text = _plain;
         if (_thinking.Visibility == Visibility.Visible)
         {
             Lucide.Shimmer(_thinkingLabel, false, "B.Ink");
             _thinking.Visibility = Visibility.Collapsed;
             _body.Visibility = Visibility.Visible;
         }
+        Render(live);
+    }
+
+    /// <summary>把 _plain 拆成思考块 + 正文铺到界面上；用户的消息不拆。</summary>
+    private void Render(bool live)
+    {
+        if (_mine || _think is null)
+        {
+            _answer = _plain;
+            _body.Text = _plain;
+            return;
+        }
+        var (parts, answer) = SplitThink(_plain);
+        _answer = answer;
+        if (parts.Count > 0)
+        {
+            var open = ThinkOpen(_plain);
+            _think.SetThink(string.Join("\n\n", parts.Select(p => p.Trim()).Where(p => p.Length > 0)),
+                            live, live && open);
+            _think.Visibility = Visibility.Visible;
+            // 模型还在想、正文一个字没有：别让空文本框在思考块下面撑出一行空白
+            _body.Visibility = live && answer.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+            _body.Text = !live && answer.Length == 0 ? "…" : answer;
+            return;
+        }
+        _think.Visibility = Visibility.Collapsed;
+        if (_thinking.Visibility != Visibility.Visible) _body.Visibility = Visibility.Visible;
+        _body.Text = answer;
     }
 
     /// <summary>还没有正文时的「正在想…」：整条气泡只剩 brain + 流光一行。</summary>
     public void SetThinking(string text)
     {
         _plain = "";
+        _answer = "";
         _body.Text = "";
         _thinkingLabel.Text = text ?? "";
         _thinking.Visibility = Visibility.Visible;
         _body.Visibility = Visibility.Collapsed;
+        if (_think != null) _think.Visibility = Visibility.Collapsed;
         Lucide.Shimmer(_thinkingLabel, true, "B.Ink");
     }
 
@@ -815,7 +998,8 @@ internal sealed class Bubble : Border
     {
         try
         {
-            Clipboard.SetText(_plain);
+            // 只拷正文：思考原文留在折叠块里
+            Clipboard.SetText(string.IsNullOrEmpty(_answer) ? _plain : _answer);
             AppServices.Toast(L("已复制"), "", ToastKind.Success);
         }
         catch { }
