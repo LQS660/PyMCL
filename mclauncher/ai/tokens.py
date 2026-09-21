@@ -2,7 +2,14 @@
 """token 计量：优先用 provider 的 usage 做基线，只对新增消息估算。
 
 估算启发式：中文约 1 字 ≈ 1 token，英文约 4 字符 ≈ 1 token。
-真实窗口（deepseek-v4-flash）未实测，context_window 由 settings 传入。
+
+【待实测】deepseek-v4-flash 的真实上下文窗口：本机未跑过实测（需要真实网关
+流量），窗口取值见 compact.DEFAULT_CONTEXT_WINDOW 的保守依据。实测方法：
+1) 设置里把模型指向自定义 NewAPI 直连（走 stream_options.include_usage）；
+2) 发一段已知 token 数的 prompt（如让模型复读 2000 字中文），读
+   Usage 事件里 prompt_tokens 与估算值的偏差，校准 estimate_text 系数；
+3) 逐步追加不相关内容直到上游报 context_length_exceeded，报错前的
+   prompt_tokens 即真实窗口（写入本注释与 settings 默认值）。
 """
 
 from __future__ import annotations

@@ -99,12 +99,36 @@ def microcompact(messages, cfg: MicroConfig, last_assistant_at: float = 0.0,
 @dataclass
 class AutoConfig:
     enabled: bool = True
-    context_window: int = 200_000     # ★ 需按实际模型实测后配置（可由 settings 传入）
+    # 保守默认 128k：目标模型 deepseek-v4-flash 的真实窗口【待实测】（tokens.py 有实测
+    # 方法）。取公开 DeepSeek 系列常见窗口上界，宁小勿大——估大了 autocompact 触发过晚
+    # 会撞上游 400（有 reactive compact 兜底），估小了只是多压几次。设置 UI 可改
+    # （ai_context_window，Qt/WPF 设置页均有），本常量只是无配置时的兜底。
+    context_window: int = 131_072
     buffer_tokens: int = 13_000
     max_consecutive_failures: int = 3
     max_consecutive_rapid_refills: int = 3
     tool_turn_threshold: int = 3
     keep_recent_messages: int = 6     # 压缩时保留的最近消息数（不含 system）
+
+
+# 与 AutoConfig.context_window 默认值保持一致；settings.ai_context_window 的
+# 解析入口（含夹取）统一走 auto_config_from_settings
+DEFAULT_CONTEXT_WINDOW = 131_072
+MIN_CONTEXT_WINDOW = 8_192
+MAX_CONTEXT_WINDOW = 2_000_000
+
+
+def auto_config_from_settings(settings: dict | None) -> AutoConfig:
+    """settings['ai_context_window'] → AutoConfig；非法/非正值回退保守默认。"""
+    raw = (settings or {}).get("ai_context_window")
+    try:
+        window = int(raw)
+    except (TypeError, ValueError):
+        window = DEFAULT_CONTEXT_WINDOW
+    if window <= 0:
+        window = DEFAULT_CONTEXT_WINDOW
+    window = max(MIN_CONTEXT_WINDOW, min(window, MAX_CONTEXT_WINDOW))
+    return AutoConfig(context_window=window)
 
 
 def auto_threshold(cfg: AutoConfig) -> int:

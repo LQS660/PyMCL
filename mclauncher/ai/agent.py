@@ -28,6 +28,7 @@ from .state import IllegalTransition, ToolCall, ToolCallStatus, TurnPhase, TurnS
 from .tools import (
     TOOL_META, TOOL_SCHEMAS, ToolCancelled, affected_paths, confirm_label, is_ask_tool,
     normalize_ask_answer, normalize_ask_args, parse_args, run_tool, runtime_context,
+    select_tool_schemas,
 )
 
 
@@ -271,8 +272,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
     turn = TurnState(id=uuid.uuid4().hex[:12], session_id="active", turn_number=1)
 
     # ---- 上下文与 token（批次 3）----
-    auto_cfg = compact.AutoConfig(
-        context_window=int((settings or {}).get("ai_context_window") or 200_000))
+    auto_cfg = compact.auto_config_from_settings(settings)
     # micro 阈值从 autocompact 阈值派生：先清旧工具结果，实在不行再全量总结
     micro_cfg = compact.MicroConfig(
         threshold_tokens=max(4_000, compact.auto_threshold(auto_cfg) - 16_000))
@@ -344,6 +344,45 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
         time.sleep(base * (0.8 + 0.4 * random.random()))
         _check()
 
+    # ---- 用量采集（2.3）：真实 usage 进 trace 与事件日志；公益网关拿不到就保持估算 ----
+    def _record_usage(usage: dict, n_req: int) -> None:
+        usage = usage or {}
+        prompt = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        completion = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        if prompt <= 0 and completion <= 0:
+            return
+        details = usage.get("prompt_tokens_details") or {}
+        cached = int((details or {}).get("cached_tokens") or 0)
+        tokens_mod.update_from_usage(token_state, usage, n_req)
+        trace.record("usage", prompt_tokens=prompt, completion_tokens=completion,
+                     cached_tokens=cached)
+        chat_store.log_event(session_id, "Usage", turn_id=turn.id,
+                             prompt_tokens=prompt, completion_tokens=completion,
+                             cached_tokens=cached, source="provider")
+
+    # ---- 模型降级（2.4）：主模型连续 429/5xx → 备用模型完成本回合；未配置则原样 ----
+    fallback_model = str((settings or {}).get("ai_fallback_model") or "").strip()
+    fallback_active = [False]
+
+    def _maybe_fallback(exc: AIClientError) -> bool:
+        if not fallback_model or fallback_active[0]:
+            return False
+        if exc.status not in (429, 500, 502, 503, 504) \
+                and exc.category != "rate_limited":
+            return False
+        fallback_active[0] = True
+        _status("model_fallback", {"model": fallback_model,
+                                   "error": str(exc)[:160]})
+        trace.record("model_fallback", round_=round_no[0], model=fallback_model, exc=exc)
+        chat_store.log_event(session_id, "ModelFallback", turn_id=turn.id,
+                             model=fallback_model, error=str(exc)[:160])
+        return True
+
+    def _request_settings() -> dict:
+        if fallback_active[0]:
+            return dict(settings or {}, ai_model=fallback_model)
+        return settings or {}
+
     def _looks_like_request(text: str) -> bool:
         """用户这句像不像「要我动手」：像才把只回文字判成 NO_TOOL_CALL。
 
@@ -361,6 +400,8 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             reason = StopReason.COMPLETED
             kw.pop("detail", None)
         res = AgentResult(text, stop_reason=reason, **kw)
+        # 用量口径给 UI：provider_usage = 真实回执；estimate = 公益网关拿不到 usage 的估算
+        res.usage_source = token_state.source
         try:
             # 本回合完整轨迹（不含 system 头），供 UI 持久化（W5-1）
             export = [dict(m) for m in messages
@@ -485,19 +526,24 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             text_parts: list = []
             truncated = False
             stream_failed = False
+            # 2.2 按需声明：核心集 + 关键词扩展；模型想调没声明的工具时全量重发一次
+            schema_override: list | None = None
+            schemas = TOOL_SCHEMAS
             for _attempt in range(6):
                 tool_calls = []
                 text_parts = []
                 truncated = False
                 stream_failed = False
+                schemas = schema_override or select_tool_schemas(messages)
                 n_req = len(messages)
                 usage_info = None
                 stream_err = ""
                 chat_store.log_event(session_id, "ModelRequest",
                                      turn_id=turn.id, round=round_no[0],
-                                     attempt=_attempt, msg_count=n_req)
+                                     attempt=_attempt, msg_count=n_req,
+                                     tools=len(schemas))
                 try:
-                    for ev in chat_stream(settings, messages, TOOL_SCHEMAS, http_cancel=http_cancel):
+                    for ev in chat_stream(_request_settings(), messages, schemas, http_cancel=http_cancel):
                         _check()
                         kind = ev.get("type")
                         if kind == "delta":
@@ -525,6 +571,8 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                         trace.record("retry", round_=round_no[0], attempt=retry_no, exc=exc)
                         _sleep_backoff(retry_no)
                         continue
+                    if _maybe_fallback(exc):
+                        continue
                     stream_failed = True
                     stream_err = str(exc)
                     trace.record("stream_error", round_=round_no[0], exc=exc, stream_failed=True)
@@ -533,7 +581,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     stream_err = str(exc)
                     trace.record("stream_exception", round_=round_no[0], exc=exc, stream_failed=True)
                 if usage_info:
-                    tokens_mod.update_from_usage(token_state, usage_info, n_req)
+                    _record_usage(usage_info, n_req)
 
                 # reactive compact：上下文塞不下 → 压缩后重试同一个 step（每步一次）
                 if is_context_overflow(stream_err) and not reactive_attempted:
@@ -547,7 +595,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 if not tool_calls and (stream_failed or not "".join(text_parts)):
                     _check()
                     try:
-                        data = chat_once(settings, messages, TOOL_SCHEMAS,
+                        data = chat_once(_request_settings(), messages, TOOL_SCHEMAS,
                                          http_cancel=http_cancel)
                     except AIClientError as exc:
                         if exc.fatal():
@@ -556,9 +604,11 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                             reactive_attempted = True
                             if _force_compact(round_no[0]):
                                 continue
+                        if _maybe_fallback(exc):
+                            continue
                         raise
                     if isinstance(data.get("usage"), dict) and data["usage"]:
-                        tokens_mod.update_from_usage(token_state, data["usage"], len(messages))
+                        _record_usage(data["usage"], len(messages))
                     fb_content = data.get("content") or ""
                     if fb_content and not text_parts:
                         text_parts.append(fb_content)
@@ -584,6 +634,17 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             content = "".join(text_parts)
             if content:
                 final = content
+
+            # 2.2 兜底：模型调了没声明的工具 → 全量 schema 重发一次，绝不让调用悬空
+            if tool_calls and schema_override is None:
+                declared = {s["function"]["name"] for s in schemas}
+                if any((tc.get("function") or {}).get("name") not in declared
+                       for tc in tool_calls):
+                    schema_override = TOOL_SCHEMAS
+                    trace.record("tool_schema_miss",
+                                 tools=[(tc.get("function") or {}).get("name")
+                                        for tc in tool_calls])
+                    continue
 
             if not tool_calls:
                 rounds_used = round_no[0]

@@ -524,11 +524,21 @@ class SettingsPage(QWidget):
         self.model_card, self.ai_model = _line_card(
             FIF.EDIT, tr("模型名"), tr("公益模式锁定 deepseek-v4-flash；自定义才改得了"))
         self.ai_model.setText(settings.get("ai_model") or "deepseek-v4-flash")
+        self.ctx_card, self.ai_ctx = _line_card(
+            FIF.CALENDAR, tr("上下文窗口（token）"),
+            tr("模型真实窗口未知时按 128k 保守压缩；实测后可改大"))
+        self.ai_ctx.setText(str(settings.get("ai_context_window") or 131072))
+        self.fb_model_card, self.ai_fallback = _line_card(
+            FIF.SYNC, tr("备用模型（可选）"),
+            tr("主模型连续 429/5xx 时本回合自动切到它；留空不启用"))
+        self.ai_fallback.setText(settings.get("ai_fallback_model") or "")
         ai_group.addSettingCard(mode_card)
         ai_group.addSettingCard(self.gw_card)
         ai_group.addSettingCard(self.base_card)
         ai_group.addSettingCard(self.key_card)
         ai_group.addSettingCard(self.model_card)
+        ai_group.addSettingCard(self.ctx_card)
+        ai_group.addSettingCard(self.fb_model_card)
         root.addWidget(ai_group)
         self.ai_mode.currentTextChanged.connect(self._sync_ai_mode)
         self._sync_ai_mode()
@@ -606,6 +616,14 @@ class SettingsPage(QWidget):
         self.base_card.setVisible(custom)
         self.key_card.setVisible(custom)
         self.model_card.setVisible(custom)
+
+    def _collect_ctx_window(self) -> int:
+        """上下文窗口输入：非法/越界回退 128k 保守默认，别让手滑炸掉保存。"""
+        try:
+            value = int(self.ai_ctx.text().strip())
+        except (TypeError, ValueError):
+            return 131072
+        return max(8192, min(value, 2_000_000))
 
     def _apply_theme_now(self):
         win = self.window()
@@ -1222,6 +1240,8 @@ class SettingsPage(QWidget):
             "ai_base_url": self.ai_base.text().strip(),
             "ai_api_key": self.ai_key.text().strip(),
             "ai_model": self.ai_model.text().strip() or "deepseek-v4-flash",
+            "ai_context_window": self._collect_ctx_window(),
+            "ai_fallback_model": self.ai_fallback.text().strip(),
             "feedback_url": self.fb_url.text().strip(),
             "feedback_heartbeat": self.fb_hb.isChecked(),
             "feedback_consent": self.fb_consent.isChecked(),

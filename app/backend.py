@@ -190,6 +190,10 @@ class BackendWorker(QThread):
     def run(self):
         try:
             result = self._target(self._progress, self._log, *self._args, **self._kwargs)
+            if self._cancelled and not (isinstance(result, str) and result):
+                # 取消后 target 提前 return（如强杀游戏）：空结果不许兜成「任务完成」
+                self.task_finished.emit(self.task_id, False, tr("已取消"))
+                return
             msg = result if isinstance(result, str) and result else tr("任务完成")
             self.task_finished.emit(self.task_id, True, msg)
         except TaskCancelled:
@@ -574,8 +578,9 @@ class BackendAPI(QObject):
     # ==================================================================
     # 对外 API（异步任务）
     # ==================================================================
-    def install_game(self, version: str, loader: str = tr("无"), loader_version: str = "",
+    def install_game(self, version: str, loader: str | None = None, loader_version: str = "",
                      instance: str = "", extra: dict | None = None) -> str:
+        loader = loader or tr("无")
         inst = instance or CONFIG.get("default_instance", "default")
         extra = extra or {}
         bits = [version]
@@ -834,6 +839,17 @@ class BackendAPI(QObject):
             raise terracotta_mod.TerracottaError(tr("请输入房主的公网地址，例如 1.2.3.4:25565"))
         return self._launch_into_server(f"{host}:{port}", tr("请到游戏「多人游戏」双击「陶瓦联机大厅」。"))
 
+    @staticmethod
+    def _latest_version_id(inst, ids: list[str]) -> str:
+        """按 mtime 取最新版本；列目录与 stat 之间被外部删掉的版本跳过，
+        不能让整个启动路径死于 FileNotFoundError。"""
+        def mtime(vid: str) -> float:
+            try:
+                return (inst.versions_dir() / vid).stat().st_mtime
+            except OSError:
+                return 0.0
+        return max(ids, key=mtime)
+
     def _launch_into_server(self, url: str, already_msg: str):
         inst = self._instance()
         terracotta_mod.remember_lobby(url, inst.path)
@@ -843,7 +859,7 @@ class BackendAPI(QObject):
         ids = inst.installed_ids()
         if not ids:
             raise LaunchError(tr("请先到「启动」页安装一个版本。"))
-        version = max(ids, key=lambda vid: (inst.versions_dir() / vid).stat().st_mtime)
+        version = self._latest_version_id(inst, ids)
         host, port = terracotta_mod.split_join_url(url)
         acc = self.accounts.get_active()
         if acc and acc.get("type") == "microsoft":
@@ -865,8 +881,9 @@ class BackendAPI(QObject):
 
     def launch_game(self, instance: str, version: str, account: str,
                     username: str, memory_mb: int, width: int, height: int,
-                    java: str = tr("自动选择"), extra_game_args=None,
+                    java: str | None = None, extra_game_args=None,
                     force: bool = False) -> str:
+        java = java or tr("自动选择")
         task_id = self.start_task(
             f"{tr('启动游戏')} {version}", self._launch_game_impl,
             instance, version, account, username, memory_mb, width, height, java,
@@ -877,8 +894,9 @@ class BackendAPI(QObject):
 
     def build_launch_command(self, instance: str, version: str, account: str,
                               username: str, memory_mb: int, width: int, height: int,
-                              java: str = tr("自动选择")) -> str:
+                              java: str | None = None) -> str:
         """生成启动命令文本（不实际启动）。"""
+        java = java or tr("自动选择")
         inst = self._instance(instance)
         if not version:
             raise LaunchError(tr("请先选择版本"))
@@ -1085,8 +1103,10 @@ class BackendAPI(QObject):
                 bool(CONFIG.get("ai_confirm_writes", True))),
             "ai_permission_rules": list(CONFIG.get("ai_permission_rules") or []),
             "ai_permission_dont_ask": bool(CONFIG.get("ai_permission_dont_ask", False)),
-            "ai_context_window": int(CONFIG.get("ai_context_window") or 200000),
+            "ai_context_window": max(8192, int(CONFIG.get("ai_context_window")
+                                               or 131072)),
             "ai_max_tokens": int(CONFIG.get("ai_max_tokens") or 8192),
+            "ai_fallback_model": str(CONFIG.get("ai_fallback_model") or ""),
             "download_source": CONFIG.get("download_source") or "auto",
             "community_source": CONFIG.get("community_source") or "auto",
             "use_system_proxy": bool(CONFIG.get("use_system_proxy", True)),
@@ -1194,10 +1214,13 @@ class BackendAPI(QObject):
                                    else list(CONFIG.get("ai_permission_rules") or []),
             "ai_permission_dont_ask": bool(data["ai_permission_dont_ask"]) if "ai_permission_dont_ask" in data
                                       else bool(CONFIG.get("ai_permission_dont_ask", False)),
-            "ai_context_window": int(data["ai_context_window"]) if "ai_context_window" in data
-                                 else int(CONFIG.get("ai_context_window") or 200000),
+            "ai_context_window": max(8192, min(int(data["ai_context_window"]), 2_000_000))
+                                 if "ai_context_window" in data
+                                 else max(8192, int(CONFIG.get("ai_context_window") or 131072)),
             "ai_max_tokens": int(data["ai_max_tokens"]) if "ai_max_tokens" in data
                              else int(CONFIG.get("ai_max_tokens") or 8192),
+            "ai_fallback_model": str(data["ai_fallback_model"]).strip() if "ai_fallback_model" in data
+                                 else str(CONFIG.get("ai_fallback_model") or ""),
             "download_source": (data.get("download_source") or CONFIG.get("download_source") or "auto"),
             "community_source": (data.get("community_source") or CONFIG.get("community_source") or "auto"),
             "use_system_proxy": bool(data.get("use_system_proxy", CONFIG.get("use_system_proxy", True))),
@@ -1241,7 +1264,7 @@ class BackendAPI(QObject):
             "skip_assets": bool(data.get("skip_assets", CONFIG.get("skip_assets", False))),
             "allow_multi_instance": bool(
                 data.get("allow_multi_instance", CONFIG.get("allow_multi_instance", False))),
-            "first_run": bool(data["first_run"]) if "first_run" in data else bool(CONFIG.get("first_run", False)),
+            "first_run": bool(data["first_run"]) if "first_run" in data else bool(CONFIG.get("first_run", True)),
             "offline_skin": data.get("offline_skin") or CONFIG.get("offline_skin") or "default",
             "default_java": _keep("default_java"),
         })
@@ -2129,7 +2152,8 @@ class BackendAPI(QObject):
     # ==================================================================
     # 真实实现
     # ==================================================================
-    def _install_game_impl(self, progress, log, version, loader=tr("无"), loader_version="", instance="", extra=None):
+    def _install_game_impl(self, progress, log, version, loader=None, loader_version="", instance="", extra=None):
+        loader = loader or tr("无")
         extra = dict(extra or {})
         extra.setdefault("skip_assets", bool(CONFIG.get("skip_assets")))
         inst = self._instance(instance)
@@ -2302,8 +2326,9 @@ class BackendAPI(QObject):
         return tr("离线")
 
     def _launch_game_impl(self, progress, log, instance, version, account,
-                          username, memory_mb, width, height, java=tr("自动选择"),
+                          username, memory_mb, width, height, java=None,
                           extra_game_args=None, force: bool = False):
+        java = java or tr("自动选择")
         if not version:
             raise LaunchError(tr("请先选择版本（到「版本」页安装）"))
         # 多开检查

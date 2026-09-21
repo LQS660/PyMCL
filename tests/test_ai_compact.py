@@ -109,7 +109,9 @@ class MicrocompactTests(unittest.TestCase):
 
 class AutocompactTests(unittest.TestCase):
     def test_threshold(self):
-        self.assertEqual(auto_threshold(AutoConfig()), 187000)
+        # 默认窗口 131072（128k 保守值）- buffer 13000 = 118072。
+        # 契约变化：原 200000 是抄来当结论用的常量，按改造清单 2.1 换成保守默认。
+        self.assertEqual(auto_threshold(AutoConfig()), 118072)
 
     def test_reasons(self):
         cfg = AutoConfig(context_window=2000, buffer_tokens=500)  # 阈值 1500

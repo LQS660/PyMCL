@@ -1957,5 +1957,12 @@
   "回合还在跑，先停止再撤回": "A turn is still running; stop it before undoing",
   "撤回": "Undo",
   "已撤回：{0} 个文件的改动已还原": "Undone: changes in {0} file(s) restored",
-  "已撤回：只回退了对话，这一轮没有可还原的磁盘改动": "Undone: only the conversation was rewound; no file changes to restore in this round"
+  "已撤回：只回退了对话，这一轮没有可还原的磁盘改动": "Undone: only the conversation was rewound; no file changes to restore in this round",
+  "上下文窗口（token）": "Context window (tokens)",
+  "模型真实窗口未知时按 128k 保守压缩；实测后可改大": "Unknown model window: compact conservatively at 128k; adjust after measuring",
+  "备用模型（可选）": "Fallback model (optional)",
+  "主模型连续 429/5xx 时本回合自动切到它；留空不启用": "When the main model keeps returning 429/5xx, the turn switches to it; leave empty to disable",
+  "已切换备用模型": "Switched to fallback model",
+  "主模型连续失败，本回合改用 {model} 完成": "The main model kept failing; this turn continues on {model}",
+  "留空不启用": "Leave empty to disable"
 }

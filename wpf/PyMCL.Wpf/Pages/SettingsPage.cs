@@ -155,6 +155,8 @@ public sealed class SettingsPage : PageBase
     private readonly TextBox _aiBase = Ui.Input("https://api.openai.com/v1");
     private readonly TextBox _aiKey = Ui.Input("sk-…");
     private readonly TextBox _aiModel = Ui.Input(L("模型名"));
+    private readonly TextBox _aiCtx = Ui.Input("131072");
+    private readonly TextBox _aiFallback = Ui.Input(L("留空不启用"));
     private readonly CheckBox _aiConfirm = Ui.Switch(true);
     private readonly TextBox _msClient = Ui.Input(L("微软登录 Client ID（留空用内置）"));
     private readonly TextBox _cfKey = Ui.Input(L("CurseForge API Key（留空用内置）"));
@@ -320,6 +322,8 @@ public sealed class SettingsPage : PageBase
             Ui.Field(L("端点地址"), _aiBase, L("自定义模式下的 OpenAI 兼容 base_url")),
             Ui.Field("API Key", _aiKey),
             Ui.Field(L("模型"), _aiModel),
+            Ui.Field(L("上下文窗口（token）"), _aiCtx, L("模型真实窗口未知时按 128k 保守压缩；实测后可改大")),
+            Ui.Field(L("备用模型（可选）"), _aiFallback, L("主模型连续 429/5xx 时本回合自动切到它；留空不启用")),
             Ui.Field(L("写操作确认"), _aiConfirm, L("AI 要改文件 / 装东西前先弹窗问你")),
             Ui.Field(L("权限档位"), _aiPerm),
             Ui.Field("", _testAi.Left())), 16);
@@ -428,6 +432,8 @@ public sealed class SettingsPage : PageBase
                 _aiBase.Text = GetStr(s, "ai_base_url");
                 _aiKey.Text = GetStr(s, "ai_api_key");
                 _aiModel.Text = GetStr(s, "ai_model");
+                _aiCtx.Text = GetStr(s, "ai_context_window", "131072");
+                _aiFallback.Text = GetStr(s, "ai_fallback_model");
                 _aiConfirm.IsChecked = GetBool(s, "ai_confirm_writes", true);
                 _gameDir0 = GetStr(s, "game_dir");
                 if (string.IsNullOrEmpty(_gameDir0)) _gameDir0 = GetStr(s, "root");
@@ -530,6 +536,9 @@ public sealed class SettingsPage : PageBase
             ["ai_base_url"] = _aiBase.Text?.Trim() ?? "",
             ["ai_api_key"] = _aiKey.Text?.Trim() ?? "",
             ["ai_model"] = _aiModel.Text?.Trim() ?? "",
+            ["ai_context_window"] = int.TryParse(_aiCtx.Text?.Trim(), out var ctxWin)
+                ? Math.Clamp(ctxWin, 8192, 2_000_000) : 131072,
+            ["ai_fallback_model"] = _aiFallback.Text?.Trim() ?? "",
             ["ai_confirm_writes"] = _aiConfirm.IsChecked == true,
             ["ai_permission_mode"] = KeyOf(_aiPerm),
             ["ui_background"] = _bgPath.Text?.Trim() ?? "",

@@ -888,8 +888,10 @@ class BackendAPI:
                 bool(CONFIG.get("ai_confirm_writes", True))),
             "ai_permission_rules": list(CONFIG.get("ai_permission_rules") or []),
             "ai_permission_dont_ask": bool(CONFIG.get("ai_permission_dont_ask", False)),
-            "ai_context_window": int(CONFIG.get("ai_context_window") or 200000),
+            "ai_context_window": max(8192, int(CONFIG.get("ai_context_window")
+                                               or 131072)),
             "ai_max_tokens": int(CONFIG.get("ai_max_tokens") or 8192),
+            "ai_fallback_model": str(CONFIG.get("ai_fallback_model") or ""),
             "root": str(utils.ROOT),
             "feedback_url": CONFIG.get("feedback_url") or DEFAULT_FEEDBACK_URL or "",
             "feedback_heartbeat": bool(CONFIG.get("feedback_heartbeat", True)),
@@ -1009,9 +1011,12 @@ class BackendAPI:
         if "ai_permission_dont_ask" in data:
             patch["ai_permission_dont_ask"] = bool(data.get("ai_permission_dont_ask"))
         if "ai_context_window" in data:
-            patch["ai_context_window"] = int(data.get("ai_context_window") or 200000)
+            patch["ai_context_window"] = max(8192, min(
+                int(data.get("ai_context_window") or 131072), 2_000_000))
         if "ai_max_tokens" in data:
             patch["ai_max_tokens"] = int(data.get("ai_max_tokens") or 8192)
+        if "ai_fallback_model" in data:
+            patch["ai_fallback_model"] = str(data.get("ai_fallback_model") or "").strip()
         if "feedback_url" in data:
             patch["feedback_url"] = (data.get("feedback_url") or "").strip()
         if "feedback_heartbeat" in data:
