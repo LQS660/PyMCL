@@ -15,6 +15,7 @@ from mclauncher.i18n import tr
 from . import compact
 from . import checkpoint
 from . import hooks as hook_mod
+from . import mcp as mcp_mod
 from . import permission
 from . import scheduler
 from . import store as chat_store
@@ -436,11 +437,22 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
     checkpoint.begin_chat(session_id)
     # 3.1 工具 hooks：settings 一键总闸（默认开），关闭后透传、行为与无 hook 一致
     hook_mod.set_enabled(bool((settings or {}).get("ai_hooks_enabled", True)))
+    # 3.2 MCP：配置了 server 才连；坏 server 只记 trace，绝不影响内置工具
+    try:
+        mcp_clients = mcp_mod.connect_servers(settings)
+        mcp_schemas = mcp_mod.mcp_tool_schemas(mcp_clients)
+    except Exception as exc:  # noqa: BLE001
+        trace.record("mcp_setup_failed", exc=exc)
+        mcp_clients, mcp_schemas = [], []
     chat_store.log_event(session_id, "TurnStarted", turn_id=turn.id,
                          user_len=len(user_text or ""))
 
     try:
         turn.transition(TurnPhase.PROCESSING_INPUT)
+        # 2.2 按需声明：核心集 + 关键词扩展；模型想调没声明的工具时全量重发一次
+        # （回合级只重发一次，schema_override 放循环外，别每轮都重置）
+        schema_override: list | None = None
+        schemas: list = TOOL_SCHEMAS
         for _round in range(MAX_TOOL_ROUNDS):
             round_no[0] = _round + 1
             turn.rounds_used = round_no[0]
@@ -529,15 +541,15 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             text_parts: list = []
             truncated = False
             stream_failed = False
-            # 2.2 按需声明：核心集 + 关键词扩展；模型想调没声明的工具时全量重发一次
-            schema_override: list | None = None
-            schemas = TOOL_SCHEMAS
             for _attempt in range(6):
                 tool_calls = []
                 text_parts = []
                 truncated = False
                 stream_failed = False
                 schemas = schema_override or select_tool_schemas(messages)
+                if mcp_schemas:
+                    schemas = list(schemas) + [s for s in mcp_schemas
+                                               if s not in schemas]
                 n_req = len(messages)
                 usage_info = None
                 stream_err = ""
@@ -647,6 +659,11 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     trace.record("tool_schema_miss",
                                  tools=[(tc.get("function") or {}).get("name")
                                         for tc in tool_calls])
+                    # 回合级 continue 前把状态机拨回 AWAITING_MODEL，
+                    # 否则下一轮顶部 STREAMING→STREAMING 是非法迁移
+                    turn.transition(TurnPhase.SCHEDULING_TOOLS)
+                    turn.transition(TurnPhase.EXECUTING_TOOLS)
+                    turn.transition(TurnPhase.AWAITING_MODEL)
                     continue
 
             if not tool_calls:
@@ -840,8 +857,18 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                         trace.record("hook_errors", tool_name=obj.name,
                                      phase="before", count=len(hb_errs))
                     obj.args = hooked_args
-                    result = run_tool(backend, obj.name, obj.args, wait=wait,
-                                      cancelled=cancelled)
+                    if obj.name.startswith("mcp_"):
+                        # 3.2 MCP 工具调用：失败返回结构化错误给模型，不影响内置工具
+                        try:
+                            result = mcp_mod.route_call(mcp_clients, obj.name, obj.args)
+                        except Exception as exc:  # noqa: BLE001
+                            trace.record("mcp_call_failed", tool_name=obj.name, exc=exc)
+                            result = json.dumps(
+                                {"ok": False, "error": f"MCP 工具失败: {exc}"},
+                                ensure_ascii=False)
+                    else:
+                        result = run_tool(backend, obj.name, obj.args, wait=wait,
+                                          cancelled=cancelled)
                     # 3.1 后置钩子：可改写结果文本
                     result, ha_errs = hook_mod.run_after(obj.name, str(result))
                     if ha_errs:
@@ -909,6 +936,10 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
     finally:
         trace.record("turn_end", round_=turn.rounds_used, phase=turn.phase.value,
                      text_len=len(final))
+        try:
+            mcp_mod.close_all(mcp_clients)
+        except Exception:  # noqa: BLE001
+            pass
         if turn.phase == TurnPhase.COMPLETING:
             chat_store.log_event(session_id, "TurnCompleted", turn_id=turn.id,
                                  rounds=turn.rounds_used)
