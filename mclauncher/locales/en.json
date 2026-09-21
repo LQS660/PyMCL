@@ -1967,5 +1967,11 @@
   "留空不启用": "Leave empty to disable",
   "计划": "Plan",
   "待办": "To do",
-  "进行中": "In progress"
+  "进行中": "In progress",
+  "本会话：输入 {i} / 输出 {o} tokens": "Session: {i} in / {o} out tokens",
+  "（估算）": " (estimated)",
+  "用量明细": "Usage details",
+  "最近请求用量": "Recent request usage",
+  "暂无用量记录": "No usage records yet",
+  "本会话：输入 {0} / 输出 {1} tokens{2}": "Session: {0} in / {1} out tokens{2}"
 }

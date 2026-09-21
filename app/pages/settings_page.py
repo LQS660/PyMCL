@@ -539,6 +539,14 @@ class SettingsPage(QWidget):
         ai_group.addSettingCard(self.model_card)
         ai_group.addSettingCard(self.ctx_card)
         ai_group.addSettingCard(self.fb_model_card)
+        self.usage_btn = PushButton(tr("用量明细"))
+        self.usage_btn.clicked.connect(self._show_usage_detail)
+        self.usage_card = SettingCard(FIF.HISTORY if hasattr(FIF, "HISTORY") else FIF.SYNC,
+                                    tr("用量明细"),
+                                      tr("最近请求的 token 用量（读本地日志）"))
+        self.usage_card.hBoxLayout.addWidget(self.usage_btn, 0, Qt.AlignRight)
+        self.usage_card.hBoxLayout.addSpacing(16)
+        ai_group.addSettingCard(self.usage_card)
         root.addWidget(ai_group)
         self.ai_mode.currentTextChanged.connect(self._sync_ai_mode)
         self._sync_ai_mode()
@@ -616,6 +624,38 @@ class SettingsPage(QWidget):
         self.base_card.setVisible(custom)
         self.key_card.setVisible(custom)
         self.model_card.setVisible(custom)
+
+    def _show_usage_detail(self):
+        """6.1 设置页用量明细：最近 30 条带真实 usage 的请求（本地日志，不上云）。"""
+        import json as _json
+        from pathlib import Path as _Path
+        from mclauncher import utils as _utils
+        rows = []
+        sessions = _Path(_utils.ROOT) / "cache" / "ai_sessions"
+        try:
+            for f in sorted(sessions.glob("*.jsonl")):
+                for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+                    try:
+                        e = _json.loads(line)
+                    except ValueError:
+                        continue
+                    if e.get("event") == "Usage":
+                        rows.append(e)
+        except OSError:
+            pass
+        rows = rows[-30:][::-1]
+        lines = ([f"{r.get('ts', '')}  输入 {r.get('prompt_tokens', 0)} / "
+                  f"输出 {r.get('completion_tokens', 0)} / 缓存命中 {r.get('cached_tokens', 0)}"]
+                 for r in rows)
+        text = chr(10).join(lines) or tr("暂无用量记录")
+        box = PlainTextEdit()
+        box.setReadOnly(True)
+        box.setPlainText(text)
+        w = MessageBoxBase(self.window() or self)
+        w.viewLayout.addWidget(box)
+        box.setFixedHeight(320)
+        w.titleLabel.setText(tr("最近请求用量"))
+        w.exec()
 
     def _collect_ctx_window(self) -> int:
         """上下文窗口输入：非法/越界回退 128k 保守默认，别让手滑炸掉保存。"""

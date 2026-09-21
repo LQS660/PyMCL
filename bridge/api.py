@@ -3048,6 +3048,8 @@ class BackendAPI:
                 "detail": getattr(reply, "detail", ""),
                 "pending_tasks": list(getattr(reply, "pending_tasks", []) or []),
                 "plan": list(getattr(reply, "plan", []) or []),
+                # 6.1 会话累计用量（WPF 等价展示的数据源）
+                "usage": dict(getattr(reply, "usage", {}) or {}),
             })
         except AgentCancelled:
             fail(tr("已停止"), True)

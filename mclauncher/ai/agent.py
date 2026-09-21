@@ -22,6 +22,7 @@ from . import scheduler
 from . import store as chat_store
 from . import tokens as tokens_mod
 from . import trace
+from . import usage as usage_mod
 from .client import AIClientError, chat_once, chat_stream, is_context_overflow
 from .defaults import (
     MAX_HISTORY, MAX_TOOL_ROUNDS, MAX_TOOL_ROUNDS_SUBAGENT,
@@ -367,6 +368,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
         details = usage.get("prompt_tokens_details") or {}
         cached = int((details or {}).get("cached_tokens") or 0)
         tokens_mod.update_from_usage(token_state, usage, n_req)
+        usage_mod.add(session_id, usage)
         trace.record("usage", prompt_tokens=prompt, completion_tokens=completion,
                      cached_tokens=cached)
         chat_store.log_event(session_id, "Usage", turn_id=turn.id,
@@ -379,6 +381,10 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
 
     # ---- 3.4 计划工作流：模型出的结构化待办 + plan 档批准门禁 ----
     plan_holder = {"items": [], "turn_id": "", "approved": False}
+
+    # ---- 6.2 回合埋点：停止原因/轮数/工具调用数/失败数/耗时 ----
+    turn_started_at = time.monotonic()
+    tool_counts = {"calls": 0, "failures": 0}
 
     def _maybe_fallback(exc: AIClientError) -> bool:
         if not fallback_model or fallback_active[0]:
@@ -418,6 +424,19 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
         res = AgentResult(text, stop_reason=reason, **kw)
         # 用量口径给 UI：provider_usage = 真实回执；estimate = 公益网关拿不到 usage 的估算
         res.usage_source = token_state.source
+        res.usage = usage_mod.get(session_id)
+        # 6.2 回合摘要：一次回合只记一条，进 trace 与事件日志（本地聚合视图用）
+        if not getattr(res, "_summary_recorded", False):
+            res._summary_recorded = True
+            elapsed = round(time.monotonic() - turn_started_at, 2)
+            trace.record("turn_summary", stop_reason=reason.value,
+                         rounds=round_no[0], tools=tool_counts["calls"],
+                         tool_failures=tool_counts["failures"], elapsed=elapsed)
+            chat_store.log_event(session_id, "TurnSummary", turn_id=turn.id,
+                                 stop_reason=reason.value, rounds=round_no[0],
+                                 tools=tool_counts["calls"],
+                                 tool_failures=tool_counts["failures"],
+                                 elapsed=elapsed)
         # 3.4 本回合最新的待办计划（UI 持久化用）
         res.plan = list(plan_holder["items"]) if plan_holder["turn_id"] == turn.id else []
         try:
@@ -616,6 +635,9 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     trace.record("stream_exception", round_=round_no[0], exc=exc, stream_failed=True)
                 if usage_info:
                     _record_usage(usage_info, n_req)
+                else:
+                    usage_mod.add(session_id, None,
+                                  estimated_input=tokens_mod.estimate_messages(messages))
 
                 # reactive compact：上下文塞不下 → 压缩后重试同一个 step（每步一次）
                 if is_context_overflow(stream_err) and not reactive_attempted:
@@ -870,6 +892,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     meta = TOOL_META.get(obj.name)
                     label = confirm_label(obj.name, obj.args)
                     _status("tool_run", {"name": obj.name, "label": label})
+                    tool_counts["calls"] += 1
                     # 写/删落盘前先打检查点（变更可逆性）：快照失败不阻断本操作，
                     # 但这一轮标记为不可回滚并明确告警
                     if meta and meta.side_effect in ("write_local", "delete"):
@@ -947,6 +970,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     chat_store.log_event(session_id, "ToolFailed",
                                          turn_id=turn.id, round=round_no[0],
                                          tool=obj.name, error=str(exc)[:200])
+                    tool_counts["failures"] += 1
                     return tool_error_payload(exc, obj.name)
 
             runnable = [obj for obj in tool_objs if decisions[obj.id][0] == "allow"]

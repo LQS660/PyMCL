@@ -1062,6 +1062,14 @@ class AiPage(QWidget):
         head.addWidget(self.rewind_btn)
         main.addLayout(head)
 
+        # 6.1 本会话累计用量（输入/输出分开；公益网关拿不到真实 usage 时标「估算」）
+        self.usage_label = CaptionLabel("")
+        self.usage_label.setStyleSheet(f"color: {Theme.muted};")
+        usage_row = QHBoxLayout()
+        usage_row.addStretch(1)
+        usage_row.addWidget(self.usage_label)
+        main.addLayout(usage_row)
+
         chips = QHBoxLayout()
         chips.setSpacing(8)
         for t in _CHIPS:
@@ -1629,6 +1637,24 @@ class AiPage(QWidget):
         card.rejected.connect(no)
         self._add_widget(card)
 
+    def _show_usage(self, usage: dict):
+        """6.1 会话累计用量：输入/输出分开，来源为真实 usage 或明确标「估算」。"""
+        if not usage or not usage.get("requests"):
+            self.usage_label.setText("")
+            return
+        src = usage.get("source") or "estimate"
+        est_part = usage.get("input_estimated") or 0
+        text = tr("本会话：输入 {i} / 输出 {o} tokens").format(
+            i=self._fmt_tokens((usage.get("input") or 0) + est_part),
+            o=self._fmt_tokens(usage.get("output") or 0))
+        if src != "provider_usage" or est_part:
+            text += tr("（估算）")
+        self.usage_label.setText(text)
+
+    @staticmethod
+    def _fmt_tokens(n: int) -> str:
+        return f"{n / 1000:.1f}k" if n >= 1000 else str(n or 0)
+
     def _render_plan(self, items: list):
         """3.4 计划卡：结构化待办清单（待办 / 进行中 / 完成）。"""
         # 先移掉上一张计划卡，只显示最新一份
@@ -1766,6 +1792,12 @@ class AiPage(QWidget):
                                         self._active_plan)
                 except Exception:
                     pass
+            # 6.1 会话累计用量：真实 usage 优先；没有就标注「估算」
+            try:
+                usage = getattr(result, "usage", None) or {}
+                self._show_usage(usage)
+            except Exception:
+                pass
             self._persist()
         self._pending_user = None
         self._worker = None

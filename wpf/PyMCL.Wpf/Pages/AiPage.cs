@@ -29,6 +29,7 @@ public sealed class AiPage : PageBase
     }, width: 112);
     private readonly Button _send, _stop, _retry, _rewind;
     private readonly TextBlock _status = Ui.Small("");
+    private readonly TextBlock _usageLabel = Ui.Small("");
     private bool _syncPerm;
     private readonly StringBuilder _stream = new();
     private readonly Dictionary<string, ToolLine> _toolLines = new();
@@ -83,12 +84,15 @@ public sealed class AiPage : PageBase
             quick.Children.Add(b);
         }
 
+        // 6.1 会话累计用量行（右对齐小字；ai.done 时刷新）
+        var usageRow = Ui.G(null, "*,Auto")
+            .Add(_status.VCenter(), 0, 0)
+            .Add(_usageLabel, 0, 1);
         var inputCard = Ui.Card(Ui.V(8,
             quick,
             _input,
-            Ui.G(null, "*,Auto")
-                .Add(_status.VCenter(), 0, 0)
-                .Add(Ui.H(8, _perm, _rewind, _retry, _stop, _send), 0, 1)), 14);
+            Ui.H(4, _usageLabel),
+            usageRow), 14);
 
         var main = Ui.G("*,Auto");
         main.Add(Ui.Card(_scroll, 10), 0, 0);
@@ -432,6 +436,8 @@ public sealed class AiPage : PageBase
                 var quiet = _abandoned;
                 _status.Text = "";
                 if (!quiet) NotifyStop(ev);
+                // 6.1 会话累计用量（与 Qt 同一数据源：bridge 在 ai.done 里转发）
+                ShowUsage(ev);
                 // 流式气泡先就地补上「为什么停」；随后重拉的会话里已带同一条提示
                 // （bridge 端照 Qt 入了库），重建后不丢。
                 var note = StopNote(ev);
@@ -613,6 +619,25 @@ public sealed class AiPage : PageBase
         catch { return ""; }
     }
 
+    /// <summary>6.1 会话累计用量：输入/输出分开；拿不到真实 usage 时标「估算」。</summary>
+    private void ShowUsage(BridgeEvent ev)
+    {
+        if (ev.Payload.ValueKind != JsonValueKind.Object
+            || !ev.Payload.TryGetProperty("usage", out var u)
+            || u.ValueKind != JsonValueKind.Object)
+            return;
+        long GetNum(string prop) =>
+            u.TryGetProperty(prop, out var n) && n.TryGetInt64(out var v) ? v : 0;
+        var input = GetNum("input") + GetNum("input_estimated");
+        var output = GetNum("output");
+        if (input == 0 && output == 0) return;
+        var real = u.TryGetProperty("real_requests", out var rr) && rr.TryGetInt64(out var r) && r > 0;
+        string Fmt(long n) => n >= 1000 ? $"{n / 1000.0:0.0}k" : n.ToString();
+        var source = real ? "" : L("（估算）");
+        _usageLabel.Text = string.Format(L("本会话：输入 {0} / 输出 {1} tokens{2}"),
+            Fmt(input), Fmt(output), source);
+    }
+
     // ==================== 内联计划卡 ====================
     private PlanCard? _planCard;
 
@@ -723,6 +748,7 @@ internal sealed class AiPermissionPanel : Border
     private readonly TextBox _content = Ui.Input(L("限定参数（留空 = 整个工具）"));
     private readonly SPanel _rules = Ui.V(6);
     private readonly TextBlock _status = Ui.Small("");
+    private readonly TextBlock _usageLabel = Ui.Small("");
     public Action? CloseRequested { get; set; }
 
     public AiPermissionPanel(string instance)

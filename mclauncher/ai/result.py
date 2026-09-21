@@ -41,6 +41,8 @@ class AgentResult(str):
         obj.turn_messages = []
         # 3.4 本回合模型出的待办计划（run_agent 填实际内容；UI 持久化用）
         obj.plan = []
+        # 6.1 会话累计用量（输入/输出分开 + 来源口径；UI 展示用）
+        obj.usage = {}
         return obj
 
     @property

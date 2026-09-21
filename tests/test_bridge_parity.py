@@ -173,8 +173,9 @@ class BridgeAiPayloadParityTests(unittest.TestCase):
     # 别把旧对话的报错气泡贴进新对话、也别在切走之后按钮还卡在「忙」上。
     ROUTING_KEYS = {"chat_id"}
     # plan：批次 3.4 模型本回合出的待办计划，桥随 ai.done 转发并持久化
+    # usage：批次 6.1 会话累计用量（输入/输出分开 + 来源口径），WPF 展示的数据源
     DONE_KEYS = {"text", "store", "stop_reason", "detail", "pending_tasks", "note",
-                 "plan"} | ROUTING_KEYS
+                 "plan", "usage"} | ROUTING_KEYS
     UI_KEYS = {"note"}
     FAIL_KEYS = {"text", "stopped"} | ROUTING_KEYS
     # rule_content：内核按 RULE_CONTENT_KEYS 从 args 里抽出来的那一项，前端「始终允许」
