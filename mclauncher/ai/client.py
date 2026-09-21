@@ -467,8 +467,20 @@ def chat_once(settings: dict, messages: list, tools: list | None = None,
     if resp.status_code >= 400:
         raise AIClientError(_err_text(resp), resp.status_code)
     resp.encoding = "utf-8"
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        # 网关 200 却回了 HTML 错误页 / 半截文本：以前裸抛 JSONDecodeError，用户看到的是
+        # "Expecting value: line 1 column 1" 这种原始报错。归成一条可读的 AIClientError。
+        snippet = _decode_sse_line((resp.text or "").strip())[:200]
+        raise AIClientError(
+            f"接口返回的不是 JSON（HTTP {resp.status_code}）：{snippet or '空响应'}",
+            resp.status_code) from exc
+    if not isinstance(data, dict):
+        raise AIClientError(f"接口返回格式异常（HTTP {resp.status_code}）", resp.status_code)
     choice = (data.get("choices") or [{}])[0]
+    if not isinstance(choice, dict):
+        choice = {}
     msg = choice.get("message") or {}
     return {
         "content": msg.get("content") or "",

@@ -42,7 +42,9 @@ class MicroResult:
     changed: bool = False
 
 
-_PLACEHOLDER = "[工具结果已清理，原文可按 tool_call_id 找回]"
+# 全工程没有「按 tool_call_id 找回原文」的通道（read_artifact 只认 artifact 文件名），
+# 占位文案不能许诺这个——模型照着做只会白跑一轮。
+_PLACEHOLDER = "[工具结果已清理：内容较旧已从上下文移除，需要时请重新调用该工具获取]"
 
 
 def _tool_candidates(messages) -> list:
@@ -181,6 +183,20 @@ _SUMMARY_PROMPT = (
 )
 
 
+def _align_keep_boundary(body, cut: int) -> int:
+    """把「保留区」起点往前挪到不会切出孤儿 tool 消息的位置。
+
+    OpenAI 语义下 role=tool 必须紧跟在带 tool_calls 的 assistant 之后；若保留区
+    第一条是 tool、而它对应的 assistant 已被摘要掉，下一轮请求直接 400，整回合失败。
+    往前多保留几条比少保留安全，所以只向前挪、不向后挪。
+    """
+    cut = max(0, min(cut, len(body)))
+    while cut > 0 and cut < len(body) and isinstance(body[cut], dict) \
+            and body[cut].get("role") == "tool":
+        cut -= 1
+    return cut
+
+
 def compact_conversation(messages, cfg: AutoConfig, summarize_fn) -> CompactionResult:
     """把较早的对话换成一条摘要消息；summarize_fn(list) -> str 由 agent 注入。"""
     messages = list(messages or [])
@@ -198,8 +214,16 @@ def compact_conversation(messages, cfg: AutoConfig, summarize_fn) -> CompactionR
                                 summarized_message_count=0,
                                 kept_message_count=len(body),
                                 threshold=threshold)
-    to_summarize = body[:-keep]
-    kept = body[-keep:]
+    cut = _align_keep_boundary(body, len(body) - keep)
+    if cut <= 0:
+        # 对齐后没有可摘要的部分（最近几条全是同一组工具往返），原样返回
+        return CompactionResult(messages=messages, pre_token_count=pre,
+                                post_token_count=pre, true_post_token_count=pre,
+                                summarized_message_count=0,
+                                kept_message_count=len(body),
+                                threshold=threshold)
+    to_summarize = body[:cut]
+    kept = body[cut:]
     summary = summarize_fn(to_summarize)
     if not (summary or "").strip():
         raise ValueError("摘要为空，拒绝替换历史")

@@ -163,13 +163,38 @@ class AutocompactTests(unittest.TestCase):
             return "用户想装钠；已列出模组；尚未安装。"
 
         res = compact_conversation(msgs, cfg, summarize)
-        self.assertEqual(res.summarized_message_count, len(msgs) - 2 - 4)
-        self.assertEqual(res.kept_message_count, 4)
+        # 倒数第 4 条恰好是 tool 回执：边界要往前挪到它的 assistant(tool_calls)，
+        # 所以实际保留 5 条、摘要 13 条，而不是机械的 4 / 14。
+        self.assertEqual(res.summarized_message_count, len(msgs) - 2 - 5)
+        self.assertEqual(res.kept_message_count, 5)
         self.assertIn("[历史摘要]", res.messages[2]["content"])
         self.assertIn("尚未安装", res.messages[2]["content"])
         self.assertLess(res.post_token_count, pre)
         self.assertEqual(res.messages[-1]["content"], msgs[-1]["content"])
         self.assertEqual(res.messages[:2], msgs[:2], "system 头必须原样保留")
+        self.assertEqual(res.messages[3]["role"], "assistant")
+        self.assertTrue(res.messages[3].get("tool_calls"))
+
+    def test_compact_never_leaves_orphan_tool(self):
+        """保留边界落在 tool 回执上时必须往前带上它的 assistant，否则下一轮 API 400。"""
+        def summarize(_):
+            return "摘要"
+        for keep in range(2, 12):
+            res = compact_conversation(_conv(8), AutoConfig(keep_recent_messages=keep),
+                                       summarize)
+            first_kept = res.messages[3]
+            self.assertNotEqual(first_kept.get("role"), "tool",
+                                f"keep={keep} 时摘要后紧跟孤儿 tool 消息")
+            # 保留区里每条 tool 都能在前面找到带同 id 的 tool_calls
+            seen = set()
+            for m in res.messages[3:]:
+                for tc in m.get("tool_calls") or []:
+                    seen.add(tc["id"])
+                if m.get("role") == "tool":
+                    self.assertIn(m["tool_call_id"], seen)
+
+    def test_compact_placeholder_does_not_promise_lookup(self):
+        self.assertNotIn("tool_call_id", compact._PLACEHOLDER)
 
     def test_compact_rejects_empty_summary(self):
         with self.assertRaises(ValueError):

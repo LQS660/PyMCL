@@ -88,8 +88,14 @@ def load() -> dict:
 
 def save(data: dict):
     chats = list(data.get("chats") or [])[:MAX_CHATS]
+    active = str(data.get("active_id") or "")
+    # 截断到 MAX_CHATS 之后 active 可能已经不在列表里：落盘时就校正，
+    # 别等下次 load() 才自愈——中间这段 get_chat(active) 会一直拿到 None。
+    if chats and not any(c.get("id") == active for c in chats):
+        active = chats[0]["id"]
+        data["active_id"] = active
     utils.write_json(STORE_FILE, {
-        "active_id": data.get("active_id") or (chats[0]["id"] if chats else ""),
+        "active_id": active if chats else "",
         "chats": chats,
     })
 
