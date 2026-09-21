@@ -24,6 +24,8 @@ from qfluentwidgets import (
 from mclauncher.ai.agent import AgentCancelled, run_agent
 from mclauncher.ai.client import AIClientError, HttpCancel
 from mclauncher.ai import permission as ai_perm
+from mclauncher.ai import preview as ai_preview
+from mclauncher.ai import rewind as ai_rewind_mod
 from mclauncher.ai import store as chat_store
 from mclauncher.ai.defaults import DEFAULT_MODEL
 from mclauncher.ai.permission import Behavior, Rule, rule_content_from_input
@@ -1053,7 +1055,7 @@ class AiPage(QWidget):
         self.rewind_btn = TransparentPushButton(getattr(FIF, "RETURN", FIF.SYNC),
                                                 tr("回到上一步"))
         self.rewind_btn.setEnabled(False)
-        self.rewind_btn.setToolTip(tr("撤回最近一轮对话和它的工具操作痕迹"))
+        self.rewind_btn.setToolTip(tr("撤回最近一轮对话；该轮对文件的改动一并还原"))
         self.rewind_btn.clicked.connect(self._rewind)
         head.addWidget(self.stop_btn)
         head.addWidget(self.retry_btn)
@@ -1303,8 +1305,20 @@ class AiPage(QWidget):
         self._reload_list()
 
     def _delete_chat(self):
-        self._abandon_run()
         cid = self._store.get("active_id")
+        if not cid:
+            return
+        from qfluentwidgets import MessageBox
+        box = MessageBox(
+            tr("删除对话"),
+            tr("当前对话及其全部历史将被删除，且无法恢复。确定删除？"),
+            self.window() or self,
+        )
+        box.yesButton.setText(tr("删除"))
+        box.cancelButton.setText(tr("取消"))
+        if not box.exec():
+            return
+        self._abandon_run()
         chat_store.delete_chat(self._store, cid)
         self._load_active()
         self._reload_list()
@@ -1365,20 +1379,42 @@ class AiPage(QWidget):
             not self._worker and any(m.get("role") == "user" for m in self._history))
 
     def _rewind(self):
-        """W5-5 续跑/rewind：撤回最近一轮对话（含工具痕迹），回到它之前。"""
+        """撤回最近一轮：对话截回上一轮之前，该轮对文件的改动一并还原（方案甲）。
+
+        快照失败的轮次回不来——返回值里 rollbackable=False 时明确告诉用户。
+        """
         if self._worker:
             return
-        idx = None
-        for i in range(len(self._history) - 1, -1, -1):
-            if self._history[i].get("role") == "user":
-                idx = i
-                break
-        if idx is None:
-            return
-        self._history = self._history[:idx]
-        self._persist()
+        chat_id = str(self._store.get("active_id") or "")
+        try:
+            res = ai_rewind_mod.rewind_last_round(chat_id)
+        except Exception:
+            res = {"ok": False, "truncated": False, "restored_files": 0,
+                   "restored_bytes": 0, "rollbackable": False, "disk_changed": False}
+        # rewind 落盘的是磁盘上的 store；页面内存里的副本要重载，别拿旧历史渲染
+        self._store = chat_store.load()
         self._load_active()
         self._busy(False)
+        if res.get("disk_changed"):
+            if res.get("ok"):
+                InfoBar.success(
+                    tr("已撤回"),
+                    tr("对话已回退，{n} 个文件的改动已还原")
+                    .format(n=res.get("restored_files") or 0),
+                    parent=self.window() or self,
+                    position=InfoBarPosition.TOP, duration=4000)
+            else:
+                InfoBar.warning(
+                    tr("部分还原"),
+                    tr("对话已回退，但磁盘改动没能全部还原，请手动检查相关文件"),
+                    parent=self.window() or self,
+                    position=InfoBarPosition.TOP, duration=6000)
+        elif not res.get("rollbackable"):
+            InfoBar.info(
+                tr("已撤回"),
+                tr("只回退了对话。这一轮没有可还原的磁盘改动"),
+                parent=self.window() or self,
+                position=InfoBarPosition.TOP, duration=4000)
 
     def _send_text(self, text: str):
         text = (text or "").strip()
@@ -1457,6 +1493,13 @@ class AiPage(QWidget):
     def _on_status(self, kind: str, payload: dict):
         label = payload.get("label") or payload.get("name") or kind
         name = payload.get("name") or ""
+        if kind == "checkpoint_warn":
+            InfoBar.warning(
+                tr("无法一键撤回"),
+                str(payload.get("message") or tr("检查点不可用，本轮改动无法一键撤回")),
+                parent=self.window() or self,
+                position=InfoBarPosition.TOP, duration=6000)
+            return
         if kind == "think":
             if not self._stream:
                 if payload.get("after_tools"):
@@ -1520,13 +1563,22 @@ class AiPage(QWidget):
         self._scroll_bottom()
 
     def _on_confirm(self, name: str, args: dict, label: str, reason: str = ""):
-        detail = ""
-        if name == "write_mod_config":
-            detail = str((args or {}).get("content") or "")[:4000]
-        elif name == "delete_instance":
-            detail = tr("删掉后文件找不回来。")
+        # 变更预览：确认卡上展示将要发生的实际变更（diff / 文件数与字节数 /
+        # 目标路径），Qt 与 WPF 渲染同一份 preview.lines，两端信息量一致
+        detail_lines: list[str] = []
+        try:
+            pv = ai_preview.change_preview(self.backend, name, args or {})
+        except Exception:
+            pv = None
+        if pv:
+            if pv.get("head"):
+                detail_lines.append(str(pv["head"]))
+            detail_lines += [str(x) for x in (pv.get("lines") or [])]
+        if name == "delete_instance" and not pv:
+            detail_lines.append(tr("删掉后文件找不回来。"))
         if reason:
-            detail = (detail + "\n" + reason).strip()
+            detail_lines.append(str(reason))
+        detail = "\n".join(x for x in detail_lines if x).strip()
         card = ConfirmCard(label, detail, name=name, args=args)
         # 删除类不给「始终允许」：这些工具的参数键不在 RULE_CONTENT_KEYS 里，
         # 记一次就是整工具级放行，等于以后删什么都不问（permission.decide 也不吃这种规则）
