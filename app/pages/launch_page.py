@@ -593,22 +593,35 @@ class LaunchPage(QWidget):
             self.banner.set_info(version, tr("点击「启动游戏」进入世界"))
 
     def _on_launch(self):
-        from qfluentwidgets import MessageBox
-
         self._flush_launch_defaults()
         instance = self.instance_box.currentText() or "default"
         version = self.version_box.currentText()
         memory_mb = self.memory_slider.value()
         java = self._selected_java()
-        try:
-            pf = self.backend.preflight_launch(
+        # preflight 会起 java -version 子进程并扫盘，弱机上秒级卡顿；
+        # 放后台线程跑，UI 线程只负责弹框与发起启动
+        self.launch_btn.setEnabled(False)
+        self._set_status(tr("启动预检中…"))
+        self.backend.call_async(
+            lambda: self.backend.preflight_launch(
                 instance=instance, version=version,
                 memory_mb=memory_mb, java=java,
-            )
-        except Exception as exc:
-            MessageBox(tr("启动预检失败"), str(exc), self).exec()
-            return
+            ),
+            lambda pf: self._after_preflight(instance, version, memory_mb, java, pf),
+            self._preflight_failed,
+        )
 
+    def _preflight_failed(self, exc):
+        self.launch_btn.setEnabled(True)
+        self._set_status("")
+        from qfluentwidgets import MessageBox
+        MessageBox(tr("启动预检失败"), str(exc), self).exec()
+
+    def _after_preflight(self, instance, version, memory_mb, java, pf):
+        from qfluentwidgets import MessageBox
+
+        self.launch_btn.setEnabled(True)
+        self._set_status("")
         items = list((pf or {}).get("items") or [])
         errors = [i for i in items if i.get("level") == "error"]
         warns = [i for i in items if i.get("level") == "warn"]
