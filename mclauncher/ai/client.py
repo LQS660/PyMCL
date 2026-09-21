@@ -148,18 +148,11 @@ def resolve_endpoint(settings: dict) -> dict:
             "model": builtin_ep["model"],
             "public": True,
         }
-    return {
-        "mode": "public",
-        "url": builtin_ep["base"] + "/chat/completions",
-        "models_url": builtin_ep["base"] + "/models",
-        "headers": {
-            "Authorization": "Bearer " + builtin_ep["token"],
-            "Content-Type": "application/json",
-            "X-PyMCL-Client": CLIENT_HEADER,
-        },
-        "model": builtin_ep["model"],
-        "public": True,
-    }
+    # 4.1：分发包内不再内置可用上游令牌。没配网关就明确报错给用户，
+    # 不静默失败、不偷偷走什么内置通道。
+    raise AIClientError(
+        "还没有配置 AI 网关：请到「设置 → AI 助手」填入自建公益网关地址，"
+        "或切到「自定义 NewAPI」模式填地址与令牌。搭建方法见 ai_gateway/README.md。")
 
 
 def _session() -> requests.Session:
