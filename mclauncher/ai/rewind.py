@@ -8,7 +8,8 @@ Qt 进程内（app/pages/ai_page.py）与桥 RPC（bridge/api.py ai_rewind）都
   回不来，返回值里带 not_rollbackable 提示）；
 - 判断「最近一轮写没写」用 cache/ai_sessions/<chat_id>.jsonl 里最后一个
   TurnStarted 的 turn_id 对 checkpoint journal 里的 turn_id：对不上说明
-  最近一轮没有写操作，磁盘不动。会话日志缺失时退回「journal 最近一组」。
+  最近一轮没有写操作，磁盘不动。会话日志缺失时无法对齐轮次，只截断对话、
+  不动磁盘（回滚一个没对齐的更早轮次等于误删用户没要求撤销的改动）。
 """
 
 from __future__ import annotations
@@ -110,7 +111,13 @@ def rewind_last_round(chat_id: str) -> dict:
             target = tid
             break
     else:
-        target = journaled
+        # 会话日志缺失时无法把「被截断的最近一轮」与 journal 里的回合对齐：
+        # journal 里最后有写操作的可能是更早的轮次，硬回滚会把用户没要求
+        # 撤销的改动一并还原。只截断对话，磁盘不动，明确告知不可回滚。
+        res = {"ok": True, "truncated": True, "restored_files": 0,
+               "restored_bytes": 0, "rollbackable": False, "disk_changed": False,
+               "reason": "会话日志缺失，无法定位该轮的磁盘改动；已只回退对话"}
+        return res
     res = {"ok": True, "truncated": True, "restored_files": 0,
            "restored_bytes": 0, "rollbackable": bool(journaled),
            "disk_changed": False}

@@ -79,18 +79,22 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _iter_files(path: Path) -> list[Path]:
+def _iter_files(path: Path) -> tuple[list[Path], bool]:
+    """列出 path（文件或目录）下的所有文件。目录递归；超过 MAX_DIR_FILES 时
+    置 truncated=True——截断的目录清单绝不能当完整 known 集合用于回滚清扫。"""
     if path.is_file():
-        return [path]
+        return [path], False
     if not path.is_dir():
-        return []
-    out = []
+        return [], False
+    out: list[Path] = []
+    truncated = False
     for p in sorted(path.rglob("*")):
         if p.is_file():
             out.append(p)
             if len(out) >= MAX_DIR_FILES:
+                truncated = True
                 break
-    return out
+    return out, truncated
 
 
 def _store_blob(chat_id: str, data: bytes, sha: str) -> bool:
@@ -135,22 +139,32 @@ def snapshot(chat_id: str, turn_id: str, paths: list) -> dict:
                     # 会在快照后新建 .disabled 文件，回滚时必须删掉它
                     files.append({"path": str(rp), "sha256": "", "size": 0, "mtime": 0})
                     continue
-                for f in _iter_files(rp):
+                flist, truncated = _iter_files(rp)
+                if truncated:
+                    # 截断的目录清单缺了 20000 名之后的老文件，回滚清扫会把它们
+                    # 当「新增文件」误删——宁可整轮标记不可回滚
+                    _gc_blobs(chat_id, ops)
+                    return {"ok": False, "seq": len(ops), "files": 0, "bytes": 0,
+                            "reason": f"目录文件数超过 {MAX_DIR_FILES}，本轮不可回滚"}
+                for f in flist:
                     try:
                         if not f.is_file():
                             continue
                         data = f.read_bytes()
                     except OSError:
+                        _gc_blobs(chat_id, ops)
                         return {"ok": False, "seq": len(ops), "files": 0, "bytes": 0,
                                 "reason": f"无法读取 {f}"}
                     sha = _sha256(data)
                     if not _store_blob(chat_id, data, sha):
+                        _gc_blobs(chat_id, ops)
                         return {"ok": False, "seq": len(ops), "files": 0, "bytes": 0,
                                 "reason": "检查点写入失败（磁盘满或权限不足）"}
                     total += len(data)
                     files.append({"path": str(f), "sha256": sha,
                                   "size": len(data), "mtime": f.stat().st_mtime})
                     if total > MAX_SNAPSHOT_BYTES:
+                        _gc_blobs(chat_id, ops)
                         return {"ok": False, "seq": len(ops), "files": 0, "bytes": 0,
                                 "reason": "变更体积超过检查点上限"}
             seq = len(ops)
@@ -185,11 +199,18 @@ def _restore_file(chat_id: str, entry: dict) -> None:
         pass
 
 
-def _remove_file(path: str) -> None:
+def _remove_file(path: str) -> bool:
+    """删掉回滚目标。快照时不存在、后来出现的目录（如新实例的 mods/）整树删除。
+    成功返回 True；失败（占用/权限）返回 False，由调用方计入 failures。"""
     try:
-        Path(path).unlink(missing_ok=True)
+        p = Path(path)
+        if p.is_dir() and not p.is_symlink():
+            shutil.rmtree(p)
+            return True
+        p.unlink(missing_ok=True)
+        return True
     except OSError:
-        pass
+        return False
 
 
 def _sweep_new_entries(base: str, known_files: set, known_dirs: set) -> None:
@@ -210,18 +231,25 @@ def _sweep_new_entries(base: str, known_files: set, known_dirs: set) -> None:
         pass
 
 
-def _apply_op(chat_id: str, op: dict) -> None:
+def _apply_op(chat_id: str, op: dict) -> int:
+    """恢复一个操作，返回失败条目数（ghost 删除失败 / blob 读写失败都算）。"""
     files = op.get("files") or []
     known_files = {f["path"] for f in files}
     known_dirs = {str(Path(f["path"]).parent) for f in files if f.get("sha256")}
+    failures = 0
     for d in op.get("dirs") or []:
         _sweep_new_entries(d, known_files, known_dirs)
     for entry in files:
         if not entry.get("sha256"):
-            # 快照时不存在：回滚 = 删掉后来出现的它
-            _remove_file(entry["path"])
+            # 快照时不存在：回滚 = 删掉后来出现的它（可能是目录，整树删）
+            if not _remove_file(entry["path"]):
+                failures += 1
             continue
-        _restore_file(chat_id, entry)
+        try:
+            _restore_file(chat_id, entry)
+        except (OSError, KeyError, ValueError):
+            failures += 1
+    return failures
 
 
 def rollback(chat_id: str, turn_id: str = "", all_ops: bool = False) -> dict:
@@ -251,13 +279,22 @@ def rollback(chat_id: str, turn_id: str = "", all_ops: bool = False) -> dict:
         restored = 0
         restored_bytes = 0
         failures = 0
+        failed_ops: list = []
         for op in sorted(targets, key=lambda o: o.get("seq", 0), reverse=True):
             try:
-                _apply_op(chat_id, op)
-                restored += len(op.get("files") or [])
-                restored_bytes += int(op.get("bytes") or 0)
+                op_fails = _apply_op(chat_id, op)
+                failures += op_fails
+                if op_fails:
+                    # 恢复不完整的操作保留在 journal 里：恢复是幂等的（同内容重写、
+                    # ghost 删除可重试），删掉记录会让失败轮永久失去重试机会
+                    failed_ops.append(op)
+                else:
+                    restored += len(op.get("files") or [])
+                    restored_bytes += int(op.get("bytes") or 0)
             except Exception:  # noqa: BLE001
                 failures += 1
+                failed_ops.append(op)
+        keep = sorted(keep + failed_ops, key=lambda o: o.get("seq", 0))
         _save_journal(chat_id, keep)
         # 回滚后清掉不再被引用的 blob，省磁盘
         _gc_blobs(chat_id, keep)
