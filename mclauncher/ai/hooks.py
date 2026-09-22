@@ -111,15 +111,27 @@ def _audit_dir() -> Path:
     d = HOOKS_DIR if HOOKS_DIR is not None else utils.ROOT / "cache" / "ai_hooks"
     return utils.ensure_dir(d)
 
+# 审计范围动态取自 TOOL_META.side_effect（写盘 / 删除 / 启动进程都算高危），
+# 新增写类工具自动覆盖，不再依赖这份硬编码清单；清单只作 fallback
+_WRITE_FALLBACK = {"write_mod_config", "delete_mod", "delete_instance", "create_instance",
+                   "install_game", "install_mod", "install_modpack", "install_shader",
+                   "install_resourcepack", "install_datapack", "install_world",
+                   "download_java", "disable_mod", "enable_mod"}
 
-_WRITE_TOOLS = {"write_mod_config", "delete_mod", "delete_instance", "create_instance",
-                "install_game", "install_mod", "install_modpack", "install_shader",
-                "install_resourcepack", "install_datapack", "install_world",
-                "download_java", "disable_mod", "enable_mod"}
+
+def _audit_worthy(tool_name: str) -> bool:
+    try:
+        from .tools import TOOL_META
+        meta = TOOL_META.get(tool_name)
+        if meta is not None:
+            return meta.side_effect in ("write_local", "write_external", "delete", "launch")
+    except Exception:  # noqa: BLE001
+        pass
+    return tool_name in _WRITE_FALLBACK
 
 
 def _audit_before(tool_name: str, args: dict) -> dict | None:
-    if tool_name not in _WRITE_TOOLS:
+    if not _audit_worthy(tool_name):
         return None
     entry = {
         "ts": datetime.datetime.now().isoformat(timespec="seconds"),

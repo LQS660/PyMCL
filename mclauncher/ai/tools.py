@@ -510,7 +510,9 @@ def affected_paths(backend, name: str, args: dict) -> list:
     mods_dir = inst_dir / "mods"
     if name == "write_mod_config":
         rel = str(args.get("path") or "").replace("\\", "/").lstrip("/")
-        if not rel or ".." in Path(rel).parts:
+        if not rel or ".." in Path(rel).parts or ":" in rel:
+            # ":" = 盘符（C:/…）或 NTFS 流：这种分量拼进 inst_dir/config 会
+            # 逃出实例目录，把任意本地文件复制进检查点缓存
             return []
         return [inst_dir / "config" / rel]
     if name == "delete_mod":
@@ -970,7 +972,7 @@ _ERROR_READABLE = {
 def classify_exception(exc: BaseException) -> ToolErrorCode:
     if isinstance(exc, ToolCancelled):
         return ToolErrorCode.CANCELLED
-    if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired if False else TimeoutError)):
+    if isinstance(exc, TimeoutError):
         return ToolErrorCode.TIMEOUT
     if isinstance(exc, (FileNotFoundError, LookupError)):
         return ToolErrorCode.NOT_FOUND
@@ -1098,6 +1100,10 @@ def parse_args(raw, name: str = "") -> tuple[dict, str | None]:
             else:
                 args, err = {}, "参数不是合法 JSON（疑似被截断）。请把参数作为合法 JSON 对象重发。"
     if err is None and args:
-        args = {k: (v.strip() if isinstance(v, str) else v) for k, v in args.items()}
+        # 标识类字段去首尾空格；正文类字段（write_mod_config 的 content 等）
+        # 逐字写入磁盘，strip 会把模型特意保留的末尾换行静默剥掉
+        _NO_STRIP = {"content", "text", "message"}
+        args = {k: (v.strip() if isinstance(v, str) and k not in _NO_STRIP else v)
+                for k, v in args.items()}
         err = _validate_schema(name, args)
     return args, err

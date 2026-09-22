@@ -292,6 +292,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
         threshold_tokens=max(4_000, compact.auto_threshold(auto_cfg) - 16_000))
     cstate = compact.CompactState()
     token_state = tokens_mod.TokenState()
+    usage_got = [False]   # 本 step 是否已拿到真实 usage（没拿到才在 step 末尾记一次估算）
 
     def _summarize(slice_messages) -> str:
         # 压缩会再发一次模型请求，必须尊重停止信号
@@ -306,6 +307,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
 
     def _force_compact(round_: int) -> bool:
         """reactive compact：上游报「塞不下」时强制压缩，成功返回 True。"""
+        nonlocal token_state
         try:
             cres = compact.compact_conversation(messages, auto_cfg, _summarize)
         except AgentCancelled:
@@ -315,6 +317,9 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             trace.record("reactive_compact_failure", round_=round_, exc=exc)
             return False
         messages[:] = cres.messages
+        # 压缩后消息集完全变了：token 基线指着旧消息下标，不重置会在
+        # 消息数涨回旧下标之后拿「旧基数 + 新消息」严重高估，连环误触发压缩
+        token_state = tokens_mod.TokenState()
         compacted[0] = True
         compact.note_compact_success(cstate)
         _status("compact", {"reason": "reactive", "pre": cres.pre_token_count,
@@ -367,6 +372,8 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             return
         details = usage.get("prompt_tokens_details") or {}
         cached = int((details or {}).get("cached_tokens") or 0)
+        if prompt > 0:
+            usage_got[0] = True
         tokens_mod.update_from_usage(token_state, usage, n_req)
         usage_mod.add(session_id, usage)
         trace.record("usage", prompt_tokens=prompt, completion_tokens=completion,
@@ -470,16 +477,22 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
         return res
 
     session_id = str((settings or {}).get("ai_session_id") or "active")
+    # 子代理宣称「只读、不写磁盘」：绝不能把 MCP 外部工具（能力未知）追加进
+    # 它的工具集，也不再为它起一整套 MCP 子进程
+    is_subagent = bool((settings or {}).get("ai_subagent"))
     checkpoint.begin_chat(session_id)
     # 3.1 工具 hooks：settings 一键总闸（默认开），关闭后透传、行为与无 hook 一致
     hook_mod.set_enabled(bool((settings or {}).get("ai_hooks_enabled", True)))
     # 3.2 MCP：配置了 server 才连；坏 server 只记 trace，绝不影响内置工具
-    try:
-        mcp_clients = mcp_mod.connect_servers(settings)
-        mcp_schemas = mcp_mod.mcp_tool_schemas(mcp_clients)
-    except Exception as exc:  # noqa: BLE001
-        trace.record("mcp_setup_failed", exc=exc)
+    if is_subagent:
         mcp_clients, mcp_schemas = [], []
+    else:
+        try:
+            mcp_clients = mcp_mod.connect_servers(settings)
+            mcp_schemas = mcp_mod.mcp_tool_schemas(mcp_clients)
+        except Exception as exc:  # noqa: BLE001
+            trace.record("mcp_setup_failed", exc=exc)
+            mcp_clients, mcp_schemas = [], []
     chat_store.log_event(session_id, "TurnStarted", turn_id=turn.id,
                          user_len=len(user_text or ""))
 
@@ -546,6 +559,8 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 try:
                     cres = compact.compact_conversation(messages, auto_cfg, _summarize)
                     messages[:] = cres.messages
+                    # 同 _force_compact：压缩后 token 基线必须重置（见其注释）
+                    token_state = tokens_mod.TokenState()
                     compacted[0] = True
                     compact.note_compact_success(cstate)
                     _status("compact", {"reason": decision.reason,
@@ -579,6 +594,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             text_parts: list = []
             truncated = False
             stream_failed = False
+            usage_got[0] = False
             for _attempt in range(6):
                 tool_calls = []
                 text_parts = []
@@ -635,9 +651,6 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     trace.record("stream_exception", round_=round_no[0], exc=exc, stream_failed=True)
                 if usage_info:
                     _record_usage(usage_info, n_req)
-                else:
-                    usage_mod.add(session_id, None,
-                                  estimated_input=tokens_mod.estimate_messages(messages))
 
                 # reactive compact：上下文塞不下 → 压缩后重试同一个 step（每步一次）
                 if is_context_overflow(stream_err) and not reactive_attempted:
@@ -687,6 +700,12 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                                      stream_failed=stream_failed, text_len=0)
                 break
 
+            # 整个 step（含重试与非流式兜底）都没拿到真实 usage：只记一次估算。
+            # 原来每个失败 attempt 都各记一次，重试越多会话用量越虚高。
+            if not usage_got[0]:
+                usage_mod.add(session_id, None,
+                              estimated_input=tokens_mod.estimate_messages(messages))
+
             content = "".join(text_parts)
             if content:
                 final = content
@@ -733,7 +752,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                         continue
                     _to_phase(turn, TurnPhase.COMPLETING)
                     return _result(
-                        _full(content) + "\n\n（回复被长度限制截断了，需要的话让我继续。）",
+                        _full(content) + "\n\n" + tr("（回复被长度限制截断了，需要的话让我继续。）"),
                         StopReason.TRUNCATED, rounds_used=rounds_used)
                 if stream_failed and not content:
                     _to_phase(turn, TurnPhase.COMPLETING)
@@ -798,13 +817,21 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 if parse_err:
                     parse_errors[obj.id] = parse_err
                 tool_objs.append(obj)
-                _status("tool", {"name": obj.name, "args": obj.args,
-                                 "label": confirm_label(obj.name, obj.args)})
 
             # 判权：deny/modify 直接定，ask 稍后集中处理（可能弹 UI）
+            # 3.1 前置钩子必须在判权之前跑：钩子改写后的入参才是被授权、被确认、
+            # 被快照、被执行的——否则用户批的是旧参数、实际跑的是新参数
             needs_perm = False
             decisions: dict = {}
             for obj in tool_objs:
+                if obj.id not in parse_errors:
+                    hooked_args, hb_errs = hook_mod.run_before(obj.name, obj.args)
+                    if hb_errs:
+                        trace.record("hook_errors", tool_name=obj.name,
+                                     phase="before", count=len(hb_errs))
+                    obj.args = hooked_args
+                _status("tool", {"name": obj.name, "args": obj.args,
+                                 "label": confirm_label(obj.name, obj.args)})
                 if is_ask_tool(obj.name):
                     decisions[obj.id] = ("ask", "")
                     needs_perm = True
@@ -824,6 +851,15 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 elif res.decision == Decision.ASK:
                     decisions[obj.id] = ("ask", res.reason)
                     needs_perm = True
+                elif meta is None and obj.name.startswith("mcp_") \
+                        and res.decision == Decision.ALLOW and not res.rule_id \
+                        and mode not in (permission.PermissionMode.YOLO,
+                                         permission.PermissionMode.BYPASS_PERMISSIONS):
+                    # 外部 MCP 工具的读写能力未知：acceptEdits/build 这类
+                    # 「自动接受本地编辑」的档位不能顺带放行外部 server 的工具，
+                    # 逐次确认（yolo 按其语义仍然直接放行；显式 allow 规则仍有效）
+                    decisions[obj.id] = ("ask", "外部 MCP 工具能力未知，需确认")
+                    needs_perm = True
                 else:
                     decisions[obj.id] = ("allow", "")
 
@@ -835,6 +871,15 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 if kind != "ask":
                     continue
                 label = confirm_label(obj.name, obj.args)
+                if not is_ask_tool(obj.name) and confirm_fn is None and is_subagent:
+                    # 子代理没有确认通道：需要确认的操作一律拒绝，不能把
+                    # ASK 静默当 ALLOW——那等于子代理自带无人把关的写权限。
+                    # （主代理无 confirm_fn 的无头场景保持旧行为：视为允许）
+                    decisions[obj.id] = ("deny", "子代理无交互确认通道，需要确认的操作已拒绝")
+                    turn.set_tool_status(obj.id, ToolCallStatus.DENIED,
+                                         result="[权限] 子代理无确认通道，已拒绝")
+                    _status("tool_skip", {"name": obj.name, "label": label})
+                    continue
                 turn.set_tool_status(obj.id, ToolCallStatus.WAITING_PERMISSION)
                 if is_ask_tool(obj.name):
                     questions = normalize_ask_args(obj.args)
@@ -852,7 +897,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                         turn.set_tool_status(obj.id, ToolCallStatus.COMPLETED,
                                              result=answer_text)
                         ask_answered_prev = True
-                        _status("tool_done", {"name": obj.name, "label": "已选择",
+                        _status("tool_done", {"name": obj.name, "label": tr("已选择"),
                                               "result": str(answer_text)[:400]})
                     continue
                 rv = _call_confirm(confirm_fn, obj.name, obj.args, label, reason)
@@ -907,12 +952,8 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                             trace.record("checkpoint_unavailable", tool_name=obj.name,
                                          reason=str(snap.get("reason") or ""))
                     wait = not (meta and (meta.long_running or meta.side_effect == "launch"))
-                    # 3.1 前置钩子：可改写入参；钩子异常只进 trace，绝不中断
-                    hooked_args, hb_errs = hook_mod.run_before(obj.name, obj.args)
-                    if hb_errs:
-                        trace.record("hook_errors", tool_name=obj.name,
-                                     phase="before", count=len(hb_errs))
-                    obj.args = hooked_args
+                    # 3.1 前置钩子已提前到判权之前跑（改写后的入参才是被授权/被快照的）；
+                    # 这里只负责执行。后置钩子照旧在结果产出后跑
                     if obj.name == "update_plan":
                         # 3.4 计划工作流：结构化待办进 UI，不落任何后端操作
                         items = [it for it in (obj.args.get("items") or [])
@@ -921,7 +962,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                         plan_holder["turn_id"] = turn.id
                         plan_holder["approved"] = False
                         _status("plan", {"items": items, "turn_id": turn.id})
-                        result = f"已更新计划（共 {len(items)} 项）"
+                        result = tr("已更新计划（共 {0} 项）").format(len(items))
                     elif obj.name == "dispatch_subagent":
                         # 3.3 子代理：独立轮数上限、只读工具、结构化结论回主对话
                         result = run_subagent(backend, settings, obj.args,
@@ -1020,8 +1061,8 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     trace.record("plan_rejected", writes=write_calls)
                     _to_phase(turn, TurnPhase.COMPLETING)
                     return _result(
-                        "计划未获批准，本轮到此为止"
-                        + ("。（本轮没有执行任何写操作）" if not write_calls else ""),
+                        tr("计划未获批准，本轮到此为止")
+                        + (tr("。（本轮没有执行任何写操作）") if not write_calls else ""),
                         StopReason.COMPLETED, rounds_used=round_no[0])
 
             turn.transition(TurnPhase.AWAITING_MODEL)
@@ -1056,7 +1097,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
     trace.record("max_rounds", round_=max_rounds, text_len=len(final))
     _to_phase(turn, TurnPhase.COMPLETING)
     return _result(
-        _full(final) or "步骤有点多，先停在这里。你再说一下接下来要哪一步。",
+        _full(final) or tr("步骤有点多，先停在这里。你再说一下接下来要哪一步。"),
         StopReason.MAX_ROUNDS,
         detail=f"已用 {turn.rounds_used}/{max_rounds} 回合",
         pending_tasks=pending,

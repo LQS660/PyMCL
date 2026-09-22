@@ -275,6 +275,7 @@ def _assemble_stream(resp, expect_usage: bool = False) -> Iterator[dict]:
     tool_acc = {}
     got_delta = False
     pending_done = None
+    pending_tools = None   # finish_reason=tool_calls 时缓存，等 usage/[DONE] 一起发
     last_usage = None
     resp.encoding = "utf-8"
     try:
@@ -290,14 +291,18 @@ def _assemble_stream(resp, expect_usage: bool = False) -> Iterator[dict]:
             if line == "[DONE]":
                 tools = _flush_complete_tools(tool_acc) if tool_acc else None
                 if tools:
-                    yield {"type": "tool_calls", "tool_calls": tools}
-                    return
-                if tool_acc:
+                    pending_tools = tools
+                elif tool_acc:
                     yield {"type": "error", "message": "工具参数不完整，正在换一次非流式"}
                     return
+                if last_usage:
+                    yield {"type": "usage", "usage": last_usage}
+                if pending_tools:
+                    # usage 必须先于 tool_calls：调用方见到 tool_calls 就 break，
+                    # 顺序反了工具轮的真实用量永远采不到
+                    yield {"type": "tool_calls", "tool_calls": pending_tools}
+                    return
                 if pending_done:
-                    if last_usage:
-                        yield {"type": "usage", "usage": last_usage}
                     yield pending_done
                 else:
                     yield {"type": "done"}
@@ -337,8 +342,10 @@ def _assemble_stream(resp, expect_usage: bool = False) -> Iterator[dict]:
             if reason == "tool_calls":
                 tools = _flush_complete_tools(tool_acc)
                 if tools:
-                    yield {"type": "tool_calls", "tool_calls": tools}
-                    return
+                    # 不在这里 return：usage 包通常跟在 finish_reason 之后、
+                    # [DONE] 之前，缓存到流结束一起发才能把真实用量带上
+                    pending_tools = tools
+                    continue
                 yield {"type": "error", "message": "工具参数不完整，正在换一次非流式"}
                 return
             if reason in ("stop", "length"):
@@ -350,10 +357,14 @@ def _assemble_stream(resp, expect_usage: bool = False) -> Iterator[dict]:
                 return
         tools = _flush_complete_tools(tool_acc) if tool_acc else None
         if tools:
-            yield {"type": "tool_calls", "tool_calls": tools}
-            return
-        if tool_acc:
+            pending_tools = tools
+        elif tool_acc:
             yield {"type": "error", "message": "工具参数不完整，正在换一次非流式"}
+            return
+        if pending_tools:
+            if last_usage:
+                yield {"type": "usage", "usage": last_usage}
+            yield {"type": "tool_calls", "tool_calls": pending_tools}
             return
         if pending_done:
             if last_usage:
@@ -366,8 +377,10 @@ def _assemble_stream(resp, expect_usage: bool = False) -> Iterator[dict]:
         yield {"type": "error", "message": "接口没有返回内容"}
     except (ReadTimeout, ChunkedEncodingError):
         tools = _flush_complete_tools(tool_acc) if tool_acc else None
-        if tools:
-            yield {"type": "tool_calls", "tool_calls": tools}
+        if tools or pending_tools:
+            if last_usage:
+                yield {"type": "usage", "usage": last_usage}
+            yield {"type": "tool_calls", "tool_calls": tools or pending_tools}
             return
         yield {"type": "error", "message": "接口超时，正在换一次非流式"}
         return

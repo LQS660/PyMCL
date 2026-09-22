@@ -55,9 +55,27 @@ class McpClient:
         assert self._proc is not None and self._proc.stdout
         import time
         deadline = time.monotonic() + timeout
+        timed_out = [False]
+
+        def _watchdog():
+            # readline 是无超时阻塞读：server 进程活着但不回话时，必须由
+            # 看门狗在 deadline 杀掉进程，readline 才会以 EOF 返回，否则
+            # 整个 agent 线程永久挂死（停止按钮也打断不了阻塞中的 readline）
+            time.sleep(max(0.1, deadline - time.monotonic()))
+            timed_out[0] = True
+            try:
+                if self._proc is not None and self._proc.poll() is None:
+                    self._proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+
+        dog = threading.Thread(target=_watchdog, daemon=True)
+        dog.start()
         while True:
             line = self._proc.stdout.readline()
             if not line:
+                if timed_out[0]:
+                    raise McpError(f"MCP server {self.name} 响应超时")
                 raise McpError(f"MCP server {self.name} 已退出"
                                f"（exit={self._proc.poll()}）")
             line = line.strip()
@@ -87,11 +105,18 @@ class McpClient:
 
     # ---- 生命周期 ----
     def connect(self) -> None:
+        import os
+        env = None
+        if self.env:
+            # server 常需要自己的环境变量（API_KEY / NODE_PATH…）：
+            # 在系统环境之上覆盖配置给的值
+            env = {**os.environ, **{str(k): str(v) for k, v in self.env.items()}}
         self._proc = subprocess.Popen(
             [self.command, *self.args],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True, encoding="utf-8", errors="replace", cwd=str(utils.ROOT),
+            env=env,
         )
         self._request("initialize", {
             "protocolVersion": PROTOCOL_VERSION,
@@ -135,7 +160,11 @@ class McpClient:
 
 
 def _server_configs(settings: dict) -> list[dict]:
-    """settings['ai_mcp_servers'] = [{name, command, args?}, ...]；配置坏项直接跳过。"""
+    """settings['ai_mcp_servers'] = [{name, command, args?, env?}, ...]；配置坏项直接跳过。
+
+    name 只允许 [A-Za-z0-9_-]：它会被拼进工具名（mcp_<name>_<tool>）并参与
+    前缀路由，混入其他字符会造成路由歧义 / 非法 function 名。
+    """
     raw = (settings or {}).get("ai_mcp_servers")
     if not isinstance(raw, list):
         return []
@@ -147,8 +176,15 @@ def _server_configs(settings: dict) -> list[dict]:
         command = str(row.get("command") or "").strip()
         if not name or not command:
             continue
+        if not all(ch.isalnum() or ch in "-_" for ch in name):
+            trace.record("mcp_config_skipped", tool_name=name,
+                         reason="server 名只允许字母数字-_")
+            continue
+        env = row.get("env")
         out.append({"name": name, "command": command,
-                    "args": row.get("args") if isinstance(row.get("args"), list) else []})
+                    "args": row.get("args") if isinstance(row.get("args"), list) else [],
+                    "env": {str(k): str(v) for k, v in env.items()}
+                    if isinstance(env, dict) else None})
     return out
 
 
@@ -156,7 +192,7 @@ def connect_servers(settings: dict) -> list[McpClient]:
     """连配置里所有 MCP server，坏的跳过（隔离性：坏 server 不影响其他）。"""
     clients: list[McpClient] = []
     for cfg in _server_configs(settings):
-        client = McpClient(cfg["name"], cfg["command"], cfg["args"])
+        client = McpClient(cfg["name"], cfg["command"], cfg["args"], cfg.get("env"))
         try:
             client.connect()
             clients.append(client)
@@ -197,11 +233,15 @@ def mcp_tool_schemas(clients: list[McpClient]) -> list[dict]:
 
 
 def route_call(clients: list[McpClient], name: str, args: dict) -> str | None:
-    """按前缀路由 mcp_<server>_<tool>；不是 MCP 工具返回 None（继续走内置）。"""
+    """按前缀路由 mcp_<server>_<tool>；不是 MCP 工具返回 None（继续走内置）。
+
+    有 server `a` 与 `a_b` 时，`mcp_a_b_x` 必须路由到 `a_b`：按前缀长度
+    降序取最长匹配，短名 server 不会截胡长名 server 的调用。
+    """
     if not name.startswith("mcp_"):
         return None
     rest = name[len("mcp_"):]
-    for client in clients or []:
+    for client in sorted(clients or [], key=lambda c: len(c.name), reverse=True):
         prefix = f"{client.name}_"
         if rest.startswith(prefix):
             return client.call_tool(rest[len(prefix):], args)
