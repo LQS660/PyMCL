@@ -27,6 +27,7 @@ from mclauncher.ai import permission as ai_perm
 from mclauncher.ai import preview as ai_preview
 from mclauncher.ai import rewind as ai_rewind_mod
 from mclauncher.ai import store as chat_store
+from mclauncher.ai import usage as ai_usage
 from mclauncher.ai.defaults import DEFAULT_MODEL
 from mclauncher.ai.permission import Behavior, Rule, rule_content_from_input
 from mclauncher.ai.result import AgentResult, StopReason
@@ -37,7 +38,8 @@ from mclauncher.i18n import tr
 
 _RED = "#D64545"
 
-_STOP = {tr("已停止"), tr("已取消")}
+# 注意不要在模块级缓存 tr() 的结果（切换语言立即生效，导入期定格会让
+# 「已停止」在切到英文后被当成错误处理）——运行期比较见 _on_fail
 _CHIPS = (tr("下一款游戏 1.20.1 Fabric"), tr("装钠和光影"), tr("启动闪退了帮我看"))
 _WELCOME = (
     tr("我是启动器助手。可以帮你下游戏、装模组和整合包、看启动报错、查模组冲突、改常用配置。\n"
@@ -1255,6 +1257,7 @@ class AiPage(QWidget):
         self._history = list((chat or {}).get("messages") or [])
         self._wipe_messages()
         self._plan_card = None
+        self._plan_wrap = None
         self._active_plan = None
         if not self._history:
             s = self.backend.get_settings()
@@ -1275,6 +1278,11 @@ class AiPage(QWidget):
             if isinstance(plan, dict) and plan.get("items"):
                 self._render_plan(plan.get("items") or [])
                 self._active_plan = plan
+        # 用量标签跟着会话走：切到没聊过的新会话时清掉上一个会话的累计数
+        try:
+            self._show_usage(ai_usage.get(str(self._store.get("active_id") or "active")))
+        except Exception:  # noqa: BLE001
+            self.usage_label.setText("")
         self._scroll_bottom()
 
     def _persist(self):
@@ -1424,12 +1432,23 @@ class AiPage(QWidget):
                     tr("对话已回退，但磁盘改动没能全部还原，请手动检查相关文件"),
                     parent=self.window() or self,
                     position=InfoBarPosition.TOP, duration=6000)
-        elif not res.get("rollbackable"):
+        elif res.get("rollbackable"):
             InfoBar.info(
                 tr("已撤回"),
                 tr("只回退了对话。这一轮没有可还原的磁盘改动"),
                 parent=self.window() or self,
                 position=InfoBarPosition.TOP, duration=4000)
+        else:
+            # 不可回滚：快照失败 / 会话日志缺失——磁盘改动还原不了，必须明说
+            reason = str(res.get("reason") or "").strip()
+            msg = tr("只回退了对话。这一轮的磁盘改动无法自动还原")
+            if reason:
+                msg += "：" + reason
+            InfoBar.warning(
+                tr("已撤回"),
+                msg,
+                parent=self.window() or self,
+                position=InfoBarPosition.TOP, duration=6000)
 
     def _send_text(self, text: str):
         text = (text or "").strip()
@@ -1455,6 +1474,13 @@ class AiPage(QWidget):
         return out
 
     def _send(self, text: str, *, echo: bool = True):
+        if self._worker:
+            # 定时器续发（30/50ms 窗口）与用户手速发送撞车时排队给正在跑的
+            # 回合（steering），绝不能再开第二个 worker——两路流式信号会串台
+            self._queue.append(text)
+            if echo:
+                self._add_bubble("user", text)
+            return
         if echo:
             self._add_bubble("user", text)
         self._stream = ""
@@ -1462,6 +1488,7 @@ class AiPage(QWidget):
         self._tool_lines = {}
         self._task_lines = {}
         self._plan_card = None
+        self._plan_wrap = None
         self._active_plan = None
         self._assistant_bubble = self._add_bubble("assistant", "")
         self._assistant_bubble.set_placeholder(tr("正在想…"))
@@ -1657,7 +1684,8 @@ class AiPage(QWidget):
 
     def _render_plan(self, items: list):
         """3.4 计划卡：结构化待办清单（待办 / 进行中 / 完成）。"""
-        # 先移掉上一张计划卡，只显示最新一份
+        # 先移掉上一张计划卡，只显示最新一份（连外层 wrapper 一起删，
+        # 否则每次更新都残留一个空 wrap，聊一场攒一串空白行）
         if getattr(self, "_plan_card", None) is not None:
             try:
                 self._plan_card.setParent(None)
@@ -1665,6 +1693,13 @@ class AiPage(QWidget):
             except RuntimeError:
                 pass
             self._plan_card = None
+        if getattr(self, "_plan_wrap", None) is not None:
+            try:
+                self._plan_wrap.setParent(None)
+                self._plan_wrap.deleteLater()
+            except RuntimeError:
+                pass
+            self._plan_wrap = None
         if not items:
             return
         mark = {"completed": tr("完成"), "in_progress": tr("进行中")}
@@ -1688,7 +1723,7 @@ class AiPage(QWidget):
         for row in rows:
             lay.addWidget(BodyLabel(row))
         self._plan_card = card
-        self._add_widget(card)
+        self._plan_wrap = self._add_widget(card)
 
     def _on_ask(self, questions: list, title: str):
         card = AskCard(questions, title)
@@ -1832,17 +1867,20 @@ class AiPage(QWidget):
     def _on_fail(self, msg: str):
         self._flush_timer.stop()
         text = (msg or "").strip() or tr("接口没返回具体原因")
+        # 运行期求值：切语言后「已停止」的译文变了，导入期定格的集合会失配，
+        # 把正常停止当错误处理（红气泡 + 助手出错）
+        stopped = text in (tr("已停止"), tr("已取消"))
         if self._assistant_bubble:
             self._assistant_bubble.set_text(text)
         else:
             self._add_bubble("error", text)
-        if text in _STOP:
+        if stopped:
             InfoBar.info(tr("已停止"), tr("可以继续说下一句"), parent=self.window() or self,
                          position=InfoBarPosition.TOP, duration=2200)
         else:
             InfoBar.error(tr("助手出错"), text, parent=self.window() or self,
                           position=InfoBarPosition.TOP, duration=12000)
-        self._finish(text, text in _STOP)
+        self._finish(text, stopped)
 
     def _stop(self, wait=False):
         if self._worker:

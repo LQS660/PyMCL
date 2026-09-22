@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from mclauncher import utils
+from mclauncher.i18n import tr
 
 
 class PermissionMode(str, Enum):
@@ -367,7 +368,9 @@ def rules_to_json(rules) -> list:
     return out
 
 
-_BEHAVIOR_LABELS = {Behavior.ALLOW: "允许", Behavior.DENY: "禁止", Behavior.ASK: "每次问"}
+# 行为中文原文（tr 的 key）：运行期在 list_stored_rules 里求值，
+# 避免模块导入时定格——切语言立即生效的场景下导入期译文会过期
+_BEHAVIOR_KEYS = {Behavior.ALLOW: "允许", Behavior.DENY: "禁止", Behavior.ASK: "每次问"}
 
 
 def list_stored_rules() -> list:
@@ -389,9 +392,9 @@ def list_stored_rules() -> list:
                 "key": r.key(), "toolName": r.tool_name,
                 "ruleContent": r.rule_content or "",
                 "behavior": behavior.value,
-                "behavior_label": _BEHAVIOR_LABELS[behavior],
+                "behavior_label": tr(_BEHAVIOR_KEYS[behavior]),
                 "instance": "",
-                "scope": "全局",
+                "scope": tr("全局"),
             })
     for inst, section in store["per_instance"].items():
         for bucket, behavior in (("allow", Behavior.ALLOW), ("deny", Behavior.DENY),
@@ -405,9 +408,9 @@ def list_stored_rules() -> list:
                     "key": r.key(), "toolName": r.tool_name,
                     "ruleContent": r.rule_content or "",
                     "behavior": behavior.value,
-                    "behavior_label": _BEHAVIOR_LABELS[behavior],
+                    "behavior_label": tr(_BEHAVIOR_KEYS[behavior]),
                     "instance": inst,
-                    "scope": f"实例 {inst}",
+                    "scope": tr("实例 {0}").format(inst),
                 })
     return out
 
