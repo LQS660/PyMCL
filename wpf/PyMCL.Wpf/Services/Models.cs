@@ -207,6 +207,9 @@ public sealed class AiStoreDto
     public List<AiChatDto> Chats { get; set; } = new();
     /// <summary>后端此刻是否有一回合在跑（ai_list_chats 带回），前端按钮状态以它为准。</summary>
     public bool Busy { get; set; }
+    /// <summary>SSE 断线窗口里丢掉的确认 / 提问卡（ai_list_chats 带回；没有为 null）：
+    /// 重进页面时补画，否则内核在等回答、页面上却没有卡可点。</summary>
+    [JsonPropertyName("pending_card")] public JsonElement? PendingCard { get; set; }
 }
 
 public sealed class AiChatDto
@@ -214,6 +217,20 @@ public sealed class AiChatDto
     public string Id { get; set; } = "";
     public string Title { get; set; } = "";
     public List<AiMsgDto> Messages { get; set; } = new();
+    /// <summary>3.4 计划工作流：本对话最新待办清单（store 持久化，重开程序仍在）。</summary>
+    public AiPlanDto? Plan { get; set; }
+}
+
+public sealed class AiPlanDto
+{
+    [JsonPropertyName("turn_id")] public string TurnId { get; set; } = "";
+    public List<AiPlanItemDto> Items { get; set; } = new();
+}
+
+public sealed class AiPlanItemDto
+{
+    public string Title { get; set; } = "";
+    public string Status { get; set; } = "pending";
 }
 
 public sealed class AiMsgDto

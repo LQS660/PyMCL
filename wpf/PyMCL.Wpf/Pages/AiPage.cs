@@ -91,7 +91,6 @@ public sealed class AiPage : PageBase
         var inputCard = Ui.Card(Ui.V(8,
             quick,
             _input,
-            Ui.H(4, _usageLabel),
             usageRow), 14);
 
         var main = Ui.G("*,Auto");
@@ -157,7 +156,33 @@ public sealed class AiPage : PageBase
         if (_busy && !_store.Busy) ResetRunState();
         else if (!_busy && _store.Busy) SetBusy(true);
         RenderChats();
-        RenderMessages();
+        // 回合进行中别整页重画消息区：ui_changed 触发的刷新会把流式气泡 / 工具行 /
+        // 等待中的确认卡清掉（落库只在回合结束才发生），重画就等于把这些全丢掉
+        if (!(_busy && _runChatId.Length > 0 && _runChatId == _store.ActiveId))
+        {
+            RenderMessages();
+            RestorePendingCard();
+        }
+    }
+
+    /// <summary>SSE 断线窗口里丢掉的确认 / 提问卡：用 ai_list_chats 带回的
+    /// pending_card 补画——内核在等回答，页面上没卡就只能干等。</summary>
+    private void RestorePendingCard()
+    {
+        var pc = _store.PendingCard;
+        if (pc is not { ValueKind: JsonValueKind.Object } || !_store.Busy) return;
+        string GetStr(string prop) =>
+            pc.Value.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.String
+                ? v.GetString() ?? "" : "";
+        var kind = GetStr("kind");
+        if (kind.Length == 0) return;
+        var chatId = GetStr("chat_id");
+        if (chatId.Length > 0 && chatId != _store.ActiveId) return;
+        var ev = new BridgeEvent { Name = GetStr("name"), Label = GetStr("label"), Payload = pc.Value };
+        SetBusy(true);
+        if (_runChatId.Length == 0) _runChatId = chatId.Length > 0 ? chatId : _store.ActiveId;
+        if (kind == "confirm") ShowConfirm(ev);
+        else if (kind == "ask") ShowAsk(ev);
     }
 
     private void RenderChats()
@@ -220,8 +245,21 @@ public sealed class AiPage : PageBase
         _abandoned = true;
         var ended = _runEnded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var r = await Api.TryCallAsync<JsonElement>("ai_stop");
-        if (BackendBusy(r))
-            await Task.WhenAny(ended.Task, Task.Delay(3000));
+        if (!BackendBusy(r))
+        {
+            // 回合刚好自己收尾了（ai_stop 回 busy=false）：静默复位就行，别弹
+            // 「已中断」吓人；_abandoned 保持 true，让还压在 Dispatcher 队列里的
+            // ai.done 安静地走完（那条事件的复位是幂等的）
+            _streamBubble = null;
+            _stream.Clear();
+            _runChatId = "";
+            _status.Text = "";
+            SetBusy(false);
+            _runEnded?.TrySetResult();
+            _runEnded = null;
+            return;
+        }
+        await Task.WhenAny(ended.Task, Task.Delay(3000));
         ResetRunState();
         Toast(L("已停止上一个对话的回合"), L("切换对话时正在运行的那一轮已中断"));
     }
@@ -282,6 +320,14 @@ public sealed class AiPage : PageBase
             if (!string.IsNullOrWhiteSpace(m.Note) && !text.Contains(m.Note, StringComparison.Ordinal))
                 text = (text + "\n\n" + m.Note).Trim();
             _messages.Children.Add(new Bubble(m.Role, text, RetryFrom));
+        }
+        // 3.4 计划卡持久化恢复：store 里存着本对话最新待办，重开程序 / 切页回来仍在
+        if (chat.Plan is { Items.Count: > 0 })
+        {
+            _planCard = new PlanCard(chat.Plan.Items
+                .Where(i => !string.IsNullOrWhiteSpace(i.Title))
+                .Select(i => (i.Title, i.Status)).ToList());
+            _messages.Children.Add(_planCard);
         }
         Motion.Stagger(_messages, 18, 200, 8);
         _retry.IsEnabled = !_busy && LastUserText().Length > 0;
@@ -375,13 +421,30 @@ public sealed class AiPage : PageBase
         var ok = r.ValueKind == JsonValueKind.Object && r.TryGetProperty("ok", out var okEl) && okEl.GetBoolean();
         var diskChanged = r.ValueKind == JsonValueKind.Object
                           && r.TryGetProperty("disk_changed", out var dcEl) && dcEl.GetBoolean();
+        if (!ok && diskChanged)
+        {
+            // 部分还原：磁盘动了但没全部还原，必须如实说
+            _status.Text = L("对话已回退，但磁盘改动没能全部还原，请手动检查相关文件");
+            return;
+        }
+        if (!ok)
+        {
+            // 后端忙 / 其他失败：明确报出来，绝不假装「已撤回」
+            var msg = r.ValueKind == JsonValueKind.Object
+                && r.TryGetProperty("message", out var mEl)
+                && mEl.ValueKind == JsonValueKind.String
+                ? mEl.GetString() ?? "" : "";
+            _status.Text = msg.Length > 0 ? msg : L("撤回失败");
+            return;
+        }
         var restored = 0;
         if (r.ValueKind == JsonValueKind.Object && r.TryGetProperty("restored_files", out var rfEl)
             && rfEl.TryGetInt32(out var n)) restored = n;
-        if (diskChanged && ok)
+        if (diskChanged)
             _status.Text = string.Format(L("已撤回：{0} 个文件的改动已还原"), restored);
-        else if (diskChanged)
-            _status.Text = L("对话已回退，但磁盘改动没能全部还原，请手动检查相关文件");
+        else if (r.ValueKind == JsonValueKind.Object
+                 && r.TryGetProperty("rollbackable", out var rbEl) && rbEl.ValueKind == JsonValueKind.False)
+            _status.Text = L("已撤回：只回退了对话，这一轮的磁盘改动无法自动还原");
         else
             _status.Text = L("已撤回：只回退了对话，这一轮没有可还原的磁盘改动");
     }
@@ -433,16 +496,23 @@ public sealed class AiPage : PageBase
 
             case "ai.done":
             {
+                // 迟到的旧回合收尾（切换后 ai_stop 超时 / 事件积压时才到）：绝不能
+                // 拿它复位新回合的运行态、覆盖新回合的用量——比对 chat_id 后丢弃
+                var staleCid = ChatIdOf(ev);
+                if (_busy && _runChatId.Length > 0 && staleCid.Length > 0 && staleCid != _runChatId)
+                    return;
                 var quiet = _abandoned;
+                var mine = RunIsDisplayed(ev);
                 _status.Text = "";
-                if (!quiet) NotifyStop(ev);
-                // 6.1 会话累计用量（与 Qt 同一数据源：bridge 在 ai.done 里转发）
-                ShowUsage(ev);
+                if (!quiet && mine) NotifyStop(ev);
+                // 6.1 会话累计用量（与 Qt 同一数据源：bridge 在 ai.done 里转发）；
+                // 只在事件属于正显示的对话时更新，别拿旧对话的数盖这边
+                if (mine) ShowUsage(ev);
                 // 流式气泡先就地补上「为什么停」；随后重拉的会话里已带同一条提示
                 // （bridge 端照 Qt 入了库），重建后不丢。
                 var note = StopNote(ev);
                 // 这一发同时把流式态收掉（live=false）：思考块该折的折起来、流光停下
-                if (_streamBubble != null && RunIsDisplayed(ev) && (_stream.Length > 0 || note.Length > 0))
+                if (_streamBubble != null && mine && (_stream.Length > 0 || note.Length > 0))
                     _streamBubble.SetText(_stream.ToString() + note);
                 ResetRunState();
                 Run(async () =>
@@ -456,6 +526,10 @@ public sealed class AiPage : PageBase
 
             case "ai.fail":
             {
+                // 同 ai.done：迟到的旧回合收尾不动新回合的状态
+                var staleCid = ChatIdOf(ev);
+                if (_busy && _runChatId.Length > 0 && staleCid.Length > 0 && staleCid != _runChatId)
+                    return;
                 // 主动停止不算错：用户点「停止」不该看到红色 error 气泡（对齐 winui3/eziapp/Qt）
                 var mine = RunIsDisplayed(ev);
                 var quiet = _abandoned;
@@ -560,11 +634,40 @@ public sealed class AiPage : PageBase
                 // 3.4 计划卡：模型出的结构化待办直接进对话流
                 ShowPlan(ev);
                 return;
+            case "checkpoint_warn":
+            {
+                // 快照失败：本轮改动不可回滚，用户必须知道（对齐 Qt 的 InfoBar 告警）
+                var wmsg = ev.Payload.ValueKind == JsonValueKind.Object
+                    && ev.Payload.TryGetProperty("message", out var w)
+                    && w.ValueKind == JsonValueKind.String ? w.GetString() ?? "" : "";
+                Toast(L("无法一键撤回"),
+                    wmsg.Length > 0 ? wmsg : L("检查点不可用，本轮改动无法自动撤回"), ToastKind.Warning);
+                return;
+            }
+            case "model_fallback":
+            {
+                // 主模型连续 429/5xx 已切备用模型：可见提示，不静默
+                var model = ev.Payload.ValueKind == JsonValueKind.Object
+                    && ev.Payload.TryGetProperty("model", out var mo)
+                    && mo.ValueKind == JsonValueKind.String ? mo.GetString() ?? "" : "";
+                Toast(L("已切换备用模型"), model, ToastKind.Warning);
+                return;
+            }
             case "thinking":
-            case "think":
                 _status.Text = L("思考中…");
                 if (_stream.Length == 0) _streamBubble?.SetThinking(L("正在想…"));
                 return;
+            case "think":
+            {
+                // 跑完工具继续想：占位提示与 Qt 一致，别一直说「正在想…」
+                var afterTools = ev.Payload.ValueKind == JsonValueKind.Object
+                    && ev.Payload.TryGetProperty("after_tools", out var at)
+                    && at.ValueKind == JsonValueKind.True;
+                var hint = afterTools ? L("搜完了，正在整理…") : L("正在想…");
+                _status.Text = afterTools ? L("搜完了，正在整理…") : L("思考中…");
+                if (_stream.Length == 0) _streamBubble?.SetThinking(hint);
+                return;
+            }
             case "tool":
                 if (ev.Name == "ask_user")
                 {
@@ -628,12 +731,14 @@ public sealed class AiPage : PageBase
             return;
         long GetNum(string prop) =>
             u.TryGetProperty(prop, out var n) && n.TryGetInt64(out var v) ? v : 0;
-        var input = GetNum("input") + GetNum("input_estimated");
+        var est = GetNum("input_estimated");
+        var input = GetNum("input") + est;
         var output = GetNum("output");
         if (input == 0 && output == 0) return;
+        // 混合来源（有真实回执但本次也含估算）必须标「估算」，不把估算冒充实测
         var real = u.TryGetProperty("real_requests", out var rr) && rr.TryGetInt64(out var r) && r > 0;
         string Fmt(long n) => n >= 1000 ? $"{n / 1000.0:0.0}k" : n.ToString();
-        var source = real ? "" : L("（估算）");
+        var source = real && est == 0 ? "" : L("（估算）");
         _usageLabel.Text = string.Format(L("本会话：输入 {0} / 输出 {1} tokens{2}"),
             Fmt(input), Fmt(output), source);
     }

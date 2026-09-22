@@ -89,7 +89,11 @@ public sealed class BridgeClient : IDisposable
         var root = doc.RootElement;
         if (root.TryGetProperty("error", out var err) && err.ValueKind != JsonValueKind.Null)
         {
-            var msg = err.TryGetProperty("message", out var m) ? m.GetString() : err.ToString();
+            // server 的 401/403/4xx 回的是 {"error": "字符串"}：TryGetProperty 对
+            // String 类型的 JsonElement 会抛 InvalidOperationException，先按形状分流
+            var msg = err.ValueKind == JsonValueKind.Object && err.TryGetProperty("message", out var m)
+                ? m.GetString()
+                : err.ValueKind == JsonValueKind.String ? err.GetString() : err.ToString();
             throw new BridgeCallException(method, msg ?? L("调用失败"));
         }
         return root.TryGetProperty("result", out var result) ? result.Clone() : default;

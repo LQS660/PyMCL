@@ -2874,7 +2874,9 @@ class BackendAPI:
                 delayed[0].cancel()
                 delayed[0] = None
             last[0] = now
-            self._bus.emit("ai.delta", {"text": "".join(buf)})
+            # 带 chat_id：前端切换对话后，靠它把旧回合的流式文本分流掉，
+            # 不写进正看着的新对话
+            self._bus.emit("ai.delta", {"text": "".join(buf), "chat_id": run_cid})
             buf.clear()
 
         def on_delta(piece):
@@ -2886,7 +2888,9 @@ class BackendAPI:
             payload = payload or {}
             if kind == "tool_done" and payload.get("label"):
                 notes.append(payload.get("label"))
-            self._bus.emit("ai.status", {"kind": kind, **payload})
+            # 带 chat_id：ai.done / ai.fail 之外的中间事件也要分得清归属，
+            # 前端 abandon 超时后旧回合的工具行才不会画进新对话
+            self._bus.emit("ai.status", {"kind": kind, "chat_id": run_cid, **payload})
 
         def cancelled():
             return self._ai_cancel
