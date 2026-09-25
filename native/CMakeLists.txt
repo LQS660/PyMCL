@@ -18,8 +18,12 @@ add_executable(pymcl-bridge
   vendor/cJSON.c
 )
 
+# Static link: src/ has zero libcurl calls (HTTP/TLS goes through WinHTTP /
+# schannel), and -static folds libwinpthread + zlib into the exe so the build
+# ships no side-by-side DLLs at all.
+target_link_options(pymcl-bridge PRIVATE -static)
+
 target_link_libraries(pymcl-bridge PRIVATE
-  curl
   z
   bcrypt
   crypt32
@@ -36,23 +40,7 @@ set_target_properties(pymcl-bridge PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR}/build
 )
 
-if(EXISTS "C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt")
-  add_custom_command(TARGET pymcl-bridge POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt"
-      "$<TARGET_FILE_DIR:pymcl-bridge>/curl-ca-bundle.crt")
-endif()
-
-set(_mingw_bin "C:/msys64/mingw64/bin")
-foreach(_dll
-    libcurl-4.dll libssl-3-x64.dll libcrypto-3-x64.dll zlib1.dll
-    libzstd.dll libbrotlidec.dll libbrotlicommon.dll libnghttp2-14.dll
-    libidn2-0.dll libpsl-5.dll libssh2-1.dll libiconv-2.dll libintl-8.dll
-    libunistring-2.dll libgcc_s_seh-1.dll libwinpthread-1.dll
-    libstdc++-6.dll)
-  if(EXISTS "${_mingw_bin}/${_dll}")
-    add_custom_command(TARGET pymcl-bridge POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${_mingw_bin}/${_dll}" "$<TARGET_FILE_DIR:pymcl-bridge>/${_dll}")
-  endif()
-endforeach()
+# No curl-ca-bundle.crt and no side-by-side DLL copying: WinHTTP uses the
+# Windows certificate store, and -static folds the MinGW runtime in.
+# Verified: objdump -p shows only KERNEL32 / SHELL32 / WINHTTP / WS2_32 /
+# bcrypt / msvcrt imports.
