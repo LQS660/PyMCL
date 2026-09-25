@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 import argparse
+import io
+import lzma
 import os
 import shutil
 import subprocess
@@ -10,8 +12,7 @@ MAGIC = b"PML1PACK"
 KEEP_CULTURES = {
     "zh-Hans", "zh-CN", "zh-Hant", "zh-TW", "zh", "en", "en-US",
 }
-SEVEN = Path(r"C:\Program Files\7-Zip\7z.exe")
-SEVEN_DLL = Path(r"C:\Program Files\7-Zip\7z.dll")
+STRIP = Path(r"C:\msys64\mingw64\bin\strip.exe")
 
 
 def prune_cultures(root: Path) -> None:
@@ -40,32 +41,27 @@ def drop_junk(root: Path) -> None:
                 pass
 
 
-def make_7z(stage: Path, dest: Path) -> None:
-    if dest.exists():
-        dest.unlink()
-    cmd = [
-        str(SEVEN), "a", "-t7z",
-        "-mx=9", "-m0=lzma2", "-mfb=273", "-md=32m", "-ms=on",
-        str(dest), "*",
+def strip_bridge(stage: Path) -> None:
+    """只剥打包目录里 C 桥副本的符号表：native/build.bat 没带 -s，符号表占了 exe 一半多。原件不动。"""
+    exe = stage / "native" / "build" / "pymcl-bridge.exe"
+    if exe.is_file():
+        subprocess.check_call([str(STRIP if STRIP.exists() else "strip"), "-s", str(exe)])
+
+
+def xz_bundle(stage: Path, dest: Path) -> None:
+    """仓储 zip 当容器（stub 里的 zipmin 直接解），整包再做一次 xz 固实压缩，stub 静态链 liblzma 边读边解。"""
+    # 按扩展名排，同类文件挨在一起，固实压缩更小
+    files = sorted((p for p in stage.rglob("*") if p.is_file()), key=lambda p: (p.suffix.lower(), p.as_posix()))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        for p in files:
+            zf.write(p, p.relative_to(stage).as_posix())
+    filters = [
+        {"id": lzma.FILTER_X86},
+        {"id": lzma.FILTER_LZMA2, "preset": 9 | lzma.PRESET_EXTREME, "dict_size": 1 << 23},
     ]
-    subprocess.check_call(cmd, cwd=str(stage))
-
-
-def zip_bundle(app7z: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(dest, "w") as zf:
-        zf.write(SEVEN, "tools/7z.exe", compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
-        zf.write(SEVEN_DLL, "tools/7z.dll", compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
-        zf.write(app7z, "app.7z", compress_type=zipfile.ZIP_STORED)
-
-
-def zip_dir(src: Path, dest: Path) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-        for p in src.rglob("*"):
-            if not p.is_file():
-                continue
-            zf.write(p, p.relative_to(src).as_posix())
+    dest.write_bytes(lzma.compress(buf.getvalue(), format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC32, filters=filters))
 
 
 def build_stub(root: Path, out: Path) -> None:
@@ -87,6 +83,7 @@ def build_stub(root: Path, out: Path) -> None:
         str(out),
         str(root / "pack" / "stub.c"),
         str(root / "pack" / "zipmin.c"),
+        "-llzma",
         "-lz",
         "-lshell32",
         "-lgdi32",
@@ -114,19 +111,11 @@ def main() -> None:
     dist.mkdir(parents=True, exist_ok=True)
     drop_junk(stage)
     prune_cultures(stage / "ui")
+    strip_bridge(stage)
     work = stage.parent
-    zpath = work / "payload.zip"
+    zpath = work / "payload.xz"
     stub = work / "stub.exe"
-    if SEVEN.exists() and SEVEN_DLL.exists():
-        app7z = work / "payload.7z"
-        make_7z(stage, app7z)
-        zip_bundle(app7z, zpath)
-        try:
-            app7z.unlink()
-        except OSError:
-            pass
-    else:
-        zip_dir(stage, zpath)
+    xz_bundle(stage, zpath)
     build_stub(root, stub)
     append_payload(stub, zpath, dist / "PyMCL.exe")
     try:

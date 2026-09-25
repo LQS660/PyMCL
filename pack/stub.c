@@ -10,6 +10,9 @@
 #include <stdint.h>
 #include <string.h>
 #include "zipmin.h"
+/* 静态链 liblzma 必须先定义它，否则 lzma.h 按 dllimport 声明，链接时找不到符号 */
+#define LZMA_API_STATIC
+#include <lzma.h>
 
 #define MAGIC "PML1PACK"
 #define VER_NAME L".payload.ver"
@@ -188,7 +191,8 @@ static void set_dotnet_root(void) {
 }
 
 static int ui_ready(const wchar_t *ui, const wchar_t *dll, const wchar_t *bridge) {
-    return file_nonempty(ui) && file_nonempty(dll) && file_nonempty(bridge);
+    /* net48 起 ui 是单托管 exe（无独立 dll）：dll 存在才参与校验（兼容旧 net8 包） */
+    return file_nonempty(ui) && file_nonempty(bridge) && (!file_exists(dll) || file_nonempty(dll));
 }
 
 static int slim_ready(const wchar_t *www, const wchar_t *bridge) {
@@ -391,6 +395,53 @@ static HANDLE open_edge_app(const wchar_t *url) {
     return NULL;
 }
 
+/* 把 exe 尾部的载荷写成 payload.zip：xz 包着的边读边解，老格式的裸 zip 原样拷。 */
+static int write_payload(FILE *f, uint64_t zlen, FILE *o) {
+    static const uint8_t xz_magic[6] = {0xFD, '7', 'z', 'X', 'Z', 0x00};
+    static uint8_t in[1 << 16], out[1 << 16];
+    lzma_stream xz = LZMA_STREAM_INIT;
+    lzma_ret ret = LZMA_OK;
+    int is_xz = -1;
+    uint64_t left = zlen;
+    while (left) {
+        size_t chunk = left > sizeof(in) ? sizeof(in) : (size_t)left;
+        size_t got = fread(in, 1, chunk, f);
+        if (!got) break;
+        left -= got;
+        if (is_xz < 0) {
+            is_xz = got >= sizeof(xz_magic) && memcmp(in, xz_magic, sizeof(xz_magic)) == 0;
+            if (is_xz && lzma_stream_decoder(&xz, UINT64_MAX, 0) != LZMA_OK) return -1;
+        }
+        if (!is_xz) {
+            if (fwrite(in, 1, got, o) != got) return -1;
+        } else {
+            xz.next_in = in;
+            xz.avail_in = got;
+            while (xz.avail_in && ret != LZMA_STREAM_END) {
+                xz.next_out = out;
+                xz.avail_out = sizeof(out);
+                ret = lzma_code(&xz, LZMA_RUN);
+                size_t n = sizeof(out) - xz.avail_out;
+                if ((ret != LZMA_OK && ret != LZMA_STREAM_END) || (n && fwrite(out, 1, n, o) != n)) {
+                    lzma_end(&xz);
+                    return -1;
+                }
+            }
+        }
+        pump();
+    }
+    if (is_xz <= 0) return left ? -1 : 0;
+    while (!left && ret == LZMA_OK) {
+        xz.next_out = out;
+        xz.avail_out = sizeof(out);
+        ret = lzma_code(&xz, LZMA_FINISH);
+        size_t n = sizeof(out) - xz.avail_out;
+        if (n && fwrite(out, 1, n, o) != n) ret = LZMA_BUF_ERROR;
+    }
+    lzma_end(&xz);
+    return ret == LZMA_STREAM_END ? 0 : -1;
+}
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show) {
     (void)inst; (void)prev; (void)cmdline; (void)show;
     ui_init(); /* DPI + shell UI font, before anything puts a window on screen */
@@ -471,19 +522,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show) {
         if (_fseeki64(f, (int64_t)((uint64_t)sz - 16 - zlen), SEEK_SET) != 0) {
             fclose(o); fclose(f); die(L"定位 payload 失败");
         }
-        char buf[1 << 16];
-        uint64_t left = zlen;
-        while (left) {
-            size_t chunk = left > sizeof(buf) ? sizeof(buf) : (size_t)left;
-            size_t got = fread(buf, 1, chunk, f);
-            if (!got) break;
-            fwrite(buf, 1, got, o);
-            left -= got;
-            pump();
-        }
+        int wrote = write_payload(f, zlen, o);
         fclose(o);
         fclose(f);
-        if (left) die(L"写出 payload 不完整");
+        if (wrote != 0) {
+            DeleteFileW(zip);
+            die(L"写出 payload 不完整或已损坏");
+        }
         if (zipmin_extract(zip, runtime) != 0) {
             DeleteFileW(zip);
             die(L"解压失败");
