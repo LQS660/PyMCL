@@ -107,6 +107,7 @@ public static class Lucide
         using (var ms = new MemoryStream(bytes))
         {
             bi.BeginInit();
+            bi.StreamSource = ms;
             bi.CacheOption = BitmapCacheOption.OnLoad;
             bi.EndInit();
         }
