@@ -54,7 +54,9 @@ def _tool_candidates(messages) -> list:
 
 
 def microcompact(messages, cfg: MicroConfig, last_assistant_at: float = 0.0,
-                 now: float = 0.0) -> MicroResult:
+                 now: float = 0.0, *, idle_seconds: float = 0.0) -> MicroResult:
+    """idle_seconds：agent 用「距上一回合结束的真实间隔」传入（原来这俩参数
+    永远是 0.0，闲置触发是死路径）；>0 时优先于 last_assistant_at/now 推算。"""
     messages = list(messages or [])
     if not cfg.enabled:
         return MicroResult(messages=messages, decision_reason="disabled")
@@ -71,8 +73,12 @@ def microcompact(messages, cfg: MicroConfig, last_assistant_at: float = 0.0,
     # 触发条件：token 过阈值，或闲置超过 idle_threshold_minutes
     est = tokens_mod.estimate_messages(messages)
     triggered = cfg.threshold_tokens is not None and est >= cfg.threshold_tokens
-    idle_triggered = (now and last_assistant_at
-                      and (now - last_assistant_at) >= cfg.idle_threshold_minutes * 60)
+    if idle_seconds > 0:
+        idle_triggered = idle_seconds >= cfg.idle_threshold_minutes * 60
+    else:
+        idle_triggered = bool(now and last_assistant_at
+                              and (now - last_assistant_at)
+                              >= cfg.idle_threshold_minutes * 60)
     if not triggered and not idle_triggered:
         return MicroResult(messages=messages, decision_reason="not_triggered")
 
@@ -103,6 +109,11 @@ class AutoConfig:
     # 方法）。取公开 DeepSeek 系列常见窗口上界，宁小勿大——估大了 autocompact 触发过晚
     # 会撞上游 400（有 reactive compact 兜底），估小了只是多压几次。设置 UI 可改
     # （ai_context_window，Qt/WPF 设置页均有），本常量只是无配置时的兜底。
+    #
+    # 2026-09-25 用 _ctx_dist.py 挖过 cache/ai_sessions 真实分布：4931 条请求
+    # msg_count p50=4 / p95=10 / p99=34，可读到的 prompt_tokens p95≈5.3k，
+    # 0 条过压缩线的一半——autocompact 在生产流量从未触发（留作保险，触发
+    # 才花钱）。真实窗口实测流程见 tokens.py，测完把窗口写进 settings 默认值。
     context_window: int = 131_072
     buffer_tokens: int = 13_000
     max_consecutive_failures: int = 3

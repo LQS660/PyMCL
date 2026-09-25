@@ -238,6 +238,8 @@ public sealed class AiMsgDto
     public string Role { get; set; } = "";
     public string Content { get; set; } = "";
     public string Note { get; set; } = "";
+    /// <summary>压缩摘要消息的标记（id=compact_*）：渲染成一行小字，不是用户气泡。</summary>
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
 }
 
 public sealed class AiPermissionRuleDto

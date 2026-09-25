@@ -850,7 +850,7 @@ public sealed class CatalogPage : PageBase
         if (!low.Contains("modrinth.com") && !low.Contains("curseforge.com")) return;
         _clipSeen = clip;
         if ((_search.Text ?? "").Trim().Length == 0) _search.Text = clip;
-        Toast(L("识别到剪贴板链接"), clip.Length > 96 ? clip[..96] + "…" : clip);
+        Toast(L("识别到剪贴板链接"), clip.Length > 96 ? clip.Substring(0, 96) + "…" : clip);
     }
 
     private async Task DeleteInstalledAsync(string filename)

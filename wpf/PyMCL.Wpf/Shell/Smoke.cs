@@ -513,7 +513,7 @@ public static class Smoke
             if (string.IsNullOrWhiteSpace(text) || !I18nCheck.HasCjk(text)) return;
             var t = text.Trim();
             if (!seen.Add(t) || out_.Count >= 60) return;
-            out_.Add(new Dictionary<string, object?> { ["text"] = t.Length > 80 ? t[..80] + "…" : t, ["is_ui_key"] = known.Contains(t) });
+            out_.Add(new Dictionary<string, object?> { ["text"] = t.Length > 80 ? t.Substring(0, 80) + "…" : t, ["is_ui_key"] = known.Contains(t) });
         }
         try
         {
@@ -565,7 +565,7 @@ public static class Smoke
             if (Application.Current.MainWindow is not MainWindow win) return "主窗口不可用";
             var seq = _dialogs.Count;
             var safe = string.Concat(title.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
-            if (safe.Length > 32) safe = safe[..32];
+            if (safe.Length > 32) safe = safe.Substring(0, 32);
             return Shoot(win, $"dialog-{seq:00}-{safe}");
         }
         catch (Exception ex) { return "截图失败：" + ex.Message; }

@@ -84,7 +84,7 @@ public static class Wallpaper
         if (folder.Length > 0 && _playlist.SetFolder(folder, shuffle))
         {
             path = _playlist.Current();
-            _rotate.Interval = TimeSpan.FromMinutes(Math.Clamp(interval, 1, 1440));
+            _rotate.Interval = TimeSpan.FromMinutes(Clamp.Of(interval, 1, 1440));
             _rotate.Start();
         }
         else
@@ -148,8 +148,8 @@ public static class Wallpaper
     /// <summary>可读性处理：blur=模糊半径 px，dim=遮罩浓度 %。遮罩刷主题底色而不是黑色。</summary>
     public static void SetEffects(int blur, int dim)
     {
-        _blur = Math.Clamp(blur, 0, 40);
-        _dimPercent = Math.Clamp(dim, 0, 80);
+        _blur = Clamp.Of(blur, 0, 40);
+        _dimPercent = Clamp.Of(dim, 0, 80);
         // BlurEffect 在 WPF 里是 GPU 合成的，半径大了才有明显成本；
         // RenderingBias.Performance 让它走低精度那条路，动态壁纸每帧都要过一遍。
         Effect? effect = _blur > 0

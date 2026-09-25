@@ -77,7 +77,7 @@ public static class FirstRunWizard
 
         var src = Ui.Combo(SrcOpts.Select(o => o.Label));
         src.SelectedIndex = Math.Max(0, Array.FindIndex(SrcOpts, o => o.Key == (Str("download_source") is { Length: > 0 } s ? s : "auto")));
-        var mem = Ui.Sld(512, 32768, Math.Clamp(Int("default_memory_mb", 4096), 512, 32768), 256);
+        var mem = Ui.Sld(512, 32768, Clamp.Of(Int("default_memory_mb", 4096), 512, 32768), 256);
         var memLbl = Ui.Txt($"{(int)mem.Value} MB", 12, true);
         mem.ValueChanged += (_, e) => memLbl.Text = $"{(int)e.NewValue} MB";
         var memRow = Ui.G(null, "*,Auto");
@@ -134,7 +134,7 @@ public static class FirstRunWizard
 
         void Show(int i)
         {
-            index = Math.Clamp(i, 0, pages.Length - 1);
+            index = Clamp.Of(i, 0, pages.Length - 1);
             for (var k = 0; k < pages.Length; k++)
                 pages[k].Visibility = k == index ? Visibility.Visible : Visibility.Collapsed;
             hint.Text = Hints[index];

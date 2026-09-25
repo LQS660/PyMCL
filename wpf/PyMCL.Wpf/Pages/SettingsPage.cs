@@ -401,8 +401,8 @@ public sealed class SettingsPage : PageBase
             if (s != null)
             {
                 _dark.IsChecked = GetBool(s, "ui_dark");
-                _threads.Value = Math.Clamp(GetInt(s, "download_threads", 8), 1, 64);
-                _mem.Value = Math.Clamp(GetInt(s, "default_memory_mb", 4096), 512, 32768);
+                _threads.Value = Clamp.Of(GetInt(s, "download_threads", 8), 1, 64);
+                _mem.Value = Clamp.Of(GetInt(s, "default_memory_mb", 4096), 512, 32768);
                 if (s.TryGetValue("default_resolution", out var r) &&
                     r.ValueKind == JsonValueKind.Array && r.GetArrayLength() >= 2)
                 {
@@ -443,9 +443,9 @@ public sealed class SettingsPage : PageBase
                 _bgPath.Text = GetStr(s, "ui_background");
                 _bgFolder.Text = GetStr(s, "ui_background_folder");
                 _bgShuffle.IsChecked = GetBool(s, "ui_background_shuffle");
-                _bgInterval.Value = Math.Clamp(GetInt(s, "ui_background_interval", 10), 1, 120);
-                _bgBlur.Value = Math.Clamp(GetInt(s, "ui_background_blur", 0), 0, 40);
-                _bgDim.Value = Math.Clamp(GetInt(s, "ui_background_dim", 0), 0, 80);
+                _bgInterval.Value = Clamp.Of(GetInt(s, "ui_background_interval", 10), 1, 120);
+                _bgBlur.Value = Clamp.Of(GetInt(s, "ui_background_blur", 0), 0, 40);
+                _bgDim.Value = Clamp.Of(GetInt(s, "ui_background_dim", 0), 0, 80);
                 _bgIntervalLbl.Text = L("{0} 分钟", (int)_bgInterval.Value);
                 _bgBlurLbl.Text = $"{(int)_bgBlur.Value} px";
                 _bgDimLbl.Text = $"{(int)_bgDim.Value} %";
@@ -473,7 +473,7 @@ public sealed class SettingsPage : PageBase
 
             _motion.IsChecked = Motion.Enabled;
             _fly.IsChecked = Extras.FlyAnimation;
-            _flyDur.Value = Math.Clamp(Extras.FlyDurationMs, 200, 1200);
+            _flyDur.Value = Clamp.Of(Extras.FlyDurationMs, 200, 1200);
             _flyDurLbl.Text = $"{(int)_flyDur.Value} ms";
             _color = Extras.ThemeColor;
             BuildSwatches();
@@ -537,7 +537,7 @@ public sealed class SettingsPage : PageBase
             ["ai_api_key"] = _aiKey.Text?.Trim() ?? "",
             ["ai_model"] = _aiModel.Text?.Trim() ?? "",
             ["ai_context_window"] = int.TryParse(_aiCtx.Text?.Trim(), out var ctxWin)
-                ? Math.Clamp(ctxWin, 8192, 2_000_000) : 131072,
+                ? Clamp.Of(ctxWin, 8192, 2_000_000) : 131072,
             ["ai_fallback_model"] = _aiFallback.Text?.Trim() ?? "",
             ["ai_confirm_writes"] = _aiConfirm.IsChecked == true,
             ["ai_permission_mode"] = KeyOf(_aiPerm),
@@ -596,7 +596,9 @@ public sealed class SettingsPage : PageBase
         }
         try
         {
-            var exe = Environment.ProcessPath ?? throw new InvalidOperationException("ProcessPath is null");
+            var exe = System.Reflection.Assembly.GetEntryAssembly()?.Location;
+            if (string.IsNullOrEmpty(exe))
+                exe = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName ?? "";
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe)
             {
                 UseShellExecute = true,
@@ -640,7 +642,7 @@ public sealed class SettingsPage : PageBase
         var history = await Api.TryCallAsync<List<string>>("background_history", null, new()) ?? new();
         var canUndo = await Api.TryCallAsync<bool>("can_undo_background", null, false);
         _bgUndo.IsEnabled = canUndo;
-        _bgUndo.ToolTip = history.Count == 0 ? null : L("上一张：{0}", history[^1]);
+        _bgUndo.ToolTip = history.Count == 0 ? null : L("上一张：{0}", history[history.Count - 1]);
 
         if (!string.IsNullOrEmpty(Wallpaper.Error))
         {
@@ -790,7 +792,7 @@ public sealed class SettingsPage : PageBase
             Ui.Txt(L("推荐内存 {0} MB", rec.MemoryMb), 14, true),
             Ui.Small(L("推荐 Java {0} · 窗口 {1}×{2} · 回收器 {3}", rec.JavaMajor, rec.WindowWidth, rec.WindowHeight, rec.GcPreset)));
         if (!await Dlg.Ask(L("智能推荐"), body, L("应用推荐"))) return;
-        _mem.Value = Math.Clamp(rec.MemoryMb, 512, 32768);
+        _mem.Value = Clamp.Of(rec.MemoryMb, 512, 32768);
         if (rec.WindowWidth > 0) _w.Text = rec.WindowWidth.ToString();
         if (rec.WindowHeight > 0) _h.Text = rec.WindowHeight.ToString();
         SelectKey(_gc, string.IsNullOrEmpty(rec.GcPreset) ? "auto" : rec.GcPreset);

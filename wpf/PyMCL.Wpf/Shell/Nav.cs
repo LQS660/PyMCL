@@ -110,7 +110,7 @@ public partial class MainWindow
         // 老版本把分区键写成 "#download"，读回来去掉井号
         foreach (var key in _prefs.Expanded.Keys.Where(k => k.StartsWith('#')).ToList())
         {
-            _prefs.Expanded[key[1..]] = _prefs.Expanded[key];
+            _prefs.Expanded[key.Substring(1)] = _prefs.Expanded[key];
             _prefs.Expanded.Remove(key);
         }
         _prefs.Expanded.TryAdd("download", true);
@@ -118,7 +118,7 @@ public partial class MainWindow
 
         SideCol.Width = new GridLength(ClampSide(_prefs.SideWidth));
         Motion.Enabled = _prefs.Anim;
-        Motion.Scale = Math.Clamp(_prefs.AnimScale, 0.4, 2.2);
+        Motion.Scale = Clamp.Of(_prefs.AnimScale, 0.4, 2.2);
         if (_prefs.Dark)
         {
             App.ApplyTheme(true);
@@ -201,7 +201,7 @@ public partial class MainWindow
 
     private void SideGrip_DragDelta(object sender, DragDeltaEventArgs e)
     {
-        var w = Math.Clamp(SideCol.Width.Value + e.HorizontalChange, SideMinWidth, SideMaxWidth);
+        var w = Clamp.Of(SideCol.Width.Value + e.HorizontalChange, SideMinWidth, SideMaxWidth);
         SideCol.Width = new GridLength(w);
         _prefs.SideWidth = w;
     }
@@ -420,7 +420,8 @@ public partial class MainWindow
         {
             Item(menu, row.IsSectionHeader ? L("隐藏此分区") : L("隐藏此入口"), () =>
             {
-                var hidden = _navCfg.Hidden.Where(k => k != row.Key).Append(row.Key).ToList();
+                var hidden = _navCfg.Hidden.Where(k => k != row.Key).ToList();
+            hidden.Add(row.Key);
                 Run(() => ApplyNavPatchAsync(new Dictionary<string, object?> { ["ui_nav_hidden"] = hidden }));
                 if (PageOf(row.Key) == _currentId) Navigate("launch");
                 Toast(L("已隐藏"), L("「{0}」可在侧栏右键菜单或设置里恢复", title));

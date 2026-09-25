@@ -74,7 +74,7 @@ public sealed class PlaytimePage : PageBase
         var ordered = all.OrderByDescending(k => Secs(k.Value)).ToList();
         var max = Math.Max(1L, ordered.Max(k => Secs(k.Value)));
         // 所有要显示的秒数一次性问完，避免逐行 await 把一页拉成几十个往返。
-        await WarmAsync(ordered.SelectMany(kv => Versions(kv.Value).Select(v => v.Value).Append(Secs(kv.Value))));
+        await WarmAsync(ordered.SelectMany(kv => Versions(kv.Value).Select(v => v.Value).Concat(new[] { Secs(kv.Value) })));
 
         foreach (var kv in ordered)
         {

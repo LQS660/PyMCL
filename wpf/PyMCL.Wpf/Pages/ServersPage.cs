@@ -128,7 +128,7 @@ public sealed class ServersPage : PageBase
     {
         var file = Dlg.PickFile(L("服务器列表 (*.txt)|*.txt|全部文件|*.*"), L("导入服务器"));
         if (file is null) return;
-        var text = await System.IO.File.ReadAllTextAsync(file);
+        var text = await Task.Run(() => System.IO.File.ReadAllText(file));
         var n = await Api.CallAsync<int>("import_servers", new { instance = _inst.Str(), text });
         Toast(L("已导入"), L("{0} 个服务器", n), ToastKind.Success);
         await ReloadAsync();
@@ -139,7 +139,7 @@ public sealed class ServersPage : PageBase
         var text = await Api.CallAsync<string>("export_servers", new { instance = _inst.Str() }) ?? "";
         var dest = Dlg.SaveFile(L("服务器列表 (*.txt)|*.txt"), "servers.txt", L("导出服务器"));
         if (dest is null) return;
-        await System.IO.File.WriteAllTextAsync(dest, text);
+        await Task.Run(() => System.IO.File.WriteAllText(dest, text));
         Toast(L("已导出"), dest, ToastKind.Success);
     }
 

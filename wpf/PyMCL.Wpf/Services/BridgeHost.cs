@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 namespace PyMCL.Services;
 
 /// <summary>拉起并守护本机桥进程（优先 C 桥，回退 Python 桥）。</summary>
-public sealed partial class BridgeHost : IDisposable
+public sealed class BridgeHost : IDisposable
 {
     private Process? _proc;
     private int _disposed;
@@ -31,7 +31,7 @@ public sealed partial class BridgeHost : IDisposable
         var native = FindNativeBridge(root);
         var server = Path.Combine(root, "bridge", "server.py");
         var forcePython = string.Equals(Environment.GetEnvironmentVariable("PYMCL_BRIDGE"), "python", StringComparison.OrdinalIgnoreCase);
-        var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        var token = NewToken();
         var psi = new ProcessStartInfo
         {
             WorkingDirectory = root,
@@ -45,29 +45,25 @@ public sealed partial class BridgeHost : IDisposable
         {
             backend = L("C 桥");
             psi.FileName = native;
-            psi.ArgumentList.Add("--root");
-            psi.ArgumentList.Add(root);
+            psi.Arguments = "--root " + QuoteArg(root);
             var bridgeDir = Path.GetDirectoryName(native) ?? "";
             var path = Environment.GetEnvironmentVariable("PATH") ?? "";
             if (!string.IsNullOrEmpty(bridgeDir))
-                psi.Environment["PATH"] = bridgeDir + Path.PathSeparator + path;
+                psi.EnvironmentVariables["PATH"] = bridgeDir + Path.PathSeparator + path;
         }
         else if (File.Exists(server))
         {
             backend = L("Python 桥");
             psi.FileName = FindPython();
-            psi.ArgumentList.Add("-u");
-            psi.ArgumentList.Add(server);
-            psi.ArgumentList.Add("--root");
-            psi.ArgumentList.Add(root);
-            psi.Environment["PYTHONIOENCODING"] = "utf-8";
-            psi.Environment["PYTHONUNBUFFERED"] = "1";
+            psi.Arguments = "-u " + QuoteArg(server) + " --root " + QuoteArg(root);
+            psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+            psi.EnvironmentVariables["PYTHONUNBUFFERED"] = "1";
         }
         else
             throw new FileNotFoundException(L("找不到 pymcl-bridge.exe 或 bridge/server.py"));
 
-        psi.Environment["PYMCL_HOME"] = root;
-        psi.Environment["PYMCL_BRIDGE_TOKEN"] = token;
+        psi.EnvironmentVariables["PYMCL_HOME"] = root;
+        psi.EnvironmentVariables["PYMCL_BRIDGE_TOKEN"] = token;
 
         var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
         var err = new System.Text.StringBuilder();
@@ -91,17 +87,17 @@ public sealed partial class BridgeHost : IDisposable
                 continue;
             }
             line = await readTask.ConfigureAwait(false);
-            if (line != null && line.Contains("PYMCL_BRIDGE", StringComparison.Ordinal)) break;
+            if (line != null && line.IndexOf("PYMCL_BRIDGE", StringComparison.Ordinal) >= 0) break;
             if (line is null) break;
             readTask = proc.StandardOutput.ReadLineAsync();
         }
-        if (line is null || !line.Contains("PYMCL_BRIDGE", StringComparison.Ordinal))
+        if (line is null || line.IndexOf("PYMCL_BRIDGE", StringComparison.Ordinal) < 0)
         {
-            try { proc.Kill(true); } catch { }
+            KillTree(proc);
             var tail = err.ToString().Trim();
             throw new InvalidOperationException(L("桥进程未输出端口") + (tail.Length > 0 ? L("：\n") + Tail(tail, 600) : ""));
         }
-        var m = PortRegex().Match(line);
+        var m = PortRegex.Match(line);
         if (!m.Success) throw new InvalidOperationException(L("无法解析桥端口: ") + line);
         var port = int.Parse(m.Groups[1].Value);
         var client = new BridgeClient(new Uri($"http://127.0.0.1:{port}/"), token);
@@ -119,18 +115,18 @@ public sealed partial class BridgeHost : IDisposable
             await Task.Delay(100, ct).ConfigureAwait(false);
         }
         client.Dispose();
-        try { proc.Kill(true); } catch { }
+        KillTree(proc);
         throw new InvalidOperationException(L("桥已启动但 /health 无响应"));
     }
 
     private static string Tail(string text, int max) =>
-        text.Length <= max ? text : "…" + text[^max..];
+        text.Length <= max ? text : "…" + text.Substring(text.Length - max);
 
     public static string FindRoot()
     {
         var env = Environment.GetEnvironmentVariable("PYMCL_HOME");
         if (!string.IsNullOrWhiteSpace(env)) return Path.GetFullPath(env);
-        foreach (var start in new[] { AppContext.BaseDirectory, Environment.CurrentDirectory, Path.GetDirectoryName(Environment.ProcessPath) ?? "" })
+        foreach (var start in new[] { AppContext.BaseDirectory, Environment.CurrentDirectory, Path.GetDirectoryName(typeof(BridgeHost).Assembly.Location) ?? "" })
         {
             var hit = WalkUp(start);
             if (hit != null) return hit;
@@ -207,14 +203,41 @@ public sealed partial class BridgeHost : IDisposable
         Client.Dispose();
         if (_proc is { HasExited: false })
         {
-            try { _proc.Kill(true); } catch { }
+            KillTree(_proc);
         }
         _proc?.Dispose();
         _proc = null;
     }
 
-    [GeneratedRegex(@"port=(\d+)")]
-    private static partial Regex PortRegex();
+    /// <summary>net48 没有 Kill(bool)：用 taskkill 结束整棵进程树，失败再退回 Kill()。</summary>
+    private static void KillTree(Process proc)
+    {
+        try
+        {
+            using var killer = Process.Start(new ProcessStartInfo
+            {
+                FileName = "taskkill",
+                Arguments = "/PID " + proc.Id + " /T /F",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            killer?.WaitForExit(5000);
+        }
+        catch { }
+        try { if (!proc.HasExited) proc.Kill(); } catch { }
+    }
+
+    private static string QuoteArg(string arg) => "\"" + arg + "\"";
+
+    private static string NewToken()
+    {
+        var buf = new byte[32];
+        using (var rng = RandomNumberGenerator.Create())
+            rng.GetBytes(buf);
+        return BitConverter.ToString(buf).Replace("-", "");
+    }
+
+    private static readonly Regex PortRegex = new(@"port=(\d+)", RegexOptions.Compiled);
 }
 
 public static class AppServices

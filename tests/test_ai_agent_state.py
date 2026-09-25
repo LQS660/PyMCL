@@ -480,7 +480,8 @@ class PersistAndHandoffTests(unittest.TestCase):
                    {"role": "assistant", "content": "完"},
                    {"role": "user", "content": "新"}]
         for cut in (2, 3):   # 切到 tool 消息开头时必须再往前丢
-            trimmed = agent_mod._trim_history(history[-cut:])
+            trimmed, summary = agent_mod._trim_history(history[-cut:])
+            self.assertIsNone(summary, "未超窗口不该产生摘要")
             self.assertNotEqual(trimmed[0].get("role"), "tool")
 
     def test_error_classification(self):

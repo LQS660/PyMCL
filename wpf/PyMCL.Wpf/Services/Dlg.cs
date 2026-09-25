@@ -321,7 +321,8 @@ public static class Dlg
     {
         title ??= L("选择文件夹");
         if (Smoke.Active) { Smoke.AutoCancelSystemDialog(title); return null; }
-        var d = new Microsoft.Win32.OpenFolderDialog { Title = title };
-        return d.ShowDialog() == true ? d.FolderName : null;
+        // net48 没有 OpenFolderDialog（.NET 8 独有），用系统自带 WinForms 的 FolderBrowserDialog
+        using var d = new System.Windows.Forms.FolderBrowserDialog { Description = title, ShowNewFolderButton = true };
+        return d.ShowDialog() == System.Windows.Forms.DialogResult.OK ? d.SelectedPath : null;
     }
 }

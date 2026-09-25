@@ -472,10 +472,12 @@ class ToolLine(QFrame):
         self._sync_icon()
 
     def _sync_icon(self):
+        # 任何状态都显示工具自己的图标（专属生成图 / 类型图），状态靠颜色区分：
+        # 执行中绿色流光、完成绿、跳过灰、失败红；没有映射的才退状态图标。
         running = self._state in ("prepare", "run")
         self.lab.set_active(running)
+        kind = tool_icon(self.tool)
         if running:
-            kind = tool_icon(self.tool)
             if kind:
                 self.icon.spin(False)
                 self.icon.set_icon(kind, Theme.green)
@@ -484,12 +486,14 @@ class ToolLine(QFrame):
                 self.icon.spin(True)
             return
         self.icon.spin(False)
-        if self._state == "done":
-            self.icon.set_icon("circle-check", Theme.green)
-        elif self._state == "skip":
-            self.icon.set_icon("circle-slash-2", Theme.muted)
+        color = Theme.green if self._state == "done" else (
+            Theme.muted if self._state == "skip" else _RED)
+        if kind:
+            self.icon.set_icon(kind, color)
         else:
-            self.icon.set_icon("circle-x", _RED)
+            fallback = {"done": "circle-check", "skip": "circle-slash-2"}.get(
+                self._state, "circle-x")
+            self.icon.set_icon(fallback, color)
 
     def bind_task(self, task_id: str):
         self.task_id = task_id or ""
@@ -1002,8 +1006,9 @@ class AiPage(QWidget):
         chat_store.prune_empty(self._store)
         self._history = []
         self._worker = None
-        self._assistant_bubble = None
-        self._stream = ""
+        self._round_bubble = None      # 当前轮次的气泡（工具回合开始就封口换新）
+        self._round_text = ""          # 当前轮次已说的话
+        self._stream = ""              # 整回合累积（入库/重试用，不直接上屏）
         self._queue = []
         self._tool_lines = {}
         self._task_lines = {}
@@ -1247,7 +1252,8 @@ class AiPage(QWidget):
             w = item.widget()
             if w:
                 w.deleteLater()
-        self._assistant_bubble = None
+        self._round_bubble = None
+        self._round_text = ""
         self._stream = ""
         self._tool_lines.clear()
         self._task_lines.clear()
@@ -1266,6 +1272,10 @@ class AiPage(QWidget):
         else:
             for m in self._history:
                 role = m.get("role") if isinstance(m, dict) else None
+                if role == "user" and str(m.get("id") or "").startswith("compact_"):
+                    # 入库的压缩摘要：给人看的是一行小字，不是用户气泡
+                    self._add_compact_note()
+                    continue
                 if role in ("user", "assistant", "error"):
                     text = m.get("content") or ""
                     # 「为什么停」的提示单独存在 note 里（不喂模型），渲染时再拼回去
@@ -1314,7 +1324,8 @@ class AiPage(QWidget):
         self._flush_timer.stop()
         self._worker = None
         self._pending_user = None
-        self._assistant_bubble = None
+        self._round_bubble = None
+        self._round_text = ""
         self._stream = ""
         self._queue.clear()
         self._busy(False)
@@ -1386,9 +1397,25 @@ class AiPage(QWidget):
         bar = self.scroll.verticalScrollBar()
         bar.setValue(bar.maximum())
 
+    def _open_round(self, placeholder: str | None = None):
+        """开一个新的轮次气泡：模型每次「开口」都有自己的一段，插在工具行之间。"""
+        if self._round_bubble is not None:
+            return
+        self._round_text = ""
+        self._round_bubble = self._add_bubble("assistant", "")
+        self._round_bubble.set_placeholder(placeholder or tr("正在想…"))
+
+    def _close_round(self):
+        """把当前轮次已说的话定稿在它自己的气泡里（工具行从此插在下面）。"""
+        if self._round_bubble is None:
+            return
+        self._round_bubble.set_text(self._round_text, live=False)
+        self._round_bubble = None
+        self._round_text = ""
+
     def _flush_stream(self):
-        if self._assistant_bubble:
-            self._assistant_bubble.set_text(self._stream or "…", live=True)
+        if self._round_bubble:
+            self._round_bubble.set_text(self._round_text or "…", live=True)
         self._scroll_bottom()
 
     def _busy(self, on: bool):
@@ -1490,8 +1517,7 @@ class AiPage(QWidget):
         self._plan_card = None
         self._plan_wrap = None
         self._active_plan = None
-        self._assistant_bubble = self._add_bubble("assistant", "")
-        self._assistant_bubble.set_placeholder(tr("正在想…"))
+        self._open_round()
         settings = self.backend.get_settings()
         settings["ai_session_id"] = str(self._store.get("active_id") or "active")
         # 首条消息一发就把会话名从「新对话」换成摘要，不用等落盘
@@ -1530,13 +1556,26 @@ class AiPage(QWidget):
     def _on_delta(self, piece: str):
         if not piece:
             return
+        # 整回合累积供入库；轮内文本渲进当前轮次气泡——模型在工具之间开口时
+        # 自动开新气泡，「说一段 → 干活 → 再说一段」按时间顺序交错
         self._stream += piece
+        self._open_round()
+        self._round_text += piece
         if not self._flush_timer.isActive():
             self._flush_timer.start()
+
+    def _add_compact_note(self):
+        """「较早的对话已压缩成摘要」一行小字：压缩摘要消息在对话流里的形态。"""
+        note = CaptionLabel(tr("较早的对话已压缩成摘要"))
+        note.setStyleSheet(f"color: {Theme.muted}; background: transparent;")
+        self._add_widget(note)
 
     def _on_status(self, kind: str, payload: dict):
         label = payload.get("label") or payload.get("name") or kind
         name = payload.get("name") or ""
+        if kind == "compact":
+            self._add_compact_note()
+            return
         if kind == "checkpoint_warn":
             InfoBar.warning(
                 tr("无法一键撤回"),
@@ -1558,19 +1597,20 @@ class AiPage(QWidget):
                                  "items": list(payload.get("items") or [])}
             return
         if kind == "think":
-            if not self._stream:
+            if not self._round_text:
                 if payload.get("after_tools"):
                     tip = tr("搜完了，正在整理…")
                 else:
                     tip = tr("正在想…")
-                if self._assistant_bubble:
-                    self._assistant_bubble.set_placeholder(tip)
+                self._open_round(tip)
             return
         if kind == "tool":
             if name == "ask_user":
-                if self._assistant_bubble and not self._stream:
-                    self._assistant_bubble.set_text(tr("请在下面选一下"))
+                if not self._round_text:
+                    self._open_round(tr("请在下面选一下"))
                 return
+            # 工具要开工了：这一轮说的话就地定稿，工具行插在它下面
+            self._close_round()
             line = self._tool_lines.get(name)
             if line:
                 line.set_text(tr("准备：") + label)
@@ -1580,6 +1620,7 @@ class AiPage(QWidget):
                 self._add_widget(line)
             line.set_state("prepare")
             return
+        self._close_round()
         line = self._tool_lines.get(name)
         if kind == "tool_run":
             if line:
@@ -1620,6 +1661,8 @@ class AiPage(QWidget):
         self._scroll_bottom()
 
     def _on_confirm(self, name: str, args: dict, label: str, reason: str = ""):
+        # 确认卡落在最后一段话下面：先把手头这段话封口
+        self._close_round()
         # 变更预览：确认卡上展示将要发生的实际变更（diff / 文件数与字节数 /
         # 目标路径），Qt 与 WPF 渲染同一份 preview.lines，两端信息量一致
         detail_lines: list[str] = []
@@ -1726,6 +1769,8 @@ class AiPage(QWidget):
         self._plan_wrap = self._add_widget(card)
 
     def _on_ask(self, questions: list, title: str):
+        # 提问卡落在最后一段话下面：先把手头这段话封口
+        self._close_round()
         card = AskCard(questions, title)
         worker = self._worker
 
@@ -1749,8 +1794,8 @@ class AiPage(QWidget):
         card.submitted.connect(ok)
         card.cancelled.connect(skip)
         self._add_widget(card)
-        if self._assistant_bubble and not self._stream:
-            self._assistant_bubble.set_text(tr("请在下面选一下"))
+        if not self._round_text:
+            self._open_round(tr("请在下面选一下"))
 
     def _compose_assistant(self, text: str) -> str:
         body = (text or "").strip()
@@ -1798,15 +1843,36 @@ class AiPage(QWidget):
     def _finish(self, assistant_text: str, ok: bool, result=None):
         self._flush_timer.stop()
         shown = self._compose_assistant(assistant_text if ok else (assistant_text or tr("已停止")))
-        if self._assistant_bubble:
-            self._assistant_bubble.set_text(shown or (tr("已停止") if not ok else ""))
+        note = self._stop_note(result) if (ok and result is not None) else ""
+        # 轮次气泡收尾：失败/停止把原因写在最后一轮的气泡上；完成时把「为什么停」
+        # 的增量补进最后一段（前面各轮已在各自工具事件处定稿）
+        if not ok and self._round_bubble:
+            self._round_bubble.set_text(shown or tr("已停止"))
+        elif note:
+            if self._round_bubble:
+                self._round_text = (self._round_text + "\n\n" + note).strip()
+            else:
+                self._round_text = note
+                self._open_round()
+            self._round_bubble.set_text(self._round_text, live=False)
+        self._close_round()
+        self._round_bubble = None
+        self._round_text = ""
         user = getattr(self, "_pending_user", None)
         if user:
+            # 压缩摘要（id=compact_*）插在用户这句之前入库：下一轮 agent 的
+            # _trim_history 在被裁段里找到它就直接复用，autocompact 的摘要也
+            # 靠它活过回合结束（原来压缩后只落 [用户这句, 最终正文]，摘要丢失）
+            turn_msgs = getattr(result, "turn_messages", None) or []
+            for m in turn_msgs:
+                if isinstance(m, dict) and m.get("role") == "user" \
+                        and str(m.get("id") or "").startswith("compact_"):
+                    self._history.append(dict(m))
             self._history.append({"role": "user", "content": user})
             # 本回合的工具轨迹一并入库（W5-1）：重开程序模型才知道上次做到哪。
             # 只取 turn_messages（本回合新增那一段）：result.messages 是模型侧完整历史，
             # 里面还有上几轮的工具消息，照抄进来每轮都会把旧轨迹重复存一遍。
-            for m in (getattr(result, "turn_messages", None) or []):
+            for m in turn_msgs:
                 role = m.get("role") if isinstance(m, dict) else None
                 if role == "tool" or (role == "assistant" and m.get("tool_calls")):
                     self._history.append(dict(m))
@@ -1836,7 +1902,8 @@ class AiPage(QWidget):
             self._persist()
         self._pending_user = None
         self._worker = None
-        self._assistant_bubble = None
+        self._round_bubble = None
+        self._round_text = ""
         self._stream = ""
         self._busy(False)
         self.input.setFocus()
@@ -1870,8 +1937,8 @@ class AiPage(QWidget):
         # 运行期求值：切语言后「已停止」的译文变了，导入期定格的集合会失配，
         # 把正常停止当错误处理（红气泡 + 助手出错）
         stopped = text in (tr("已停止"), tr("已取消"))
-        if self._assistant_bubble:
-            self._assistant_bubble.set_text(text)
+        if self._round_bubble:
+            self._round_bubble.set_text(text)
         else:
             self._add_bubble("error", text)
         if stopped:

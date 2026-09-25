@@ -31,10 +31,11 @@ public sealed class AiPage : PageBase
     private readonly TextBlock _status = Ui.Small("");
     private readonly TextBlock _usageLabel = Ui.Small("");
     private bool _syncPerm;
-    private readonly StringBuilder _stream = new();
+    private readonly StringBuilder _stream = new();   // 整回合累积（收尾定稿用）
+    private readonly StringBuilder _round = new();    // 当前轮次已说的话
     private readonly Dictionary<string, ToolLine> _toolLines = new();
     private readonly Dictionary<string, ToolLine> _taskLines = new();
-    private Bubble? _streamBubble;
+    private Bubble? _roundBubble;   // 当前轮次的气泡：工具回合开始就封口换新
     private AiStoreDto _store = new();
     private bool _busy;
     // 在跑的这一回合属于哪条对话：用户中途切走后，流式 / 状态 / 收尾事件都靠它分流，
@@ -43,7 +44,7 @@ public sealed class AiPage : PageBase
     // 这一回合是我们因切换对话主动掐掉的：收尾那帖 ai.fail 别再弹一次「已停止」
     private bool _abandoned;
     // 切换对话时等在跑的回合真正收尾（后端 busy 放开）再放行，避免新对话第一句被「上一条还在处理」顶回
-    private TaskCompletionSource? _runEnded;
+    private TaskCompletionSource<object?>? _runEnded;
 
     public AiPage()
     {
@@ -243,19 +244,20 @@ public sealed class AiPage : PageBase
     {
         if (!_busy) return;
         _abandoned = true;
-        var ended = _runEnded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ended = _runEnded = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var r = await Api.TryCallAsync<JsonElement>("ai_stop");
         if (!BackendBusy(r))
         {
             // 回合刚好自己收尾了（ai_stop 回 busy=false）：静默复位就行，别弹
             // 「已中断」吓人；_abandoned 保持 true，让还压在 Dispatcher 队列里的
             // ai.done 安静地走完（那条事件的复位是幂等的）
-            _streamBubble = null;
+            _roundBubble = null;
+            _round.Clear();
             _stream.Clear();
             _runChatId = "";
             _status.Text = "";
             SetBusy(false);
-            _runEnded?.TrySetResult();
+            _runEnded?.TrySetResult(null);
             _runEnded = null;
             return;
         }
@@ -268,16 +270,39 @@ public sealed class AiPage : PageBase
         r.ValueKind == JsonValueKind.Object
         && r.TryGetProperty("busy", out var b) && b.ValueKind == JsonValueKind.True;
 
+    /// <summary>
+    /// 开一个新的轮次气泡：模型每次「开口」都有自己的一段，插在工具行之间
+    /// （对齐 Qt `_open_round`）。
+    /// </summary>
+    private Bubble OpenRound(string? thinking = null)
+    {
+        _round.Clear();
+        var b = new Bubble("assistant", "…", RetryFrom);
+        b.SetThinking(thinking ?? L("正在想…"));
+        Add(b);
+        return b;
+    }
+
+    /// <summary>把当前轮次已说的话定稿在它自己的气泡里（工具行从此插在下面）。</summary>
+    private void CloseRound()
+    {
+        if (_roundBubble is null) return;
+        _roundBubble.SetText(_round.ToString());
+        _roundBubble = null;
+        _round.Clear();
+    }
+
     /// <summary>这一回合彻底完了：按钮复位、流式上下文清空、叫醒等着它结束的切换流程。</summary>
     private void ResetRunState()
     {
-        _streamBubble = null;
+        _roundBubble = null;
+        _round.Clear();
         _stream.Clear();
         _runChatId = "";
         _abandoned = false;
         _status.Text = "";
         SetBusy(false);
-        _runEnded?.TrySetResult();
+        _runEnded?.TrySetResult(null);
         _runEnded = null;
     }
 
@@ -302,7 +327,8 @@ public sealed class AiPage : PageBase
         _messages.Children.Clear();
         _toolLines.Clear();
         _taskLines.Clear();
-        _streamBubble = null;
+        _roundBubble = null;
+        _round.Clear();
         _stream.Clear();
         var chat = ActiveChat;
         if (chat is null || chat.Messages.Count == 0)
@@ -315,6 +341,12 @@ public sealed class AiPage : PageBase
         }
         foreach (var m in chat.Messages)
         {
+            if (m.Role == "user" && m.Id.StartsWith("compact_", StringComparison.Ordinal))
+            {
+                // 入库的压缩摘要：给人看的是一行小字，不是用户气泡
+                _messages.Children.Add(Ui.Small(L("较早的对话已压缩成摘要")));
+                continue;
+            }
             if (m.Role is not ("user" or "assistant" or "error")) continue;
             var text = m.Content;
             if (!string.IsNullOrWhiteSpace(m.Note) && !text.Contains(m.Note, StringComparison.Ordinal))
@@ -377,9 +409,7 @@ public sealed class AiPage : PageBase
 
         Add(new Bubble("user", text, RetryFrom));
         _stream.Clear();
-        _streamBubble = new Bubble("assistant", "…", RetryFrom);
-        _streamBubble.SetThinking(L("正在想…"));
-        Add(_streamBubble);
+        _roundBubble = OpenRound();
 
         var launch = new Dictionary<string, object?>
         {
@@ -392,7 +422,7 @@ public sealed class AiPage : PageBase
             // 调用没到后端（r 为空）或被拒：这一回合根本没开始，不会再有 ai.done / ai.fail
             // 来复位，这里就得把按钮放回去——否则「停止」亮着、「发送」灰着，永远回不来。
             var msg = r?.Message is { Length: > 0 } m ? m : L("后端没有响应，请稍后再试");
-            if (_streamBubble != null) _messages.Children.Remove(_streamBubble);
+            if (_roundBubble != null) _messages.Children.Remove(_roundBubble);
             Add(new Bubble("error", msg, RetryFrom));
             ResetRunState();
             _status.Text = msg;
@@ -482,10 +512,13 @@ public sealed class AiPage : PageBase
             // 流式 / 状态 / 确认 / 提问都是「这一回合」的东西：用户已经切到别的对话时，
             // 别把旧对话的字和工具行贴进新对话里（确认 / 提问由 ai_stop 那头代答 False / None）
             case "ai.delta":
-                if (_streamBubble is null || !RunIsDisplayed(ev)) return;
+                if (!RunIsDisplayed(ev)) return;
+                // 整回合累积供收尾；轮内文本渲进当前轮次气泡——模型在工具之间
+                // 开口时自动开新气泡，「说一段 → 干活 → 再说一段」按时间顺序交错
                 _stream.Append(ev.Text);
-                // live：<think> 没闭合时思考块自动展开走流光，闭合了就收起、正文接着长
-                _streamBubble.SetText(_stream.ToString(), live: true);
+                _round.Append(ev.Text);
+                _roundBubble ??= OpenRound();
+                _roundBubble.SetText(_round.ToString(), live: true);
                 ScrollDown();
                 break;
 
@@ -512,14 +545,22 @@ public sealed class AiPage : PageBase
                 // （bridge 端照 Qt 入了库），重建后不丢。
                 var note = StopNote(ev);
                 // 这一发同时把流式态收掉（live=false）：思考块该折的折起来、流光停下
-                if (_streamBubble != null && mine && (_stream.Length > 0 || note.Length > 0))
-                    _streamBubble.SetText(_stream.ToString() + note);
+                if (mine && (_round.Length > 0 || note.Length > 0))
+                {
+                    if (_round.Length == 0) OpenRound();
+                    var finalText = _round.ToString();
+                    if (note.Length > 0 && !finalText.Contains(note))
+                        finalText = finalText.Length > 0 ? finalText + "\n\n" + note : note;
+                    _roundBubble!.SetText(finalText);
+                }
                 ResetRunState();
                 Run(async () =>
                 {
                     _store = await Api.TryCallAsync<AiStoreDto>("ai_list_chats", null, _store) ?? _store;
                     RenderChats();
-                    RenderMessages();
+                    // 这回合是在当前视图里分段播完的：别整页重画，否则交错段落会被
+                    // 存储里的合并气泡盖掉（存储只存最终正文，重载后合并是预期）
+                    if (!mine) RenderMessages();
                 });
                 break;
             }
@@ -535,15 +576,15 @@ public sealed class AiPage : PageBase
                 var quiet = _abandoned;
                 _status.Text = ev.Stopped ? "" : ev.Text;
                 // 半路断掉的流式气泡也要收成终态：思考块别一直亮着「思考中…」
-                if (mine && _streamBubble != null && _stream.Length > 0) _streamBubble.SetText(_stream.ToString());
+                if (mine && _roundBubble != null && _round.Length > 0) _roundBubble.SetText(_round.ToString());
                 if (ev.Stopped)
                 {
-                    if (mine && _streamBubble != null && _stream.Length == 0) _streamBubble.SetText(L("已停止"));
+                    if (mine && _roundBubble != null && _round.Length == 0) _roundBubble.SetText(L("已停止"));
                     if (!quiet) Toast(L("已停止"), L("可以继续说下一句"));
                 }
                 else if (mine)
                 {
-                    if (_streamBubble != null && _stream.Length == 0) _streamBubble.SetText(ev.Text);
+                    if (_roundBubble != null && _round.Length == 0) _roundBubble.SetText(ev.Text);
                     else Add(new Bubble("error", ev.Text, RetryFrom));
                 }
                 else
@@ -634,6 +675,10 @@ public sealed class AiPage : PageBase
                 // 3.4 计划卡：模型出的结构化待办直接进对话流
                 ShowPlan(ev);
                 return;
+            case "compact":
+                // 上下文压缩（autocompact / 截断摘要）：对话流里一行小字，别静默
+                Add(Ui.Small(L("较早的对话已压缩成摘要")));
+                return;
             case "checkpoint_warn":
             {
                 // 快照失败：本轮改动不可回滚，用户必须知道（对齐 Qt 的 InfoBar 告警）
@@ -655,7 +700,7 @@ public sealed class AiPage : PageBase
             }
             case "thinking":
                 _status.Text = L("思考中…");
-                if (_stream.Length == 0) _streamBubble?.SetThinking(L("正在想…"));
+                if (_round.Length == 0) OpenRound();
                 return;
             case "think":
             {
@@ -665,25 +710,29 @@ public sealed class AiPage : PageBase
                     && at.ValueKind == JsonValueKind.True;
                 var hint = afterTools ? L("搜完了，正在整理…") : L("正在想…");
                 _status.Text = afterTools ? L("搜完了，正在整理…") : L("思考中…");
-                if (_stream.Length == 0) _streamBubble?.SetThinking(hint);
+                if (_round.Length == 0) OpenRound(hint);
                 return;
             }
             case "tool":
                 if (ev.Name == "ask_user")
                 {
-                    if (_stream.Length == 0) _streamBubble?.SetText(L("请在下面选一下"));
+                    if (_round.Length == 0) OpenRound(L("请在下面选一下"));
                     return;
                 }
+                // 工具要开工了：这一轮说的话就地定稿，工具行插在它下面
+                CloseRound();
                 Line(name, L("准备：") + label, ToolState.Prepare);
                 _status.Text = L("正在执行操作…");
                 return;
             case "tool_start":
             case "tool_run":
+                CloseRound();
                 Line(name, L("执行中：") + label, ToolState.Running);
                 _status.Text = L("正在执行操作…");
                 return;
             case "tool_done":
             {
+                CloseRound();
                 var line = Line(name, L("完成：") + label, ToolState.Done);
                 var tid = TaskIdOf(ev);
                 if (tid.Length > 0)
@@ -695,6 +744,7 @@ public sealed class AiPage : PageBase
                 return;
             }
             case "tool_skip":
+                CloseRound();
                 Line(name, L("已跳过：") + label, ToolState.Skipped);
                 return;
             default:
@@ -774,6 +824,8 @@ public sealed class AiPage : PageBase
     // ==================== 内联确认卡 ====================
     private void ShowConfirm(BridgeEvent ev)
     {
+        // 确认卡落在最后一段话下面：先把手头这段话封口
+        CloseRound();
         var label = string.IsNullOrWhiteSpace(ev.Label) ? ev.Name : ev.Label;
         var name = ev.Name ?? "";
         var reason = ev.Payload.ValueKind == JsonValueKind.Object
@@ -812,6 +864,8 @@ public sealed class AiPage : PageBase
     // ==================== 内联提问卡 ====================
     private void ShowAsk(BridgeEvent ev)
     {
+        // 提问卡落在最后一段话下面：先把手头这段话封口
+        CloseRound();
         if (ev.Payload.ValueKind != JsonValueKind.Object ||
             !ev.Payload.TryGetProperty("questions", out var qs) || qs.ValueKind != JsonValueKind.Array)
         {
@@ -892,7 +946,7 @@ internal sealed class AiPermissionPanel : Border
 
     private async Task SaveModeAsync()
     {
-        var idx = Math.Clamp(_mode.SelectedIndex, 0, Modes.Length - 1);
+        var idx = Clamp.Of(_mode.SelectedIndex, 0, Modes.Length - 1);
         await AppServices.Client.CallAsync<object>("save_settings", new
         {
             data = new Dictionary<string, object?>
@@ -906,7 +960,7 @@ internal sealed class AiPermissionPanel : Border
 
     private async Task AddRuleAsync()
     {
-        var behavior = new[] { "allow", "deny", "ask" }[Math.Clamp(_behavior.SelectedIndex, 0, 2)];
+        var behavior = new[] { "allow", "deny", "ask" }[Clamp.Of(_behavior.SelectedIndex, 0, 2)];
         var instance = _scope.SelectedIndex == 1 ? _instance : "";
         await AppServices.Client.CallAsync<List<AiPermissionRuleDto>>("ai_permission_rule_add", new
         {
@@ -1068,12 +1122,12 @@ internal sealed class Bubble : Border
             var j = rest.IndexOf("</think>", i + 7, StringComparison.OrdinalIgnoreCase);
             if (j < 0)
             {
-                parts.Add(rest[(i + 7)..]);
+                parts.Add(rest.Substring(i + 7));
                 rest = "";
                 break;
             }
-            parts.Add(rest[(i + 7)..j]);
-            rest = rest[(j + 8)..];
+            parts.Add(rest.Substring(i + 7, j - i - 7));
+            rest = rest.Substring(j + 8);
         }
         answer.Append(rest);
         return (parts, answer.ToString().Trim());
@@ -1222,10 +1276,12 @@ internal sealed class ToolLine : Border
     private readonly ProgressBar _bar;
     private readonly ContentControl _icon = new() { Width = 16, Height = 16, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 1, 0, 0) };
     private readonly string? _typeIcon;
+    private readonly string? _tool;
     private ToolState _state = ToolState.Prepare;
 
     public ToolLine(string text, string? tool = null)
     {
+        _tool = tool;
         _typeIcon = Lucide.ToolIcon(tool);
         _label = Ui.Small(text).Wrap();
         _label.SetResourceReference(TextBlock.ForegroundProperty, "B.AccentDeep");
@@ -1255,14 +1311,24 @@ internal sealed class ToolLine : Border
 
     private void SyncIcon()
     {
+        // 任何状态都显示工具自己的图标（生成图 / 类型图），状态靠颜色区分：
+        // 执行中绿色流光、完成绿、跳过灰、失败红；没有映射的才退状态图标/转圈。
         var running = _state is ToolState.Prepare or ToolState.Running;
         Lucide.Shimmer(_label, running, "B.AccentDeep");
+        var hasAsset = !string.IsNullOrEmpty(_tool) && LucideAssets.Icons.ContainsKey(_tool);
         _icon.Content = _state switch
         {
+            ToolState.Prepare or ToolState.Running when hasAsset => Lucide.Asset(_tool!, 16, "B.AccentDeep"),
             ToolState.Prepare or ToolState.Running when _typeIcon != null => Lucide.Icon(_typeIcon, 16, "B.AccentDeep"),
             ToolState.Prepare or ToolState.Running => Lucide.Spinner(16, "B.AccentDeep"),
+            ToolState.Done when hasAsset => Lucide.Asset(_tool!, 16, "B.AccentDeep"),
+            ToolState.Done when _typeIcon != null => Lucide.Icon(_typeIcon, 16, "B.AccentDeep"),
             ToolState.Done => Lucide.Icon(Lucide.CircleCheck, 16, "B.AccentDeep"),
+            ToolState.Skipped when hasAsset => Lucide.Asset(_tool!, 16, "B.InkMuted"),
+            ToolState.Skipped when _typeIcon != null => Lucide.Icon(_typeIcon, 16, "B.InkMuted"),
             ToolState.Skipped => Lucide.Icon(Lucide.CircleSlash2, 16, "B.InkMuted"),
+            _ when hasAsset => Lucide.Asset(_tool!, 16, "B.Danger"),
+            _ when _typeIcon != null => Lucide.Icon(_typeIcon, 16, "B.Danger"),
             _ => Lucide.Icon(Lucide.CircleX, 16, "B.Danger"),
         };
     }
@@ -1278,7 +1344,7 @@ internal sealed class ToolLine : Border
     {
         _bar.Visibility = Visibility.Visible;
         _bar.IsIndeterminate = total <= 0;
-        if (total > 0) Motion.Progress(_bar, Math.Clamp(current * 100.0 / total, 0, 100));
+        if (total > 0) Motion.Progress(_bar, Clamp.Of(current * 100.0 / total, 0, 100));
         Fmt.SplitMsg(message, out var status, out _);
         if (!string.IsNullOrEmpty(status)) _label.Text = status;
     }
@@ -1532,7 +1598,7 @@ internal sealed class ChatInput : TextBox
     private void Grow()
     {
         var want = (LineCount <= 0 ? 1 : LineCount) * FontSize * 1.6 + 22;
-        Height = Math.Clamp(want, MinH, MaxH);
+        Height = Clamp.Of(want, MinH, MaxH);
     }
 
     protected override void OnPreviewKeyDown(KeyEventArgs e)

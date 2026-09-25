@@ -173,7 +173,7 @@ public sealed class SmoothScroll : ScrollViewer
         }
         e.Handled = true;
         var start = _target < 0 ? VerticalOffset : _target;
-        var next = Math.Clamp(start - e.Delta * 0.95, 0, ScrollableHeight);
+        var next = Clamp.Of(start - e.Delta * 0.95, 0, ScrollableHeight);
         _target = next;
         var an = new DoubleAnimation(VerticalOffset, next, TimeSpan.FromMilliseconds(230))
         {
@@ -234,8 +234,8 @@ public static class Fmt
         if (string.IsNullOrEmpty(status)) return;
         var i = status.IndexOf("  |  ", StringComparison.Ordinal);
         if (i < 0) return;
-        speed = status[(i + 5)..].Trim();
-        status = status[..i].Trim(' ', '·');
+        speed = status.Substring(i + 5).Trim();
+        status = status.Substring(0, i).Trim(' ', '·');
     }
 }
 
@@ -298,12 +298,12 @@ public static class Ui
     private static IEnumerable<GridLength> Parse(string? spec)
     {
         if (string.IsNullOrWhiteSpace(spec)) yield break;
-        foreach (var raw in spec.Split(',', StringSplitOptions.RemoveEmptyEntries))
+        foreach (var raw in spec.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
         {
             var s = raw.Trim();
             if (s == "Auto") yield return GridLength.Auto;
             else if (s == "*") yield return new GridLength(1, GridUnitType.Star);
-            else if (s.EndsWith('*') && double.TryParse(s[..^1], out var st)) yield return new GridLength(st, GridUnitType.Star);
+            else if (s.EndsWith('*') && double.TryParse(s.Substring(0, s.Length - 1), out var st)) yield return new GridLength(st, GridUnitType.Star);
             else if (double.TryParse(s, out var px)) yield return new GridLength(px);
             else yield return GridLength.Auto;
         }
@@ -493,7 +493,7 @@ public static class Ui
             Style = S("Sld"),
             Minimum = min,
             Maximum = max,
-            Value = Math.Clamp(value, min, max),
+            Value = Clamp.Of(value, min, max),
             TickFrequency = tick,
             IsSnapToTickEnabled = tick > 0,
         };

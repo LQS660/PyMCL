@@ -712,6 +712,33 @@ def _default_account(backend, accounts) -> str:
     return ms[0] if ms else tr(_OFFLINE_KEY)
 
 
+# 无参数句式的工具 → 状态行人话名（准备/执行中/完成那条）。
+# 以前兜底是「执行 get_latest_log」，等于把裸工具名怼给用户。
+_TOOL_LABELS = {
+    "diagnose_launch": "诊断启动",
+    "get_crash_report": "读崩溃报告",
+    "get_installed_versions": "查已装版本",
+    "get_java_list": "查 Java 列表",
+    "get_launcher_state": "查启动器状态",
+    "get_latest_log": "读最新日志",
+    "inspect_mod": "检查模组",
+    "list_installed_versions": "查已装版本",
+    "list_instances": "查实例列表",
+    "list_mod_configs": "查模组配置",
+    "list_mods": "查模组列表",
+    "read_artifact": "读文件",
+    "read_mod_config": "读模组配置",
+    "scan_mod_conflicts": "扫描模组冲突",
+    "search_content": "搜内容",
+    "search_modpacks": "搜整合包",
+    "search_mods": "搜模组",
+    "search_versions": "搜版本",
+    "search_worlds": "搜地图",
+    "dispatch_subagent": "派发子任务",
+    "update_plan": "更新计划",
+}
+
+
 def confirm_label(name: str, args: dict) -> str:
     """确认卡上的一句话。原样透传到 Qt / WPF 的确认卡，所以在这里就要按界面语言翻好。"""
     inst = args.get("instance") or tr("默认实例")
@@ -737,7 +764,7 @@ def confirm_label(name: str, args: dict) -> str:
         return args.get("prompt") or args.get("title") or tr("请选择")
     template = fmt.get(name)
     if template is None:
-        return tr("执行 {name}").format(name=name)
+        return tr(_TOOL_LABELS.get(name, name))
     fields = {
         "inst": inst,
         "version": args.get("version") or (tr("当前版本") if name == "launch_game" else ""),

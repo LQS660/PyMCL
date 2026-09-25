@@ -105,7 +105,7 @@ public partial class MainWindow : Window
         });
     }
 
-    private readonly TaskCompletionSource _bridgeSettled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<object?> _bridgeSettled = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <summary>连桥这件事有结果了（连上或确定连不上）。冒烟脚本靠它决定什么时候开始逐页走。</summary>
     public Task BridgeSettled => _bridgeSettled.Task;
@@ -133,7 +133,7 @@ public partial class MainWindow : Window
             // 壁纸配置也在 config.json 里（ui_background*），跟 Qt / 网页版是同一份
             await Wallpaper.ReloadAsync();
             await ReloadCurrentAsync();
-            _bridgeSettled.TrySetResult();
+            _bridgeSettled.TrySetResult(null);
             // 第一次开：先把目录 / 下载源问清楚，顺带指一遍容易错过的功能。
             // 冒烟模式跳过——它是个等人点的框，无人值守时会把整轮挂死。
             if (!Smoke.Active) await FirstRunWizard.MaybeShowAsync();
@@ -144,7 +144,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             SetBridgeState(L("未连接"), "B.Danger");
-            _bridgeSettled.TrySetResult();
+            _bridgeSettled.TrySetResult(null);
             if (Smoke.Active)
             {
                 // 冒烟要的就是「桥没起来会不会崩」这条降级路径，不能在这儿停下来等人选
@@ -422,7 +422,7 @@ public partial class MainWindow : Window
         bar.SetResourceReference(Border.BackgroundProperty, accent);
         var texts = Ui.V(2,
             Ui.Txt(title, 13, true).Wrap(),
-            string.IsNullOrWhiteSpace(body) ? null : Ui.Muted(body.Length > 220 ? body[..220] + "…" : body));
+            string.IsNullOrWhiteSpace(body) ? null : Ui.Muted(body.Length > 220 ? body.Substring(0, 220) + "…" : body));
         texts.MaxWidth = 300;
         var card = new Border
         {

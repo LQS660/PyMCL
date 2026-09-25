@@ -52,7 +52,7 @@ public static class I18nCheck
         var ignoredFiles = new List<string>();
         foreach (var file in Directory.EnumerateFiles(srcDir, "*.cs", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.Ordinal))
         {
-            var rel = Path.GetRelativePath(srcDir, file).Replace('\\', '/');
+            var rel = PyPath.GetRelativePath(srcDir, file).Replace('\\', '/');
             if (rel.StartsWith("obj/", StringComparison.Ordinal) || rel.StartsWith("bin/", StringComparison.Ordinal)) continue;
             files++;
             var text = File.ReadAllText(file);
@@ -112,7 +112,7 @@ public static class I18nCheck
     private static string Shorten(string s)
     {
         s = s.Replace("\n", "\\n").Replace("\r", "\\r").Replace("\t", "\\t");
-        return s.Length > 80 ? s[..80] + "…" : s;
+        return s.Length > 80 ? s.Substring(0, 80) + "…" : s;
     }
 
     public static bool HasCjk(string s)
@@ -288,11 +288,11 @@ public static class I18nCheck
             case 'f': sb.Append('\f'); return i + 2;
             case 'v': sb.Append('\v'); return i + 2;
             case 'u':
-                if (i + 6 <= s.Length && int.TryParse(s.AsSpan(i + 2, 4), System.Globalization.NumberStyles.HexNumber, null, out var u))
+                if (i + 6 <= s.Length && int.TryParse(s.Substring(i + 2, 4), System.Globalization.NumberStyles.HexNumber, null, out var u))
                 { sb.Append((char)u); return i + 6; }
                 break;
             case 'U':
-                if (i + 10 <= s.Length && int.TryParse(s.AsSpan(i + 2, 8), System.Globalization.NumberStyles.HexNumber, null, out var big))
+                if (i + 10 <= s.Length && int.TryParse(s.Substring(i + 2, 8), System.Globalization.NumberStyles.HexNumber, null, out var big))
                 { sb.Append(char.ConvertFromUtf32(big)); return i + 10; }
                 break;
             case 'x':

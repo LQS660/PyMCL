@@ -1,7 +1,9 @@
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using Path = System.Windows.Shapes.Path;
 
@@ -91,6 +93,33 @@ public static class Lucide
             RepeatBehavior = RepeatBehavior.Forever,
         });
         return p;
+    }
+
+    /// <summary>
+    /// 生成图标（gpt-image-2.5 出图，base64 内嵌在 LucideAssets）：用位图的 alpha 通道
+    /// 做 OpacityMask 套主题色，与线稿图标同一视觉；没有该工具的资产时退回转圈。
+    /// </summary>
+    public static FrameworkElement Asset(string tool, double size = 16, string brushKey = "B.AccentDeep")
+    {
+        if (!LucideAssets.Icons.TryGetValue(tool ?? "", out var bytes))
+            return Spinner(size, brushKey);
+        var bi = new BitmapImage();
+        using (var ms = new MemoryStream(bytes))
+        {
+            bi.BeginInit();
+            bi.CacheOption = BitmapCacheOption.OnLoad;
+            bi.EndInit();
+        }
+        bi.Freeze();
+        var rect = new Rectangle
+        {
+            Width = size,
+            Height = size,
+            IsHitTestVisible = false,
+        };
+        rect.SetResourceReference(Shape.FillProperty, brushKey);
+        rect.OpacityMask = new ImageBrush { ImageSource = bi, Stretch = Stretch.Uniform };
+        return rect;
     }
 
     /// <summary>把 chevron 转到 open 对应的角度（右 → 下），带一小段过渡。</summary>

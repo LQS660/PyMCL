@@ -274,10 +274,20 @@ def _flush_complete_tools(acc: dict) -> list | None:
 def _assemble_stream(resp, expect_usage: bool = False) -> Iterator[dict]:
     tool_acc = {}
     got_delta = False
+    in_reasoning = False
     pending_done = None
     pending_tools = None   # finish_reason=tool_calls 时缓存，等 usage/[DONE] 一起发
     last_usage = None
     resp.encoding = "utf-8"
+
+    def close_reasoning() -> str:
+        """思考流还没收尾就转正文 / 工具轮 / 流结束时，在这里补 </think>。"""
+        nonlocal in_reasoning
+        if in_reasoning:
+            in_reasoning = False
+            return "</think>"
+        return ""
+
     try:
         lines = resp.iter_lines(decode_unicode=False)
         for raw in lines:
@@ -289,6 +299,9 @@ def _assemble_stream(resp, expect_usage: bool = False) -> Iterator[dict]:
             if not line:
                 continue   # 空载荷 / 心跳行不是流结束，只有 [DONE] 才是
             if line == "[DONE]":
+                tail = close_reasoning()
+                if tail:
+                    yield {"type": "delta", "text": tail}
                 tools = _flush_complete_tools(tool_acc) if tool_acc else None
                 if tools:
                     pending_tools = tools
@@ -324,8 +337,21 @@ def _assemble_stream(resp, expect_usage: bool = False) -> Iterator[dict]:
                 continue
             choice = choices[0]
             delta = choice.get("delta") or {}
+            # DeepSeek 风格的思考流：reasoning_content 是独立字段（不走 content）。
+            # 包成 <think> 内联进正文流，两端气泡里的思考折叠块无需改动即可识别；
+            # 以前这个字段被直接丢弃，用户永远看不到思考过程。
+            rc = delta.get("reasoning_content")
+            if isinstance(rc, str) and rc:
+                if not in_reasoning:
+                    in_reasoning = True
+                    got_delta = True
+                    yield {"type": "delta", "text": "<think>"}
+                yield {"type": "delta", "text": _decode_sse_line(rc)}
             text = delta.get("content")
             if text:
+                tail = close_reasoning()
+                if tail:
+                    yield {"type": "delta", "text": tail}
                 got_delta = True
                 yield {"type": "delta", "text": _decode_sse_line(text)}
             for tc in delta.get("tool_calls") or []:
@@ -340,6 +366,9 @@ def _assemble_stream(resp, expect_usage: bool = False) -> Iterator[dict]:
                     slot["arguments"] += fn["arguments"]
             reason = choice.get("finish_reason")
             if reason == "tool_calls":
+                tail = close_reasoning()
+                if tail:
+                    yield {"type": "delta", "text": tail}
                 tools = _flush_complete_tools(tool_acc)
                 if tools:
                     # 不在这里 return：usage 包通常跟在 finish_reason 之后、
@@ -350,11 +379,17 @@ def _assemble_stream(resp, expect_usage: bool = False) -> Iterator[dict]:
                 return
             if reason in ("stop", "length"):
                 # 请求了 usage 时等 [DONE]：usage 包在最后一个内容包之后
+                tail = close_reasoning()
+                if tail:
+                    yield {"type": "delta", "text": tail}
                 if expect_usage:
                     pending_done = {"type": "done", "finish_reason": reason}
                     continue
                 yield {"type": "done", "finish_reason": reason}
                 return
+        tail = close_reasoning()
+        if tail:
+            yield {"type": "delta", "text": tail}
         tools = _flush_complete_tools(tool_acc) if tool_acc else None
         if tools:
             pending_tools = tools
@@ -488,8 +523,13 @@ def chat_once(settings: dict, messages: list, tools: list | None = None,
     if not isinstance(choice, dict):
         choice = {}
     msg = choice.get("message") or {}
+    # 非流式兜底同样把思考段包成 <think> 内联，两端 UI 用同一套折叠逻辑
+    content = msg.get("content") or ""
+    rc = msg.get("reasoning_content")
+    if isinstance(rc, str) and rc:
+        content = f"<think>{rc}</think>{content}"
     return {
-        "content": msg.get("content") or "",
+        "content": content,
         "tool_calls": msg.get("tool_calls") or [],
         "finish_reason": choice.get("finish_reason") or "stop",
         "usage": data.get("usage") or {},

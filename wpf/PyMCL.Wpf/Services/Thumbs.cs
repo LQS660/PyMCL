@@ -117,7 +117,7 @@ public sealed class ThumbTile : Border
         CornerRadius = new CornerRadius(radius);
         ClipToBounds = true;
         SetResourceReference(BackgroundProperty, "B.AccentSoft");
-        _letter = Ui.Txt(string.IsNullOrEmpty(text) ? "?" : text[..1].ToUpperInvariant(),
+        _letter = Ui.Txt(string.IsNullOrEmpty(text) ? "?" : text.Substring(0, 1).ToUpperInvariant(),
             Math.Max(12, size * 0.4), true, "B.AccentDeep").Center();
         _letter.VerticalAlignment = VerticalAlignment.Center;
         var g = new Grid();

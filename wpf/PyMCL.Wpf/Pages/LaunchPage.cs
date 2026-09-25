@@ -610,7 +610,7 @@ public sealed class LaunchPage : PageBase
             var s = await Api.TryCallAsync<Dictionary<string, System.Text.Json.JsonElement>>("get_settings");
             if (s != null)
             {
-                if (s.TryGetValue("default_memory_mb", out var m) && m.TryGetInt32(out var mb)) _mem.Value = Math.Clamp(mb, 1024, 32768);
+                if (s.TryGetValue("default_memory_mb", out var m) && m.TryGetInt32(out var mb)) _mem.Value = Clamp.Of(mb, 1024, 32768);
                 if (s.TryGetValue("default_resolution", out var r) && r.ValueKind == System.Text.Json.JsonValueKind.Array && r.GetArrayLength() >= 2)
                 {
                     _wBox.Text = r[0].ToString();
@@ -784,9 +784,9 @@ public sealed class LaunchPage : PageBase
             try
             {
                 var body = !string.IsNullOrWhiteSpace(path) && File.Exists(path)
-                    ? await File.ReadAllTextAsync(path)
+                    ? await Task.Run(() => File.ReadAllText(path))
                     : L("未设置自定义主页。到设置 → 启动页主页 填本地 HTML 路径。");
-                _newsHost.Children.Add(Ui.Muted(body.Length > 2000 ? body[..2000] + "…" : body));
+                _newsHost.Children.Add(Ui.Muted(body.Length > 2000 ? body.Substring(0, 2000) + "…" : body));
             }
             catch (Exception ex) { _newsHost.Children.Add(Ui.Muted(L("读不了自定义主页：") + ex.Message)); }
             return;
@@ -949,7 +949,7 @@ public sealed class LaunchPage : PageBase
         if (string.IsNullOrEmpty(server)) return null;
         var i = server.LastIndexOf(':');
         return i > 0
-            ? new[] { "--server", server[..i], "--port", server[(i + 1)..] }
+            ? new[] { "--server", server.Substring(0, i), "--port", server.Substring(i + 1) }
             : new[] { "--server", server, "--port", "25565" };
     }
 
@@ -1125,7 +1125,7 @@ public sealed class LaunchPage : PageBase
         {
             _crashShown = true;
             var report = ev.Crash ?? new CrashReport { Title = ev.Title, Detail = ev.Message, TaskId = ev.TaskId };
-            Run(() => HandleCrashAsync(report));
+            Run(() => HandleCrashAsync(report, gameError: true));
         }
 
         // game_started / game_exited 不带 task_id，只在本页有启动任务在跑时认领。
@@ -1173,7 +1173,7 @@ public sealed class LaunchPage : PageBase
                         Detail = ev.Message,
                         Instance = _inst.Str(),
                         Version = _ver.Str(),
-                    }));
+                    }, gameError: true));
                 }
                 _taskId = null;
                 _ = LoadPlaytimeAsync();
@@ -1181,9 +1181,9 @@ public sealed class LaunchPage : PageBase
         }
     }
 
-    private async Task HandleCrashAsync(CrashReport report)
+    private async Task HandleCrashAsync(CrashReport report, bool gameError = false)
     {
-        var relaunch = await CrashUi.ShowAsync(report);
+        var relaunch = await CrashUi.ShowAsync(report, gameError);
         if (relaunch) await LaunchAsync();
     }
 
@@ -1195,7 +1195,7 @@ public sealed class LaunchPage : PageBase
         _logLines.Add(text);
         if (_logLines.Count > MaxLines) _logLines.RemoveRange(0, _logLines.Count - MaxLines);
         var atEnd = _log.VerticalOffset >= _log.ExtentHeight - _log.ViewportHeight - 24;
-        _log.Text = string.Join('\n', _logLines);
+        _log.Text = string.Join("\n", _logLines);
         if (atEnd) _log.ScrollToEnd();
     }
 

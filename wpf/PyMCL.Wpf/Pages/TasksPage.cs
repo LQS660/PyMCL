@@ -142,7 +142,8 @@ public sealed class TasksPage : PageBase
                 return;
             }
             if (string.IsNullOrEmpty(report.TaskId)) report.TaskId = row.Id;
-            await CrashUi.ShowAsync(report);
+            // 任务页重看的都是启动任务的崩溃报告，同属游戏侧报错：给 AI 修复入口
+            await CrashUi.ShowAsync(report, gameError: true);
         });
         toggle.Click += (_, _) =>
         {

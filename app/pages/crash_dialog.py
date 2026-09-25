@@ -17,10 +17,15 @@ from ..pcl_chrome import Theme
 
 class CrashDialog(QDialog):
     def __init__(self, report: dict | None = None, parent=None, *,
-                 title: str = "", detail: str = "", backend=None):
+                 title: str = "", detail: str = "", backend=None,
+                 game_error: bool = False):
         super().__init__(parent)
         self.report = report or {}
         self.backend = backend or getattr(parent, "backend", None)
+        # 只有游戏侧的报错（崩溃 / 启动失败）才给「交给 AI 修复」；启动器
+        # 自身的未捕获异常交给 AI 没有意义（它改不了启动器代码）
+        self.game_error = bool(game_error)
+        self.want_ai_fix = False
         self.setWindowTitle(title or self.report.get("title") or tr("Minecraft 出现错误"))
         self.setMinimumSize(560, 420)
         self.resize(640, 520)
@@ -68,6 +73,9 @@ class CrashDialog(QDialog):
 
         btns = QHBoxLayout()
         btns.addStretch(1)
+        self.ai_btn = PrimaryPushButton(tr("交给 AI 修复"), self)
+        self.ai_btn.setToolTip(tr("把这份报错直接交给 AI 助手诊断和修复"))
+        self.ai_btn.clicked.connect(self._ai_fix)
         self.relaunch_btn = PushButton(tr("重新启动"), self)
         self.ok_btn = PrimaryPushButton(tr("确定"), self)
         self.view_btn = PushButton(tr("查看输出"), self)
@@ -84,6 +92,8 @@ class CrashDialog(QDialog):
         self.relaunch_btn.setVisible(can_relaunch)
         self.view_btn.setVisible(has_file)
         self.export_btn.setVisible(bool(self.report))
+        self.ai_btn.setVisible(self.game_error)
+        btns.addWidget(self.ai_btn)
         btns.addWidget(self.relaunch_btn)
         btns.addWidget(self.view_btn)
         btns.addWidget(self.export_btn)
@@ -93,6 +103,12 @@ class CrashDialog(QDialog):
 
     def _relaunch(self):
         self.want_relaunch = True
+        self.accept()
+
+    def _ai_fix(self):
+        # 先关掉报错框再开小窗：报错框是模态的，开着会把小窗的输入一起锁死；
+        # 报告全文已经作为首条消息喂给 AI，关掉不丢信息
+        self.want_ai_fix = True
         self.accept()
 
     def _run_action(self, action: dict, btn: PushButton | None = None):

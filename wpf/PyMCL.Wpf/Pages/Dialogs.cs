@@ -11,7 +11,7 @@ namespace PyMCL.Pages;
 /// <summary>崩溃分析弹窗。后端给什么修复动作就渲染什么按钮，点了直接调 apply_crash_action。</summary>
 public static class CrashUi
 {
-    public static async Task<bool> ShowAsync(CrashReport report)
+    public static async Task<bool> ShowAsync(CrashReport report, bool gameError = false)
     {
         var api = AppServices.Client;
         var relaunch = false;
@@ -59,6 +59,17 @@ public static class CrashUi
                 finally { b.IsEnabled = true; }
             }, L("处理失败"));
             actionRow.Children.Add(b);
+        }
+
+        // 游戏侧报错（崩溃 / 启动失败）才有 AI 修复：独立小窗，不关本弹窗，
+        // 用户可以边看报告边看 AI 的对话流。启动器自身错误不走这里。
+        if (gameError)
+        {
+            var ai = Ui.Btn(L("交给 AI 修复"), BtnKind.Primary, glyph: Ico.Robot);
+            ai.Margin = new Thickness(0, 0, 7, 7);
+            ai.ToolTip = L("把这份报错直接交给 AI 助手诊断和修复");
+            ai.Click += (_, _) => new AiFixWindow(report).Show();
+            actionRow.Children.Add(ai);
         }
 
         void Extra(string text, string glyph, Func<Task> act)

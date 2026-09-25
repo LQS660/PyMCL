@@ -2811,7 +2811,8 @@ class BackendAPI:
         self._ai_ask_ev.set()
         return {"ok": True}
 
-    def ai_send(self, text: str, chat_id: str = "", launch: dict | None = None) -> dict:
+    def ai_send(self, text: str, chat_id: str = "", launch: dict | None = None,
+                context: str | None = None) -> dict:
         # 检查-置位放在同一把锁里：连点两次「发送」不能并发起两条 run
         with self._ai_lock:
             if self._ai_busy:
@@ -2821,7 +2822,7 @@ class BackendAPI:
             self._ai_steer = []
         self._ui_launch = dict(launch or {})
         t = threading.Thread(
-            target=self._ai_run, args=(text, chat_id), daemon=True, name="ai-send")
+            target=self._ai_run, args=(text, chat_id, context), daemon=True, name="ai-send")
         t.start()
         return {"ok": True, "started": True}
 
@@ -2839,7 +2840,7 @@ class BackendAPI:
             self._ai_steer.append(text)
         return {"ok": True, "queued": len(self._ai_steer)}
 
-    def _ai_run(self, text: str, chat_id: str):
+    def _ai_run(self, text: str, chat_id: str, context: str | None = None):
         from mclauncher.ai import store as chat_store
         from mclauncher.ai.agent import AgentCancelled, run_agent
         from mclauncher.ai.client import AIClientError, HttpCancel
@@ -2957,16 +2958,20 @@ class BackendAPI:
                 self._ai_steer = []
             return out
 
-        def _turn_trajectory(reply) -> list:
-            """本回合的工具轨迹（assistant.tool_calls + tool 回执），入库给下一轮模型看。"""
-            out = []
+        def _turn_compact_and_trajectory(reply) -> tuple:
+            """(压缩摘要消息, 工具轨迹)。摘要（id=compact_*）入库且插在用户这句
+            之前：下一轮 _trim_history 在被裁段里找到它就直接复用，不再每回合
+            重新摘要；autocompact 的摘要同样靠它活过回合结束。"""
+            compacts, rows = [], []
             for m in (getattr(reply, "turn_messages", None) or []):
                 if not isinstance(m, dict):
                     continue
                 role = m.get("role")
                 if role == "tool" or (role == "assistant" and m.get("tool_calls")):
-                    out.append(dict(m))
-            return out
+                    rows.append(dict(m))
+                elif role == "user" and str(m.get("id") or "").startswith("compact_"):
+                    compacts.append(dict(m))
+            return compacts, rows
 
         def release():
             # 先放开 busy 再发收尾事件：前端收到 ai.done / ai.fail 往往立刻回查
@@ -3006,6 +3011,10 @@ class BackendAPI:
         # trace 全落 active.jsonl 一份，几条对话的轨迹搅在一起。
         settings = dict(self.get_settings())
         settings["ai_session_id"] = run_cid or "active"
+        # 「交给 AI 修复」小窗带来的隐藏上下文（崩溃报告）：只进模型请求，
+        # 不入库、不出现在对话历史；WPF 主 AI 页不传 context，行为不变
+        if context:
+            settings["ai_extra_context"] = str(context)
         try:
             reply = run_agent(
                 self, settings, history, text,
@@ -3029,8 +3038,9 @@ class BackendAPI:
             final = {"role": "assistant", "content": body}
             if note:
                 final["note"] = note
-            fresh = persist([{"role": "user", "content": text}]
-                            + _turn_trajectory(reply) + [final])
+            turn_compacts, turn_traj = _turn_compact_and_trajectory(reply)
+            fresh = persist(turn_compacts + [{"role": "user", "content": text}]
+                            + turn_traj + [final])
             release()
             # 3.4 本回合出了待办计划就随会话持久化，WPF 重开程序也能恢复
             try:

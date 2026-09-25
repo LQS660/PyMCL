@@ -303,7 +303,7 @@ public static class NavModel
         if (!groups.Any(g => g.Keys.Count > 0))
             return GroupedNav.Select(g => new NavGroup { Title = g.Title, Keys = new List<string>(g.Keys) }).ToList();
         var missing = TopKeys.Where(k => !seen.Contains(k)).ToList();
-        if (missing.Count > 0) groups[^1].Keys.AddRange(missing);
+        if (missing.Count > 0) groups[groups.Count - 1].Keys.AddRange(missing);
         return groups;
     }
 
@@ -565,7 +565,7 @@ public static class NavModel
             var groups = GroupedLayout(cfg);
             var anchor = target != null && groups.Any(g => g.Keys.Contains(target)) ? target : "more";
             var landed = MoveWithinGroups(groups, key, anchor, anchor == target ? before : true);
-            if (!landed) groups[^1].Keys.Add(key);
+            if (!landed) groups[groups.Count - 1].Keys.Add(key);
             foreach (var (k, v) in GroupedLayoutPatch(groups)) patch[k] = v;
         }
         else

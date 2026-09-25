@@ -207,7 +207,7 @@ public static class Motion
     /// <summary>进度条平滑推进，避免数字跳变造成的顿挫。</summary>
     public static void Progress(ProgressBar bar, double value)
     {
-        value = Math.Clamp(value, 0, 100);
+        value = Clamp.Of(value, 0, 100);
         if (!Enabled)
         {
             bar.BeginAnimation(RangeBase.ValueProperty, null);

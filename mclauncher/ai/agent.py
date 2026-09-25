@@ -42,17 +42,64 @@ class AgentCancelled(Exception):
     pass
 
 
-def _trim_history(history: list) -> list:
-    if len(history) <= MAX_HISTORY:
-        trimmed = list(history)
-    else:
-        trimmed = list(history[-MAX_HISTORY:])
-    # 切片不能从孤立的 tool 消息开始（它前面的 assistant.tool_calls 被切掉了）
+def _is_compact_msg(m) -> bool:
+    """压缩摘要消息（autocompact 的 compact_<idx> / 截断摘要的 compact_h<len>）。"""
+    return isinstance(m, dict) and bool(str(m.get("id") or "").startswith("compact_"))
+
+
+def _drop_orphan_tool_head(msgs: list) -> list:
+    """切片不能从孤立的 tool 消息开始（它前面的 assistant.tool_calls 被切掉了）。"""
     i = 0
-    while i < len(trimmed) and isinstance(trimmed[i], dict) \
-            and trimmed[i].get("role") == "tool":
+    while i < len(msgs) and isinstance(msgs[i], dict) \
+            and msgs[i].get("role") == "tool":
         i += 1
-    return trimmed[i:]
+    return msgs[i:]
+
+
+def _trim_history(history: list, summarize=None) -> tuple:
+    """裁剪上一轮历史：超过 MAX_HISTORY 的头部换成一条摘要消息放回保留区开头。
+
+    静默切片是跨回合失忆的真正来源：被切掉的头部一步一丢、没有任何补偿。
+    summarize 传入时，被裁部分（连同已滑出窗口的上一条摘要，摘要的摘要）
+    总结成一条 [历史摘要] 消息；请求失败退回旧行为（静默截断），绝不阻断回合。
+    返回 (保留区, 摘要消息或 None)。
+    """
+    history = list(history or [])
+    if len(history) <= MAX_HISTORY:
+        return _drop_orphan_tool_head(history), None
+    dropped = history[:-MAX_HISTORY]
+    kept = history[-MAX_HISTORY:]
+    kept = _drop_orphan_tool_head(kept)
+    if summarize is None:
+        return kept, None
+    prev_idx = -1
+    for idx, m in enumerate(dropped):
+        if _is_compact_msg(m):
+            prev_idx = idx
+    prev = dropped[prev_idx] if prev_idx >= 0 else None
+    if prev_idx >= 0:
+        fresh = [m for m in dropped[prev_idx + 1:] if not _is_compact_msg(m)]
+    else:
+        fresh = [m for m in dropped if not _is_compact_msg(m)]
+    if prev is not None and not fresh:
+        # 被裁段里没有新内容：复用上一条摘要，不重复花一次摘要请求
+        return kept, dict(prev)
+    if not fresh:
+        return kept, None
+    try:
+        summary = summarize(([prev] if prev is not None else []) + fresh)
+    except AgentCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        trace.record("history_trim_summary_failed", exc=exc, dropped=len(dropped))
+        return kept, None
+    if not (summary or "").strip():
+        return kept, None
+    return kept, {
+        "role": "user",
+        "content": f"[历史摘要]\n{summary.strip()}\n（以上是更早对话的摘要，继续当前任务。）",
+        "id": f"compact_h{len(history)}",
+    }
 
 
 def _current_instance() -> str:
@@ -134,6 +181,11 @@ def _system_messages(backend, settings: dict) -> list:
         mem_text = ""
     if mem_text:
         msgs.append({"role": "system", "content": f"长期记忆：\n{mem_text}"})
+    # 调用方注入的隐藏上下文（「交给 AI 修复」小窗的崩溃报告）：只进模型请求，
+    # 不入库、不出现在对话 UI；放最末尾，紧挨着对话内容。不设置时请求逐字不变。
+    extra = str((settings or {}).get("ai_extra_context") or "").strip()
+    if extra:
+        msgs.append({"role": "system", "content": extra})
     return msgs
 
 
@@ -162,19 +214,39 @@ def _to_phase(turn: TurnState, phase: TurnPhase) -> None:
         trace.record("illegal_transition", phase=turn.phase.value, exc=exc)
 
 
+# ---- 跨回合压缩状态（原 CompactState 每回合新建，rapid-refill 熔断永远攒不起来）----
+_COMPACT_STATES: dict = {}
+# 上一回合结束时刻：microcompact 闲置触发的真实时钟（进程内，多端共用无害）
+_LAST_ACTIVITY = {"ts": 0.0}
+
+
+def _compact_state_for(session_id: str) -> compact.CompactState:
+    st = _COMPACT_STATES.get(session_id)
+    if st is None:
+        # 会话数有限（store 上限 40 条对话）；超限整表清一次，状态只是熔断
+        # 计数不是正确性数据，丢了也只是重新攒
+        if len(_COMPACT_STATES) >= 16:
+            _COMPACT_STATES.clear()
+        st = compact.CompactState()
+        _COMPACT_STATES[session_id] = st
+    return st
+
+
 # ---- 「只回了文字」到底算不算没干活 -------------------------------------
 # NO_TOOL_CALL 原来的口径是「一轮下来没调过工具」，于是「你好」「1.20.1 有啥新东西」
 # 这类本来就该用文字回答的回合也被打成没动手，三端都弹「它没有真的开始执行」。
 # 这里按用户那句话判：要求下载 / 安装 / 改配置这类得调工具才办得到的事，模型却
 # 光说话，才是真的没动手；问答、闲聊回文字就是完成。模型嘴上说「已经装好了」
 # 而工具轨迹是空的，也算没动手——那是在编。
+# 动作词表只留真操作（下载/安装/改…）。「帮我 / 给我 / 替我」只是委婉语气，
+# 不再单独构成派活——否则「帮我看看这是什么意思」会被当成动手请求（历史误伤）。
 _ACTION_RE = re.compile(
     r"下载|安装|重装|卸载|装(?:个|一下|上|好|到|进|下)|删(?:除|掉|了|个|一下)|移除"
     r"|清(?:理|掉|空|一下)|修(?:复|好|一下|下)|修改|改(?:成|为|一下|下|掉|到|个)"
     r"|设(?:置|成|为|定|到)|配置|调(?:成|到|整|一下|大|小|高|低)|换(?:成|到|个|一下)"
     r"|切(?:换|到|成)|开(?:启|一下|下)|关(?:闭|掉|上|一下)|打开|启动|运行|跑(?:一下|起来|个)"
     r"|导入|导出|更新|升级|备份|恢复|还原|重启|添加|加(?:个|上|一下|进|到)|新建|创建"
-    r"|重命名|迁移|帮我|给我|替我|干活|搞定|弄(?:好|一下|个)|试试|继续|开始|执行|动手"
+    r"|重命名|迁移|干活|搞定|弄(?:好|一下|个)|试试|继续|开始|执行|动手"
     r"|\b(?:install|download|uninstall|remove|delete|clean|fix|repair|set|change|configure"
     r"|config|enable|disable|turn (?:on|off)|switch|launch|start|run|import|export|update"
     r"|upgrade|back ?up|restore|add|create|rename|migrate|do it|go ahead|continue|proceed)\b",
@@ -191,15 +263,28 @@ _DELEGATE_RE = re.compile(
     r"帮我|给我|替我|请你?|麻烦|把|\b(?:can you|could you|would you|please|go ahead|do it)\b",
     re.IGNORECASE,
 )
+# 纯观察词：剥掉之后再判动作。「帮我看看这是什么意思」剥掉「看看」就没有动作词了。
+_OBSERVE_RE = re.compile(r"看(?:看|下|一下|一?眼)?|瞧(?:瞧|下|一下)?|瞅(?:瞅|下|一下)?")
+# 诊断对象：「帮我看下崩溃」这类句子没有操作动词，但模型必须调工具查日志才算数，
+# 仍按派活处理（只回文字照样打 NO_TOOL_CALL）。
+_DIAGNOSE_RE = re.compile(
+    r"报错|崩溃|日志|闪退|起不来|打不开|蓝屏|错误|异常|排查|哪里出了|什么问题")
 _CLAIM_RE = re.compile(
     r"(?:已经?|正在|马上|现在)(?:帮你|为你|给你)?(?:开始)?"
     r"(?:下载|安装|重装|卸载|删除|移除|清理|修复|修改|设置|配置|调整|切换|开启|关闭|打开"
     r"|启动|导入|导出|更新|升级|备份|恢复|重启|添加|创建|重命名|迁移)"
     r"|(?:下载|安装|删除|清理|修复|修改|设置|切换|导入|导出|更新|升级|备份|恢复|添加)"
     r"(?:完成|好了|成功|完毕)"
+    # 「我打算把 ××× 删除」这类意图句（2026-09-25 实测：模型说了要删却没调工具，
+    # 上游还把话说一半就 EOS——不认意图就会静默降级成「正常完成」）
+    r"|(?:打算|准备|即将|计划|这就(?:去|开始)|接下来我?(?:会|要|将)|我(?:会|要|将)(?:先|直接|把)?)"
+    r"(?:[^。！？\n]{0,80}?)?"
+    r"(?:下载|安装|重装|卸载|删除|删掉|移除|禁用|启用|清理|修复|修改|设置|配置|调整|切换"
+    r"|开启|关闭|打开|启动|导入|导出|更新|升级|备份|恢复|重启|添加|创建|新建|重命名|迁移)"
     r"|\bI(?:'ve| have) (?:installed|downloaded|removed|deleted|updated|set|changed|configured"
     r"|enabled|disabled|fixed|added|created)\b"
-    r"|\b(?:installing|downloading|removing|updating|configuring) (?:it|now|the)\b",
+    r"|\b(?:installing|downloading|removing|updating|configuring) (?:it|now|the)\b"
+    r"|\bI(?:'ll| will) (?:install|download|remove|delete|disable|enable|fix|set|change|update)\b",
     re.IGNORECASE,
 )
 
@@ -209,10 +294,14 @@ def wants_action(user_text: str) -> bool:
 
     带动作词才算；带动作词但整句是个问法（怎么 / 什么 / 吗 / ？）且没有
     「帮我 / 请 / 把」这类派活语气的，按提问处理。
+    「帮我看看…」这种纯观察句（剥掉看/瞧/瞅后没有动作词）不算派活，除非
+    指明了诊断对象（崩溃 / 日志 / 报错）——那类必须调工具才答得出。
     """
     text = (user_text or "").strip()
-    if not text or not _ACTION_RE.search(text):
+    if not text:
         return False
+    if not _ACTION_RE.search(_OBSERVE_RE.sub("", text)):
+        return bool(_DELEGATE_RE.search(text) and _DIAGNOSE_RE.search(text))
     if _QUESTION_RE.search(text) and not _DELEGATE_RE.search(text):
         return False
     return True
@@ -257,7 +346,25 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
         except Exception as exc:  # noqa: BLE001
             trace.record("on_delta_error", round_=round_no[0], exc=exc)
 
-    messages = _system_messages(backend, settings) + _trim_history(history)
+    session_id = str((settings or {}).get("ai_session_id") or "active")
+
+    def _summarize(slice_messages) -> str:
+        # 压缩 / 截断摘要会再发一次模型请求，必须尊重停止信号
+        _check()
+        prompt = [
+            {"role": "system", "content": compact._SUMMARY_PROMPT},
+            {"role": "user", "content": _summary_input(slice_messages)},
+        ]
+        data = chat_once(settings, prompt, None, http_cancel=http_cancel)
+        _check()
+        return data.get("content") or ""
+
+    kept_history, trim_summary = _trim_history(history, _summarize)
+    messages = _system_messages(backend, settings)
+    if trim_summary is not None:
+        messages.append(trim_summary)
+        _status("compact", {"reason": "history_trim"})
+    messages += kept_history
     # 这之后追加的都是本回合新产生的（用户这句 + 工具轨迹 + 续写），导出给 UI 持久化时
     # 只取这一段，别把裁剪过的旧历史再抄一遍进去
     base_len = len(messages)
@@ -290,20 +397,16 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
     # micro 阈值从 autocompact 阈值派生：先清旧工具结果，实在不行再全量总结
     micro_cfg = compact.MicroConfig(
         threshold_tokens=max(4_000, compact.auto_threshold(auto_cfg) - 16_000))
-    cstate = compact.CompactState()
+    cstate = _compact_state_for(session_id)
+    # rapid-refill / 工具轮计数跨回合存活（熔断跨回合才有效）；压缩连续失败
+    # 每回合原谅一次：网关抖动不该把本会话的自动压缩永久关掉
+    cstate.consecutive_failures = 0
+    # ③ microcompact 闲置触发：距上一回合结束的真实间隔（原来是写死的 0.0，死路径）
+    idle_seconds = 0.0
+    if _LAST_ACTIVITY["ts"] > 0:
+        idle_seconds = max(0.0, time.time() - _LAST_ACTIVITY["ts"])
     token_state = tokens_mod.TokenState()
     usage_got = [False]   # 本 step 是否已拿到真实 usage（没拿到才在 step 末尾记一次估算）
-
-    def _summarize(slice_messages) -> str:
-        # 压缩会再发一次模型请求，必须尊重停止信号
-        _check()
-        prompt = [
-            {"role": "system", "content": compact._SUMMARY_PROMPT},
-            {"role": "user", "content": _summary_input(slice_messages)},
-        ]
-        data = chat_once(settings, prompt, None, http_cancel=http_cancel)
-        _check()
-        return data.get("content") or ""
 
     def _force_compact(round_: int) -> bool:
         """reactive compact：上游报「塞不下」时强制压缩，成功返回 True。"""
@@ -462,10 +565,19 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             # 退回「用户这句 + 最终正文」。
             # 局部名用 turn_slice，别遮蔽外层的 TurnState（plan 归属判定要用 turn.id）
             if compacted[0]:
+                # 压缩摘要必须活过回合结束：把它带进持久化切片，否则下一轮模型
+                # 从历史里读不到本回合做过什么（原来只落 [用户这句, 最终正文]，
+                # 压缩白做）。保留区里更早回合的旧消息不再抄一遍——UI 侧区分
+                # 不了新旧，抄进去就是重复入库。
                 turn_slice = [{"role": "user", "content": user_text}]
+                turn_slice += [dict(m) for m in messages if _is_compact_msg(m)]
             else:
                 turn_slice = [dict(m) for m in messages[base_len:]
                               if isinstance(m, dict) and m.get("role") != "system"]
+                # 截断摘要同样入库（UI 会插在用户这句之前），下一轮被裁段里
+                # 找得到它就复用，不必每回合重新摘要
+                if trim_summary is not None:
+                    turn_slice.insert(0, dict(trim_summary))
             if text and (not turn_slice
                          or turn_slice[-1].get("role") != "assistant"
                          or turn_slice[-1].get("tool_calls")):
@@ -476,7 +588,6 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             res.turn_messages = []
         return res
 
-    session_id = str((settings or {}).get("ai_session_id") or "active")
     # 子代理宣称「只读、不写磁盘」：绝不能把 MCP 外部工具（能力未知）追加进
     # 它的工具集，也不再为它起一整套 MCP 子进程
     is_subagent = bool((settings or {}).get("ai_subagent"))
@@ -544,7 +655,6 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
             _status("think", {"after_tools": any(m.get("role") == "tool" for m in messages)})
 
             # ---- 上下文管理：先试两级压缩，再发模型请求 ----
-            cur_tokens = tokens_mod.current_input_tokens(messages, token_state)
             decision = compact.should_autocompact(messages, auto_cfg, cstate, token_state)
             if decision.should:
                 try:
@@ -580,8 +690,11 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                         trace.record("compact_circuit_break", round_=round_no[0])
                     else:
                         trace.record("compact_failure", round_=round_no[0], exc=exc)
-            elif cur_tokens >= (micro_cfg.threshold_tokens or 10 ** 12):
-                mres = compact.microcompact(messages, micro_cfg, 0.0, 0.0)
+            else:
+                # microcompact 自己判触发（token 过阈值或闲置超时）：闲置清理
+                # 必须不依赖 token 阈值才成立——离开 30 分钟回来，没到阈值也该清
+                mres = compact.microcompact(messages, micro_cfg, 0.0, 0.0,
+                                            idle_seconds=idle_seconds)
                 if mres.changed:
                     messages[:] = mres.messages
                     _status("compact", {"reason": "microcompact",
@@ -1084,6 +1197,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                              rounds=turn.rounds_used, reason="error")
         raise
     finally:
+        _LAST_ACTIVITY["ts"] = time.time()
         trace.record("turn_end", round_=turn.rounds_used, phase=turn.phase.value,
                      text_len=len(final))
         try:

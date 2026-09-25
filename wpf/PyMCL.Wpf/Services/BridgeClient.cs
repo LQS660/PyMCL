@@ -84,7 +84,7 @@ public sealed class BridgeClient : IDisposable
         };
         using var content = new StringContent(JsonSerializer.Serialize(payload, JsonOpt), Encoding.UTF8, "application/json");
         using var resp = await _http.PostAsync("/rpc", content, ct).ConfigureAwait(false);
-        var text = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        var text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
         using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(text) ? "{}" : text);
         var root = doc.RootElement;
         if (root.TryGetProperty("error", out var err) && err.ValueKind != JsonValueKind.Null)
@@ -161,17 +161,18 @@ public sealed class BridgeClient : IDisposable
         req.Headers.TryAddWithoutValidation(TokenHeader, _token);
         using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, _cts.Token).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
-        await using var stream = await resp.Content.ReadAsStreamAsync(_cts.Token).ConfigureAwait(false);
+        using var stream = await resp.Content.ReadAsStreamAsync().ConfigureAwait(false);
         using var reader = new StreamReader(stream, Encoding.UTF8);
         SetStreamState(true);
         string? ev = null;
         var data = new StringBuilder();
         while (!_cts.IsCancellationRequested)
         {
-            var line = await reader.ReadLineAsync(_cts.Token).ConfigureAwait(false);
+            // net48 的 ReadLineAsync 不带取消令牌：依赖 Dispose() 关闭 HttpClient 使挂起读取抛错退出
+            var line = await reader.ReadLineAsync().ConfigureAwait(false);
             if (line is null) break;
-            if (line.StartsWith("event:", StringComparison.Ordinal)) ev = line[6..].Trim();
-            else if (line.StartsWith("data:", StringComparison.Ordinal)) data.Append(line[5..].Trim());
+            if (line.StartsWith("event:", StringComparison.Ordinal)) ev = line.Substring(6).Trim();
+            else if (line.StartsWith("data:", StringComparison.Ordinal)) data.Append(line.Substring(5).Trim());
             else if (line.Length == 0 && data.Length > 0)
             {
                 Dispatch(ev ?? "message", data.ToString());

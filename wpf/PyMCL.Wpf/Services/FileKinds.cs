@@ -159,10 +159,11 @@ public static class FileKinds
         try
         {
             using var fs = File.OpenRead(path);
-            Span<byte> head = stackalloc byte[24];
-            if (fs.Read(head) < 24) return null;
-            ReadOnlySpan<byte> magic = new byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G', 0x0D, 0x0A, 0x1A, 0x0A };
-            if (!head[..8].SequenceEqual(magic)) return null;
+            var head = new byte[24];
+            if (fs.Read(head, 0, 24) < 24) return null;
+            var magic = new byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G', 0x0D, 0x0A, 0x1A, 0x0A };
+            for (var k = 0; k < 8; k++)
+                if (head[k] != magic[k]) return null;
             if (head[12] != 'I' || head[13] != 'H' || head[14] != 'D' || head[15] != 'R') return null;
             var w = (head[16] << 24) | (head[17] << 16) | (head[18] << 8) | head[19];
             var h = (head[20] << 24) | (head[21] << 16) | (head[22] << 8) | head[23];
@@ -304,7 +305,7 @@ public static class FileKinds
             foreach (var n in names)
             {
                 var parts = n.Split('/');
-                if (parts[^1] != marker || parts.Length > MaxNest + 1) continue;
+                if (parts[parts.Length - 1] != marker || parts.Length > MaxNest + 1) continue;
                 if (best is null || parts.Length < best.Split('/').Length) best = n;
             }
             return best;
@@ -317,9 +318,9 @@ public static class FileKinds
             try
             {
                 // utf-8-sig：Windows 上导出的 manifest 常带 BOM
-                var span = raw.Length >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF
-                    ? raw.AsSpan(3) : raw.AsSpan();
-                using var doc = JsonDocument.Parse(span.ToArray());
+                var body = raw.Length >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF
+                    ? raw.Skip(3).ToArray() : raw;
+                using var doc = JsonDocument.Parse(body);
                 return doc.RootElement.Clone();
             }
             catch { return null; }
@@ -372,8 +373,8 @@ public static class FileKinds
                 if (primary.ValueKind != JsonValueKind.Object && rows.Count > 0) primary = rows[0];
                 var id = primary.ValueKind == JsonValueKind.Object ? Str(primary, "id") : "";
                 var dash = id.IndexOf('-');
-                loader = dash < 0 ? id : id[..dash];
-                loaderVersion = dash < 0 ? "" : id[(dash + 1)..];
+                loader = dash < 0 ? id : id.Substring(0, dash);
+                loaderVersion = dash < 0 ? "" : id.Substring(dash + 1);
             }
             return new Info
             {
@@ -394,7 +395,7 @@ public static class FileKinds
             var children = new Dictionary<string, HashSet<string>>();
             foreach (var n in names)
             {
-                var parts = n.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                var parts = n.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
                 for (var depth = 0; depth < Math.Min(parts.Length, MaxNest); depth++)
                 {
                     var key = string.Join("/", parts.Take(depth));
@@ -427,7 +428,7 @@ public static class FileKinds
             foreach (var n in names)
             {
                 if (!n.StartsWith(head, StringComparison.Ordinal)) continue;
-                var parts = n[head.Length..].Split('/');
+                var parts = n.Substring(head.Length).Split('/');
                 if (parts.Length != 2 || parts[1] != parts[0] + ".json") continue;
                 var vid = parts[0];
                 foreach (var (key, loader) in new[]

@@ -40,8 +40,8 @@ public sealed class DashCard
             Type = Str(e, "type") is { Length: > 0 } t ? t : "notes",
             X = Clamp01(Num(e, "x", 0)),
             Y = Clamp01(Num(e, "y", 0)),
-            W = Math.Clamp(Num(e, "w", 0.3), 0.04, 1),
-            H = Math.Clamp(Num(e, "h", 0.3), 0.04, 1),
+            W = Clamp.Of(Num(e, "w", 0.3), 0.04, 1),
+            H = Clamp.Of(Num(e, "h", 0.3), 0.04, 1),
             Z = (int)Num(e, "z", 0),
             Hidden = e.TryGetProperty("hidden", out var h) && h.ValueKind == JsonValueKind.True,
         };
@@ -69,7 +69,7 @@ public sealed class DashCard
         return fallback;
     }
 
-    private static double Clamp01(double v) => Math.Clamp(v, 0, 1);
+    private static double Clamp01(double v) => Clamp.Of(v, 0, 1);
 }
 
 public sealed class DashLayout
@@ -304,8 +304,8 @@ public sealed class DashHost : Panel
         var hostW = Math.Max(1, ActualWidth);
         var hostH = Math.Max(1, ActualHeight);
         var (minW, minH) = MinSizes.GetValueOrDefault(type, FallbackMin);
-        var w = Math.Clamp(Math.Max(0.3, minW / hostW), 0.1, 1);
-        var h = Math.Clamp(Math.Max(0.3, minH / hostH), 0.1, 1);
+        var w = Clamp.Of(Math.Max(0.3, minW / hostW), 0.1, 1);
+        var h = Clamp.Of(Math.Max(0.3, minH / hostH), 0.1, 1);
         foreach (var (x, y) in new[] { (0.0, 0.0), (1 - w, 0.0), (0.0, 1 - h), (1 - w, 1 - h) })
         {
             var rect = new Rect(x, y, w, h);
@@ -359,10 +359,10 @@ public sealed class DashHost : Panel
     /// <summary>把一个比例坐标按像素网格吸附（对齐 Qt DashboardCard._snap：拖拽在像素空间，落点换回比例）。</summary>
     public double SnapV(double v, double axisPx)
     {
-        v = Math.Clamp(v, 0, 1);
+        v = Clamp.Of(v, 0, 1);
         if (!_layout.Snap || axisPx <= 1) return v;
         var px = Math.Round(v * axisPx / _layout.Grid) * _layout.Grid;
-        return Math.Clamp(px / axisPx, 0, 1);
+        return Clamp.Of(px / axisPx, 0, 1);
     }
 
     protected override Size MeasureOverride(Size available)
@@ -546,28 +546,28 @@ public sealed class DashHost : Panel
 
             if (_mode == "move")
             {
-                Card.X = _host.SnapV(Math.Clamp(r.X + dx, 0, 1 - r.Width), w);
-                Card.Y = _host.SnapV(Math.Clamp(r.Y + dy, 0, 1 - r.Height), h);
+                Card.X = _host.SnapV(Clamp.Of(r.X + dx, 0, 1 - r.Width), w);
+                Card.Y = _host.SnapV(Clamp.Of(r.Y + dy, 0, 1 - r.Height), h);
             }
             else
             {
                 double x = r.X, y = r.Y, cw = r.Width, ch = r.Height;
                 if (_mode.Contains('w'))
                 {
-                    var nx = _host.SnapV(Math.Clamp(r.X + dx, 0, r.Right - minW), w);
+                    var nx = _host.SnapV(Clamp.Of(r.X + dx, 0, r.Right - minW), w);
                     cw = r.Right - nx;
                     x = nx;
                 }
                 if (_mode.Contains('e'))
-                    cw = Math.Clamp(_host.SnapV(r.X + r.Width + dx, w) - r.X, minW, 1 - r.X);
+                    cw = Clamp.Of(_host.SnapV(r.X + r.Width + dx, w) - r.X, minW, 1 - r.X);
                 if (_mode.Contains('n'))
                 {
-                    var ny = _host.SnapV(Math.Clamp(r.Y + dy, 0, r.Bottom - minH), h);
+                    var ny = _host.SnapV(Clamp.Of(r.Y + dy, 0, r.Bottom - minH), h);
                     ch = r.Bottom - ny;
                     y = ny;
                 }
                 if (_mode.Contains('s'))
-                    ch = Math.Clamp(_host.SnapV(r.Y + r.Height + dy, h) - r.Y, minH, 1 - r.Y);
+                    ch = Clamp.Of(_host.SnapV(r.Y + r.Height + dy, h) - r.Y, minH, 1 - r.Y);
                 Card.X = x;
                 Card.Y = y;
                 Card.W = Math.Max(minW, cw);

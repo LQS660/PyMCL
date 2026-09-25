@@ -769,9 +769,11 @@ class LaunchPage(QWidget):
         self._crash_shown = True
         win = self.window()
         dlg = CrashDialog(
-            report or {}, win, backend=getattr(win, "backend", None)
+            report or {}, win, backend=getattr(win, "backend", None), game_error=True
         )
         dlg.exec()
+        if getattr(dlg, "want_ai_fix", False):
+            self._open_ai_fix(dlg.report or report or {})
         if getattr(dlg, "want_relaunch", False):
             # 用报告里的实例/版本对齐选择框后再启动
             rep = report or {}
@@ -820,7 +822,18 @@ class LaunchPage(QWidget):
             "help": tr("这是启动器在拉起游戏之前捕获的错误，还没有游戏崩溃报告。"),
             "instance": self.instance_box.currentText() or "default",
             "version": self.version_box.currentText() or "",
-        }, win, backend=getattr(win, "backend", None))
+        }, win, backend=getattr(win, "backend", None), game_error=True)
         dlg.exec()
+        if getattr(dlg, "want_ai_fix", False):
+            self._open_ai_fix(dlg.report or {})
         if getattr(dlg, "want_relaunch", False):
             self._on_launch()
+
+    def _open_ai_fix(self, report):
+        """崩溃 / 启动失败弹窗点了「交给 AI 修复」：弹出小 AI 窗自动开跑。"""
+        from .ai_fix_dialog import AiFixDialog
+        win = self.window()
+        dlg = AiFixDialog(report, win, backend=getattr(win, "backend", None))
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()

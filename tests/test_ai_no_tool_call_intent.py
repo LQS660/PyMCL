@@ -30,12 +30,39 @@ class IntentWordsTests(unittest.TestCase):
                      "how do I install fabric?", "谢谢", "设置在哪里？"):
             self.assertFalse(agent_mod.wants_action(text), text)
 
+    def test_observe_phrases_are_not_action(self):
+        """「帮我看看这是什么意思」是解释性请求，不再误判成派活（历史误伤）。"""
+        for text in ("帮我看看这是什么意思", "看看我的模组有哪些", "帮我瞧瞧咋回事"):
+            self.assertFalse(agent_mod.wants_action(text), text)
+
+    def test_observe_with_diagnose_target_is_action(self):
+        """看的是崩溃 / 日志这类诊断对象：必须调工具才答得出，仍算派活。"""
+        for text in ("帮我看下这个崩溃", "帮我看看日志哪里报错", "帮我瞅瞅为啥闪退"):
+            self.assertTrue(agent_mod.wants_action(text), text)
+
+    def test_observe_with_real_verb_is_action(self):
+        """剥掉「看看」后还有真操作动词的照旧算派活。"""
+        for text in ("帮我看看怎么安装钠", "帮我看看这个版本怎么更新"):
+            self.assertTrue(agent_mod.wants_action(text), text)
+
     def test_claims(self):
         self.assertTrue(agent_mod.claims_action("已经帮你安装好了钠。"))
         self.assertTrue(agent_mod.claims_action("正在下载 1.20.1，请稍等"))
         self.assertTrue(agent_mod.claims_action("安装完成！"))
         self.assertFalse(agent_mod.claims_action("我可以帮你安装钠，需要现在开始吗？"))
         self.assertFalse(agent_mod.claims_action("你好！我是启动器助手。"))
+
+    def test_intent_claims(self):
+        """「我打算把 ××× 删除」这类意图句也算声称（2026-09-25 实测漏检：
+        模型说了要删却没调工具，上游把话说一半就 EOS，静默降级成「正常完成」）。"""
+        self.assertTrue(agent_mod.claims_action(
+            "我打算把 naturescompass-1.20.1-2.2.3.jar 从 mods 文件夹删除。"))
+        self.assertTrue(agent_mod.claims_action("准备先把坏掉的模组禁用，再验证启动。"))
+        self.assertTrue(agent_mod.claims_action("接下来我会安装 Fabric，然后装钠。"))
+        self.assertTrue(agent_mod.claims_action("这就去删除那个损坏的文件。"))
+        # 解释性 / 征询式的话不该被当成声称
+        self.assertFalse(agent_mod.claims_action("删除模组的正确方法是在 mods 文件夹里操作。"))
+        self.assertFalse(agent_mod.claims_action("我可以帮你禁用这个模组，要继续吗？"))
 
 
 class StopReasonByIntentTests(unittest.TestCase):

@@ -12,7 +12,7 @@ chevron-right，工具行用 loader-circle / circle-check / circle-slash-2 / cir
 from __future__ import annotations
 
 from PySide6.QtCore import QByteArray, QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen, QPixmap
+from PySide6.QtGui import QBrush, QColor, QImage, QLinearGradient, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
@@ -97,7 +97,25 @@ _TOOL_ICONS = {
 }
 
 
+_ASSET_CACHE: set[str] | None = None
+
+
+def _asset_tools() -> set[str]:
+    """生成图标（icon_assets，base64 内嵌）已覆盖的工具名集合，懒加载一次。"""
+    global _ASSET_CACHE
+    if _ASSET_CACHE is None:
+        try:
+            from .icon_assets import ICONS
+            _ASSET_CACHE = set(ICONS)
+        except Exception:  # noqa: BLE001
+            _ASSET_CACHE = set()
+    return _ASSET_CACHE
+
+
 def tool_icon(tool_name: str) -> str | None:
+    # 生成图标优先（每个工具有专属画面），没有再退到按类共用的 Lucide 映射
+    if tool_name and tool_name in _asset_tools():
+        return "asset:" + tool_name
     return _TOOL_ICONS.get(tool_name or "")
 
 
@@ -121,8 +139,39 @@ def _dpr(widget: QWidget | None) -> float:
         return 1.0
 
 
+def _asset_pixmap(key: str, size: int, color: str, dpr: float) -> QPixmap:
+    """渲染一枚生成图标：按目标色重着色（走 alpha 通道，抗锯齿边缘不丢）。"""
+    import base64
+
+    from .icon_assets import ICONS
+    src = QImage.fromData(base64.b64decode(ICONS[key]))
+    px = max(1, int(round(size * dpr)))
+    if src.isNull():
+        pm = QPixmap(px, px)
+        pm.fill(Qt.transparent)
+        return pm
+    solid = QImage(src.size(), QImage.Format_ARGB32_Premultiplied)
+    solid.fill(QColor(color))
+    alpha = src.convertToFormat(QImage.Format_Alpha8)
+    out = QImage(src.size(), QImage.Format_ARGB32_Premultiplied)
+    out.fill(Qt.transparent)
+    p = QPainter(out)
+    p.setCompositionMode(QPainter.CompositionMode_Source)
+    p.drawImage(0, 0, solid)
+    p.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+    p.drawImage(0, 0, alpha)
+    p.end()
+    scaled = out.scaled(px, px, Qt.AspectRatioMode.IgnoreAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation)
+    pm = QPixmap.fromImage(scaled)
+    pm.setDevicePixelRatio(dpr)
+    return pm
+
+
 def pixmap(name: str, size: int, color: str, dpr: float = 1.0) -> QPixmap:
     """按逻辑尺寸 size 渲染一枚着色图标，按 dpr 放大以免高分屏发糊。"""
+    if isinstance(name, str) and name.startswith("asset:") and name[6:] in _asset_tools():
+        return _asset_pixmap(name[6:], size, color, dpr)
     px = max(1, int(round(size * dpr)))
     pm = QPixmap(px, px)
     pm.fill(Qt.transparent)

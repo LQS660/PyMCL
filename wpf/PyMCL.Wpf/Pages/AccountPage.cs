@@ -136,7 +136,7 @@ public sealed class AccountPage : PageBase
             Ui.Tag(typeText),
             string.IsNullOrEmpty(acc.SkinFile) ? null : Ui.Tag(L("自定义皮肤"), "B.OnAccent", "B.Ok"));
         var sub = string.IsNullOrEmpty(acc.Uuid) ? typeText + L("账号") : "UUID " + acc.Uuid;
-        if (sub.Length > 40) sub = sub[..40] + "…";
+        if (sub.Length > 40) sub = sub.Substring(0, 40) + "…";
 
         var actions = Ui.H(6);
         if (acc.Type == "offline")
@@ -447,7 +447,7 @@ internal static class SkinPng
     {
         if (string.IsNullOrWhiteSpace(dataUrl)) return null;
         var raw = dataUrl.StartsWith("data:", StringComparison.Ordinal)
-            ? dataUrl[(dataUrl.IndexOf(',') + 1)..]
+            ? dataUrl.Substring(dataUrl.IndexOf(',') + 1)
             : dataUrl;
         try { return Convert.FromBase64String(raw); }
         catch (FormatException) { return null; }

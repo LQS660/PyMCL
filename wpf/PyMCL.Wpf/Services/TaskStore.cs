@@ -26,7 +26,7 @@ public sealed class TaskRow
         var text = Log.ToString();
         var cut = text.IndexOf('\n', text.Length / 3);
         Log.Clear();
-        Log.Append(cut > 0 ? text[(cut + 1)..] : text);
+        Log.Append(cut > 0 ? text.Substring(cut + 1) : text);
         LogLines = 400;
     }
 }
@@ -71,7 +71,7 @@ public static class TaskStore
                 row.Status = string.IsNullOrEmpty(st) ? row.Status : st;
                 row.Speed = sp;
                 row.Indeterminate = ev.Total <= 0;
-                if (ev.Total > 0) row.Progress = Math.Clamp(ev.Current * 100.0 / ev.Total, 0, 100);
+                if (ev.Total > 0) row.Progress = Clamp.Of(ev.Current * 100.0 / ev.Total, 0, 100);
                 Updated?.Invoke(row);
                 break;
             }
