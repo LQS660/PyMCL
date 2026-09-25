@@ -172,18 +172,24 @@ class BridgeAiPayloadParityTests(unittest.TestCase):
     # 新建 / 删除对话时，前端靠它判断「这帖收尾是不是我正看着的对话」，
     # 别把旧对话的报错气泡贴进新对话、也别在切走之后按钮还卡在「忙」上。
     ROUTING_KEYS = {"chat_id"}
+    # unsent 也不是内核元数据：桥自己的插话队列（ai_steer）里、内核最后一轮之后才进来
+    # 没读到的话，随收尾事件交还前端当下一回合续发（Qt 端是 _finish 把 _queue 剩下的续发）。
+    STEER_KEYS = {"unsent"}
     # plan：批次 3.4 模型本回合出的待办计划，桥随 ai.done 转发并持久化
     # usage：批次 6.1 会话累计用量（输入/输出分开 + 来源口径），WPF 展示的数据源
     DONE_KEYS = {"text", "store", "stop_reason", "detail", "pending_tasks", "note",
-                 "plan", "usage"} | ROUTING_KEYS
+                 "plan", "usage"} | ROUTING_KEYS | STEER_KEYS
     UI_KEYS = {"note"}
-    FAIL_KEYS = {"text", "stopped"} | ROUTING_KEYS
+    FAIL_KEYS = {"text", "stopped"} | ROUTING_KEYS | STEER_KEYS
     # rule_content：内核按 RULE_CONTENT_KEYS 从 args 里抽出来的那一项，前端「始终允许」
     # 的说明文案靠它，不用把键表抄进 C#。
     # chat_id 随 payload 进确认卡：SSE 断线重连后，前端靠它判断这张待回答的卡
     # 是不是当前对话的，别把旧对话的确认卡补画进新对话。
     # preview：写工具的变更预览（diff / 文件数字节数 / 目标路径），Qt 与 WPF 渲染同一份。
-    CONFIRM_KEYS = {"name", "args", "label", "reason", "rule_content", "preview"} | ROUTING_KEYS
+    # allow_always：按 TOOL_META 判好的「始终允许」显隐（删除类、计划审批不给），与 Qt
+    # 同一判据，前端不用各自写死工具名单。
+    CONFIRM_KEYS = {"name", "args", "label", "reason", "rule_content", "preview",
+                    "allow_always"} | ROUTING_KEYS
 
     def _payload_keys(self, event: str) -> set:
         """AST 抽出 bridge/api.py 里 emit("<event>", {…}) 的键集合。
@@ -240,7 +246,7 @@ class BridgeAiPayloadParityTests(unittest.TestCase):
         from mclauncher.ai.result import AgentResult
         result = AgentResult("ok", stop_reason="max_rounds", detail="d",
                              pending_tasks=[{"task_id": "t"}])
-        for key in self.DONE_KEYS - {"text", "store"} - self.ROUTING_KEYS - self.UI_KEYS:
+        for key in self.DONE_KEYS - {"text", "store"} - self.ROUTING_KEYS - self.STEER_KEYS - self.UI_KEYS:
             self.assertTrue(hasattr(result, key),
                             f"AgentResult 缺 {key}：bridge 在 ai.done 里发的是死键")
         self.assertEqual(self._payload_keys("ai.done"), self.DONE_KEYS)
@@ -250,6 +256,94 @@ class BridgeAiPayloadParityTests(unittest.TestCase):
 
     def test_confirm_payload_carries_reason(self):
         self.assertEqual(self._payload_keys("ai.confirm"), self.CONFIRM_KEYS)
+
+
+class BridgeAiRunSteerTests(unittest.TestCase):
+    """插话与「始终允许」的桥端行为：WPF 主 AI 页和修复小窗照这几位走，得和 Qt 一样不丢话、不乱给按钮。"""
+
+    def setUp(self):
+        from mclauncher.ai import store as chat_store
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        patcher = mock.patch.object(chat_store, "STORE_FILE", Path(tmp.name) / "ai_chats.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.events: list[tuple[str, dict]] = []
+        self.bus = mock.MagicMock()
+        self.bus.emit.side_effect = lambda ev, payload=None: self.events.append((ev, payload or {}))
+        self.api = BackendAPI(self.bus)
+        self.api.get_settings = lambda: {}
+
+    def _run(self, fake_run_agent):
+        from mclauncher.ai import preview as ai_preview
+        with self.api._ai_lock:     # ai_send 开跑前的那一步
+            self.api._ai_busy = True
+            self.api._ai_cancel = False
+            self.api._ai_steer = []
+        with mock.patch("mclauncher.ai.agent.run_agent", fake_run_agent), \
+                mock.patch.object(ai_preview, "change_preview", return_value=None):
+            self.api._ai_run("hi", "")
+
+    def _payloads(self, event: str) -> list:
+        return [p for e, p in self.events if e == event]
+
+    def test_steer_after_last_drain_comes_back_as_unsent(self):
+        from mclauncher.ai.result import AgentResult
+
+        def fake(backend, *a, **kw):
+            backend.ai_steer("late words")     # 内核最后一轮之后才插进来
+            return AgentResult("ok")
+
+        self._run(fake)
+        self.assertEqual(self._payloads("ai.done")[-1]["unsent"], ["late words"])
+        self.assertEqual(self.api._ai_steer, [])
+        self.assertFalse(self.api._ai_busy)
+
+    def test_fail_also_returns_unsent(self):
+        from mclauncher.ai.client import AIClientError
+
+        def fake(backend, *a, **kw):
+            backend.ai_steer("late words")
+            raise AIClientError("boom")
+
+        self._run(fake)
+        self.assertEqual(self._payloads("ai.fail")[-1]["unsent"], ["late words"])
+
+    def test_next_run_started_on_done_survives_old_finally(self):
+        from mclauncher.ai.result import AgentResult
+
+        def on_emit(ev, payload=None):
+            self.events.append((ev, payload or {}))
+            if ev == "ai.done":
+                # 前端收到 ai.done 立刻补发下一句：新回合已占住 busy，也收了一句插话
+                with self.api._ai_lock:
+                    self.api._ai_busy = True
+                    self.api._ai_steer = ["for next run"]
+
+        self.bus.emit.side_effect = on_emit
+        self._run(lambda *a, **kw: AgentResult("ok"))
+        self.assertTrue(self.api._ai_busy)
+        self.assertEqual(self.api._ai_steer, ["for next run"])
+
+    def test_confirm_allow_always_follows_tool_meta(self):
+        from mclauncher.ai.result import AgentResult
+        seen = {}
+
+        def on_emit(ev, payload=None):
+            self.events.append((ev, payload or {}))
+            if ev == "ai.confirm":
+                seen[payload["name"]] = payload["allow_always"]
+                self.api.ai_confirm(True)   # 当场答掉，confirm_fn 不用干等
+
+        def fake(backend, settings, history, text, confirm_fn=None, **kw):
+            for name in ("install_mod", "delete_mod", "delete_instance", "plan_approval"):
+                confirm_fn(name, {}, name, "")
+            return AgentResult("ok")
+
+        self.bus.emit.side_effect = on_emit
+        self._run(fake)
+        self.assertEqual(seen, {"install_mod": True, "delete_mod": False,
+                                "delete_instance": False, "plan_approval": False})
 
 
 class BridgeAlwaysAllowParityTests(unittest.TestCase):

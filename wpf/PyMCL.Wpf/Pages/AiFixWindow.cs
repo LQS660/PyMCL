@@ -28,6 +28,7 @@ internal sealed class AiFixWindow : Window
     private readonly StringBuilder _round = new();    // 当前轮次已说的话
     private readonly Dictionary<string, ToolLine> _toolLines = new();
     private readonly Dictionary<string, ToolLine> _taskLines = new();
+    private readonly Dictionary<string, string> _aiPendingTasks = new();   // task_id → 任务名，finished 时回来汇报
     private Bubble? _roundBubble;   // 当前轮次的气泡：工具回合开始就封口换新
     private PlanCard? _planCard;
     private bool _busy;
@@ -179,7 +180,8 @@ internal sealed class AiFixWindow : Window
 
     private void RetryFrom(string text) => PageBase.Run(() => SendTextAsync(text));
 
-    private async Task SendTextAsync(string raw)
+    /// <param name="echo">false：气泡已经贴过（插话续发）或本就不显示（后台任务回报），输入框也别动。</param>
+    private async Task SendTextAsync(string raw, bool echo = true)
     {
         var text = (raw ?? "").Trim();
         if (text.Length == 0) return;
@@ -192,18 +194,21 @@ internal sealed class AiFixWindow : Window
                          && sr.TryGetProperty("ok", out var okEl) && okEl.ValueKind == JsonValueKind.True;
             if (queued)
             {
-                _input.Clear();
-                Add(new Bubble("user", text, RetryFrom));
-                _status.Text = L("已插队") + " · " + L("这句话会立刻交给正在运行的助手");
-                SyncMainButton();
+                if (echo)
+                {
+                    _input.Clear();
+                    Add(new Bubble("user", text, RetryFrom));
+                    _status.Text = L("已插队") + " · " + L("这句话会立刻交给正在运行的助手");
+                    SyncMainButton();
+                }
                 return;
             }
         }
-        _input.Clear();
+        if (echo) _input.Clear();
         SetBusy(true);
         _status.Text = L("思考中…");
 
-        Add(new Bubble("user", text, RetryFrom));
+        if (echo) Add(new Bubble("user", text, RetryFrom));
         _stream.Clear();
         _roundBubble = OpenRound();
 
@@ -319,7 +324,10 @@ internal sealed class AiFixWindow : Window
                         finalText = finalText.Length > 0 ? finalText + "\n\n" + note : note;
                     _roundBubble!.SetText(finalText);
                 }
+                foreach (var (tid, taskName) in AiPage.PendingTasksOf(ev)) _aiPendingTasks[tid] = taskName;
                 ResetRunState();
+                var unsent = AiPage.UnsentOf(ev);
+                if (unsent.Length > 0) PageBase.Run(() => SendTextAsync(unsent, echo: false));
                 break;
             }
 
@@ -332,6 +340,8 @@ internal sealed class AiFixWindow : Window
                 else if (_roundBubble != null) _roundBubble.SetText(ev.Text);
                 else Add(new Bubble("error", ev.Text, RetryFrom));
                 ResetRunState();
+                var unsent = AiPage.UnsentOf(ev);
+                if (unsent.Length > 0) PageBase.Run(() => SendTextAsync(unsent, echo: false));
                 break;
             }
 
@@ -339,9 +349,15 @@ internal sealed class AiFixWindow : Window
             case "progress" when _taskLines.TryGetValue(ev.TaskId, out var pl):
                 pl.SetProgress(ev.Current, ev.Total, ev.Message);
                 break;
-            case "finished" when _taskLines.TryGetValue(ev.TaskId, out var fl):
-                fl.Finish(ev.Success, ev.Message);
+            case "finished":
+            {
+                if (_taskLines.TryGetValue(ev.TaskId, out var fl)) fl.Finish(ev.Success, ev.Message);
+                if (!_aiPendingTasks.TryGetValue(ev.TaskId, out var taskName)) break;
+                _aiPendingTasks.Remove(ev.TaskId);
+                if (!_busy) _status.Text = L("后台任务完成") + " · " + L("助手回来汇报结果");
+                PageBase.Run(() => SendTextAsync(AiPage.PendingTaskReport(taskName, ev), echo: false));
                 break;
+            }
         }
     }
 
@@ -539,7 +555,6 @@ internal sealed class AiFixWindow : Window
         // 确认卡落在最后一段话下面：先把手头这段话封口
         CloseRound();
         var label = string.IsNullOrWhiteSpace(ev.Label) ? ev.Name : ev.Label;
-        var name = ev.Name ?? "";
         var reason = ev.Payload.ValueKind == JsonValueKind.Object
                      && ev.Payload.TryGetProperty("reason", out var rr)
                      && rr.ValueKind == JsonValueKind.String
@@ -561,9 +576,7 @@ internal sealed class AiFixWindow : Window
             if (preview.Length > 0)
                 detail = string.IsNullOrWhiteSpace(detail) ? preview : preview + "\n" + detail;
         }
-        var allowAlways = !string.Equals(name, "delete_instance", StringComparison.Ordinal)
-                          && !string.Equals(name, "delete_mod", StringComparison.Ordinal);
-        var card = new ConfirmCard(label, detail, allowAlways,
+        var card = new ConfirmCard(label, detail, ConfirmCard.AllowAlways(ev),
             (ok, always, scope) => PageBase.Run(async () =>
                 await AppServices.Client.TryCallAsync<object>("ai_confirm", new { ok, always, scope })));
         Add(card);

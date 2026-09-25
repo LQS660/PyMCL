@@ -45,6 +45,8 @@ public sealed class AiPage : PageBase
     private bool _abandoned;
     // 切换对话时等在跑的回合真正收尾（后端 busy 放开）再放行，避免新对话第一句被「上一条还在处理」顶回
     private TaskCompletionSource<object?>? _runEnded;
+    // AI 说过「完成后回来汇报」的后台任务：task_id → (任务名, 所属对话)；finished 时主动开一回合汇报
+    private readonly Dictionary<string, (string Name, string ChatId)> _aiPendingTasks = new();
 
     public AiPage()
     {
@@ -392,22 +394,43 @@ public sealed class AiPage : PageBase
         return last.Length == 0 ? Task.CompletedTask : SendTextAsync(last);
     }
 
-    private async Task SendTextAsync(string raw)
+    /// <param name="echo">false：气泡已经贴过（插话续发）或本就不显示（后台任务回报），输入框也别动。</param>
+    private async Task SendTextAsync(string raw, bool echo = true)
     {
         var text = (raw ?? "").Trim();
         if (text.Length == 0) return;
         if (_busy)
         {
-            // 别静默吞掉：用户只看到「点了没反应」，会以为按钮坏了
-            Toast(L("上一条还在处理"), L("等它说完，或点「停止」再发"), ToastKind.Warning);
-            return;
+            // 跑动中的插话走 steering：下一轮模型请求前被采纳（对齐 Qt 的排队）
+            var sr = await Api.TryCallAsync<JsonElement>("ai_steer", new { text });
+            if (sr.ValueKind == JsonValueKind.Object
+                && sr.TryGetProperty("ok", out var okEl) && okEl.ValueKind == JsonValueKind.True)
+            {
+                if (echo)
+                {
+                    _input.Clear();
+                    Add(new Bubble("user", text, RetryFrom));
+                    Toast(L("已插队"), L("这句话会立刻交给正在运行的助手"));
+                }
+                return;
+            }
+            // 桥回 ok=false = 回合刚好收尾、ai.done 还在路上：等它复位再开新回合，
+            // 否则那帖迟到的收尾会把新回合的按钮和流式状态一起复位
+            var ended = _runEnded ??= new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            await Task.WhenAny(ended.Task, Task.Delay(3000));
+            if (_busy)
+            {
+                // 别静默吞掉：用户只看到「点了没反应」，会以为按钮坏了
+                Toast(L("上一条还在处理"), L("等它说完，或点「停止」再发"), ToastKind.Warning);
+                return;
+            }
         }
-        _input.Clear();
+        if (echo) _input.Clear();
         _runChatId = _store.ActiveId;
         SetBusy(true);
         _status.Text = L("思考中…");
 
-        Add(new Bubble("user", text, RetryFrom));
+        if (echo) Add(new Bubble("user", text, RetryFrom));
         _stream.Clear();
         _roundBubble = OpenRound();
 
@@ -553,7 +576,11 @@ public sealed class AiPage : PageBase
                         finalText = finalText.Length > 0 ? finalText + "\n\n" + note : note;
                     _roundBubble!.SetText(finalText);
                 }
+                if (mine)
+                    foreach (var (tid, taskName) in PendingTasksOf(ev))
+                        _aiPendingTasks[tid] = (taskName, ChatIdOf(ev));
                 ResetRunState();
+                var unsent = UnsentOf(ev);
                 Run(async () =>
                 {
                     _store = await Api.TryCallAsync<AiStoreDto>("ai_list_chats", null, _store) ?? _store;
@@ -561,6 +588,7 @@ public sealed class AiPage : PageBase
                     // 这回合是在当前视图里分段播完的：别整页重画，否则交错段落会被
                     // 存储里的合并气泡盖掉（存储只存最终正文，重载后合并是预期）
                     if (!mine) RenderMessages();
+                    if (mine && !quiet && unsent.Length > 0) await SendTextAsync(unsent, echo: false);
                 });
                 break;
             }
@@ -595,6 +623,8 @@ public sealed class AiPage : PageBase
                 var status = _status.Text;
                 ResetRunState();
                 _status.Text = status;
+                var unsent = UnsentOf(ev);
+                if (mine && !quiet && unsent.Length > 0) Run(() => SendTextAsync(unsent, echo: false));
                 break;
             }
 
@@ -612,10 +642,58 @@ public sealed class AiPage : PageBase
             case "progress" when _taskLines.TryGetValue(ev.TaskId, out var pl):
                 pl.SetProgress(ev.Current, ev.Total, ev.Message);
                 break;
-            case "finished" when _taskLines.TryGetValue(ev.TaskId, out var fl):
-                fl.Finish(ev.Success, ev.Message);
+            case "finished":
+                if (_taskLines.TryGetValue(ev.TaskId, out var fl)) fl.Finish(ev.Success, ev.Message);
+                ReportPendingTask(ev);
                 break;
         }
+    }
+
+    // ==================== 后台任务回报 / 插话续发（对齐 Qt W5-2 与 _queue） ====================
+    /// <summary>回合停在「后台还在跑」时 AI 起的任务：finished 时要主动开一回合回来汇报。</summary>
+    internal static List<(string TaskId, string Name)> PendingTasksOf(BridgeEvent ev)
+    {
+        var tasks = new List<(string TaskId, string Name)>();
+        if (StopReasonOf(ev) != "pending_task"
+            || !ev.Payload.TryGetProperty("pending_tasks", out var list) || list.ValueKind != JsonValueKind.Array)
+            return tasks;
+        foreach (var t in list.EnumerateArray())
+        {
+            if (t.ValueKind != JsonValueKind.Object) continue;
+            var tid = t.TryGetProperty("task_id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() ?? "" : "";
+            if (tid.Length == 0) continue;
+            var name = t.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() ?? "" : "";
+            tasks.Add((tid, name.Length > 0 ? name : L("任务")));
+        }
+        return tasks;
+    }
+
+    internal static string PendingTaskReport(string name, BridgeEvent finished) =>
+        $"[后台任务回报] {name} {(finished.Success ? L("成功") : L("失败"))}：{finished.Message}"; // i18n:ignore 回报是发给模型的原文，与 Qt 同文
+
+    private void ReportPendingTask(BridgeEvent ev)
+    {
+        if (!_aiPendingTasks.TryGetValue(ev.TaskId, out var task)) return;
+        _aiPendingTasks.Remove(ev.TaskId);
+        // 用户已经切到别的对话：那边的模型没有这段上下文，回报不往那边塞
+        if (task.ChatId.Length > 0 && task.ChatId != _store.ActiveId) return;
+        if (!_busy) Toast(L("后台任务完成"), L("助手回来汇报结果"));
+        Run(() => SendTextAsync(PendingTaskReport(task.Name, ev), echo: false));
+    }
+
+    /// <summary>内核最后一轮之后才插进来、没读到的话（桥随收尾事件交还），拼成一句当下一回合续发。</summary>
+    internal static string UnsentOf(BridgeEvent ev)
+    {
+        if (ev.Payload.ValueKind != JsonValueKind.Object
+            || !ev.Payload.TryGetProperty("unsent", out var u) || u.ValueKind != JsonValueKind.Array)
+            return "";
+        var parts = new List<string>();
+        foreach (var s in u.EnumerateArray())
+        {
+            var text = s.ValueKind == JsonValueKind.String ? (s.GetString() ?? "").Trim() : "";
+            if (text.Length > 0) parts.Add(text);
+        }
+        return string.Join("\n\n", parts);
     }
 
     // ==================== 停止原因（对齐 Qt 批次 0） ====================
@@ -827,7 +905,6 @@ public sealed class AiPage : PageBase
         // 确认卡落在最后一段话下面：先把手头这段话封口
         CloseRound();
         var label = string.IsNullOrWhiteSpace(ev.Label) ? ev.Name : ev.Label;
-        var name = ev.Name ?? "";
         var reason = ev.Payload.ValueKind == JsonValueKind.Object
                      && ev.Payload.TryGetProperty("reason", out var rr)
                      && rr.ValueKind == JsonValueKind.String
@@ -849,11 +926,9 @@ public sealed class AiPage : PageBase
             if (preview.Length > 0)
                 detail = string.IsNullOrWhiteSpace(detail) ? preview : preview + "\n" + detail;
         }
-        var allowAlways = !string.Equals(name, "delete_instance", StringComparison.Ordinal)
-                          && !string.Equals(name, "delete_mod", StringComparison.Ordinal);
         var card = new ConfirmCard(label,
             detail,
-            allowAlways,
+            ConfirmCard.AllowAlways(ev),
             (ok, always, scope) =>
                 Run(async () => await Api.TryCallAsync<object>("ai_confirm",
                     new { ok, always, scope })));
@@ -1434,6 +1509,17 @@ internal sealed class ConfirmCard : Border
         SetResourceReference(BackgroundProperty, "B.WarnSoft");
         SetResourceReference(BorderBrushProperty, "B.Warn");
     }
+
+    /// <summary>
+    /// 给不给「始终允许」：桥按 TOOL_META 判好放在 allow_always（删除类、计划审批都不给，与 Qt 同一判据）；
+    /// 旧版桥没这一位就按名字兜底。
+    /// </summary>
+    public static bool AllowAlways(BridgeEvent ev) =>
+        ev.Payload.ValueKind == JsonValueKind.Object
+        && ev.Payload.TryGetProperty("allow_always", out var aa)
+        && aa.ValueKind is (JsonValueKind.True or JsonValueKind.False)
+            ? aa.ValueKind == JsonValueKind.True
+            : ev.Name is not ("delete_instance" or "delete_mod" or "plan_approval");
 }
 
 /// <summary>内联提问卡。每个问题一块，支持单选 / 多选，选中「其它」时露出自由文本框。</summary>

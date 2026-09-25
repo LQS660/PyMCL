@@ -2916,15 +2916,21 @@ class BackendAPI:
             # 记下这张卡对应的工具与参数：前端点「始终允许」时 ai_confirm 靠它拼 Rule
             self._ai_confirm_ctx = (name, dict(args or {}))
             from mclauncher.ai.permission import rule_content_from_input
+            from mclauncher.ai.tools import TOOL_META
             # 变更预览与 Qt 端同一函数：两端确认卡渲染同一份 lines，信息量一致
             try:
                 from mclauncher.ai import preview as ai_preview
                 pv = ai_preview.change_preview(self, name, args or {})
             except Exception:
                 pv = None
+            # 「始终允许」与 Qt 同一判据：删除类记一次就是整工具放行；计划审批（不在 TOOL_META）
+            # 是一次性的，内核不会记住。前端照这一位显隐，别各自写死名单
+            meta = TOOL_META.get(name)
             payload = {"name": name, "args": args or {}, "label": label, "reason": reason or "",
                        "rule_content": rule_content_from_input(args or {}) or "",
                        "preview": pv or {},
+                       "allow_always": meta is not None
+                       and getattr(meta, "side_effect", "") != "delete",
                        "chat_id": run_cid}
             # 卡片在 SSE 断线窗口里发出去就丢了，前端看不到卡、内核却在这儿等；
             # 存一份「待回答的卡」，前端重连后拿 ai_pending_card / ai_list_chats 对账补画。
@@ -2973,12 +2979,24 @@ class BackendAPI:
                     compacts.append(dict(m))
             return compacts, rows
 
+        unsent: list[str] = []
+        released = [False]
+
         def release():
             # 先放开 busy 再发收尾事件：前端收到 ai.done / ai.fail 往往立刻回查
             # ai_list_chats 的 busy 位或补发排队的下一句，这里若还挂着 busy，
             # 那一发就被「上一条还在处理」顶回去，按钮也会被对回「忙」。
-            self._ai_busy = False
+            # 只放一次：前端补发的下一回合可能已经开跑，finally 里再放会把它的 busy 和插话一起清掉。
+            if released[0]:
+                return
+            released[0] = True
             self._ai_http = None
+            # 内核只在每轮开头取插话，最后一轮之后才进来的它读不到：跟 busy 在同一把锁里取走，
+            # 随收尾事件交还前端当下一回合续发，否则这句话就凭空丢了
+            with self._ai_lock:
+                self._ai_busy = False
+                unsent.extend(self._ai_steer)
+                self._ai_steer = []
 
         def persist(new_messages: list) -> dict:
             """把本回合新增的几条追加进所属对话再落盘。
@@ -3005,7 +3023,8 @@ class BackendAPI:
                          {"role": "error", "content": text_shown}])
             except Exception:  # noqa: BLE001
                 pass
-            self._bus.emit("ai.fail", {"text": text_shown, "stopped": stopped, "chat_id": run_cid})
+            self._bus.emit("ai.fail", {"text": text_shown, "stopped": stopped, "chat_id": run_cid,
+                                       "unsent": list(unsent)})
 
         # 事件日志按对话分文件（对齐 app/pages/ai_page.py）：以前桥不设 ai_session_id，
         # trace 全落 active.jsonl 一份，几条对话的轨迹搅在一起。
@@ -3064,6 +3083,7 @@ class BackendAPI:
                 "plan": list(getattr(reply, "plan", []) or []),
                 # 6.1 会话累计用量（WPF 等价展示的数据源）
                 "usage": dict(getattr(reply, "usage", {}) or {}),
+                "unsent": list(unsent),
             })
         except AgentCancelled:
             fail(tr("已停止"), True)
