@@ -5,39 +5,62 @@ static cJSON *load_parent_ud(const char *pid, void *ud) {
     return instance_version_json(inst, pid);
 }
 
+/* 与 pymcl_replace_placeholders 同一套替换规则，但结果按需增长：${classpath} 常常上万字节，
+   定长缓冲区会把排在最后的客户端 jar 静默截掉 */
+static char *subst_dup(const char *text, cJSON *ph) {
+    size_t cap = strlen(text) + 1, o = 0;
+    char *out = (char *)malloc(cap);
+    for (const char *p = text; *p;) {
+        const char *val = NULL;
+        size_t skip = 1;
+        if (p[0] == '$' && p[1] == '{') {
+            const char *e = strchr(p + 2, '}');
+            if (e) {
+                char key[128];
+                size_t kn = (size_t)(e - (p + 2));
+                if (kn > sizeof(key) - 1) kn = sizeof(key) - 1;
+                memcpy(key, p + 2, kn); key[kn] = 0;
+                val = cJSON_GetStringValue(cJSON_GetObjectItem(ph, key));
+                if (val) skip = (size_t)(e + 1 - p);
+            }
+        }
+        size_t len = val ? strlen(val) : 1;
+        if (o + len + 1 > cap) {
+            while (o + len + 1 > cap) cap *= 2;
+            out = (char *)realloc(out, cap);
+        }
+        memcpy(out + o, val ? val : p, len);
+        o += len;
+        p += skip;
+    }
+    out[o] = 0;
+    return out;
+}
+
+/* 替换后还剩未知占位符的参数整条丢掉（同 Python _expand_args） */
+static void push_expanded(char ***out, int *n, const char *text, cJSON *ph) {
+    char *v = subst_dup(text, ph);
+    if (pymcl_has_placeholder(v)) { free(v); return; }
+    *out = (char **)realloc(*out, sizeof(char *) * (size_t)(*n + 1));
+    (*out)[(*n)++] = v;
+}
+
 static void expand_args(cJSON *raw, cJSON *ph, int custom_res, char ***out, int *n) {
     *out = NULL; *n = 0;
     if (!cJSON_IsArray(raw)) return;
     cJSON *e;
     cJSON_ArrayForEach(e, raw) {
         if (cJSON_IsString(e)) {
-            char buf[8192];
-            pymcl_replace_placeholders(e->valuestring, ph, buf, sizeof(buf));
-            if (!pymcl_has_placeholder(buf)) {
-                *out = (char **)realloc(*out, sizeof(char *) * (size_t)(*n + 1));
-                (*out)[(*n)++] = pymcl_strdup(buf);
-            }
+            push_expanded(out, n, e->valuestring, ph);
         } else if (cJSON_IsObject(e)) {
             if (!pymcl_check_rules(cJSON_GetObjectItem(e, "rules"), custom_res)) continue;
             cJSON *val = cJSON_GetObjectItem(e, "value");
             if (cJSON_IsString(val)) {
-                char buf[8192];
-                pymcl_replace_placeholders(val->valuestring, ph, buf, sizeof(buf));
-                if (!pymcl_has_placeholder(buf)) {
-                    *out = (char **)realloc(*out, sizeof(char *) * (size_t)(*n + 1));
-                    (*out)[(*n)++] = pymcl_strdup(buf);
-                }
+                push_expanded(out, n, val->valuestring, ph);
             } else if (cJSON_IsArray(val)) {
                 cJSON *x;
-                cJSON_ArrayForEach(x, val) {
-                    if (!cJSON_IsString(x)) continue;
-                    char buf[8192];
-                    pymcl_replace_placeholders(x->valuestring, ph, buf, sizeof(buf));
-                    if (!pymcl_has_placeholder(buf)) {
-                        *out = (char **)realloc(*out, sizeof(char *) * (size_t)(*n + 1));
-                        (*out)[(*n)++] = pymcl_strdup(buf);
-                    }
-                }
+                cJSON_ArrayForEach(x, val)
+                    if (cJSON_IsString(x)) push_expanded(out, n, x->valuestring, ph);
             }
         }
     }
@@ -110,6 +133,12 @@ int build_launch_command(const char *instance, const char *version, cJSON *accou
                          char ***argv, int *argc, char *natives_out, size_t nn) {
     cJSON *vjson = instance_version_json(instance, version);
     if (!vjson) { pymcl_set_error("版本 %s 未安装，请先安装。", version); return -1; }
+    /* 合并完继承链就没有 inheritsFrom 了，找客户端 jar 的回退得看原始 JSON（同 Python _client_jar_path）：
+       Fabric、Forge 1.13+ 的版本目录里通常没有自己的 jar，也不写 jar 字段 */
+    char child_jar[256], child_parent[256];
+    snprintf(child_jar, sizeof(child_jar), "%s", cJSON_GetStringValue(cJSON_GetObjectItem(vjson, "jar")) ?: "");
+    snprintf(child_parent, sizeof(child_parent), "%s",
+             cJSON_GetStringValue(cJSON_GetObjectItem(vjson, "inheritsFrom")) ?: "");
     cJSON *resolved = manifest_resolve_inherits(vjson, load_parent_ud, (void *)instance);
     cJSON_Delete(vjson);
     if (!resolved) return -1;
@@ -132,19 +161,21 @@ int build_launch_command(const char *instance, const char *version, cJSON *accou
     pymcl_path_join3(jar, sizeof(jar), vdir, version, jn);
     if (!pymcl_file_exists(jar)) {
         const char *alts[] = {
+            child_jar,
             cJSON_GetStringValue(cJSON_GetObjectItem(resolved, "jar")),
+            child_parent,
             cJSON_GetStringValue(cJSON_GetObjectItem(resolved, "inheritsFrom")),
-            NULL
         };
         int found = 0;
-        for (int i = 0; alts[i]; i++) {
+        for (size_t i = 0; i < sizeof(alts) / sizeof(alts[0]) && !found; i++) {
+            if (!alts[i] || !alts[i][0]) continue;
             char alt[PYMCL_PATH], an[256];
             snprintf(an, sizeof(an), "%s.jar", alts[i]);
             pymcl_path_join3(alt, sizeof(alt), vdir, alts[i], an);
-            if (pymcl_file_exists(alt)) { snprintf(jar, sizeof(jar), "%s", alt); found = 1; break; }
+            if (pymcl_file_exists(alt)) { snprintf(jar, sizeof(jar), "%s", alt); found = 1; }
         }
         if (!found) {
-            pymcl_set_error("客户端 jar 缺失: %s", jar);
+            pymcl_set_error("客户端 jar 缺失: %s\n请重新安装版本 %s。", jar, version);
             cJSON_Delete(resolved); free(jexe); return -1;
         }
     }
@@ -191,11 +222,16 @@ int build_launch_command(const char *instance, const char *version, cJSON *accou
     cJSON_Delete(seen);
     cp = (char **)realloc(cp, sizeof(char *) * (size_t)(ncp + 1));
     cp[ncp++] = pymcl_strdup(jar);
-    char classpath[32768] = {0};
+    size_t cplen = 1;
+    for (int i = 0; i < ncp; i++) cplen += strlen(cp[i]) + 1;
+    char *classpath = (char *)malloc(cplen), *cw = classpath;
     for (int i = 0; i < ncp; i++) {
-        if (i) strncat(classpath, ";", sizeof(classpath) - strlen(classpath) - 1);
-        strncat(classpath, cp[i], sizeof(classpath) - strlen(classpath) - 1);
+        if (i) *cw++ = ';';
+        size_t L = strlen(cp[i]);
+        memcpy(cw, cp[i], L);
+        cw += L;
     }
+    *cw = 0;
 
     cJSON *ph = cJSON_CreateObject();
     const char *pname = cJSON_GetStringValue(cJSON_GetObjectItem(account_props, "name")) ?: "Player";
@@ -256,17 +292,17 @@ int build_launch_command(const char *instance, const char *version, cJSON *accou
             jvm[nj++] = pymcl_strdup(classpath);
         }
     } else {
-        if (mine_args) {
-            char buf[4096];
-            pymcl_replace_placeholders(mine_args, ph, buf, sizeof(buf));
-            char *tok = strtok(buf, " ");
-            while (tok) {
-                if (!pymcl_has_placeholder(tok)) {
-                    game = (char **)realloc(game, sizeof(char *) * (size_t)(ng + 1));
-                    game[ng++] = pymcl_strdup(tok);
-                }
-                tok = strtok(NULL, " ");
-            }
+        /* 先按空格切模板再逐段替换（同 Python）：先替换再切，游戏目录里的空格会把一个参数拆成几段 */
+        for (const char *p = mine_args ? mine_args : ""; *p;) {
+            if (*p == ' ') { p++; continue; }
+            const char *e = strchr(p, ' ');
+            size_t len = e ? (size_t)(e - p) : strlen(p);
+            char *tok = (char *)malloc(len + 1);
+            memcpy(tok, p, len);
+            tok[len] = 0;
+            push_expanded(&game, &ng, tok, ph);
+            free(tok);
+            p += len;
         }
         char lp[PYMCL_PATH + 32];
         snprintf(lp, sizeof(lp), "-Djava.library.path=%s", natives);
@@ -329,6 +365,7 @@ int build_launch_command(const char *instance, const char *version, cJSON *accou
     free(jvm); free(game);
     for (int i = 0; i < ncp; i++) free(cp[i]);
     free(cp);
+    free(classpath);
     free(jexe);
     cJSON_Delete(ph);
     cJSON_Delete(resolved);
