@@ -128,3 +128,13 @@ config.json.bak*
 # 整包旧备份与一次性提示词（2026-09-19 清理，git 历史可找回）
 /_app_backup_i18n/
 /WINUI3_AGENT_PROMPT.md
+
+# 图标生成管线的中间产物（proc/raw，成品已内联进 icon_assets.py / LucideAssets.cs）
+/_gen_icons/
+# AI 上游 SSE 抓包
+/_upstream_cap/
+# native 构建前的旁路 DLL 备份
+/native/_build_dll_backup/
+# 迁移前的整包备份 zip 与预览大图
+/_backup_*.zip
+/_*_view.jpg
