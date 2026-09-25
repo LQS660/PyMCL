@@ -1,0 +1,12 @@
+[
+  {"method": "ensure_thumb", "params": {"url": "http://127.0.0.1:9/nothing.png"}, "timeout": 60},
+  {"method": "fetch_news", "params": {}, "timeout": 90},
+  {"method": "check_update", "params": {}, "timeout": 90, "ignore": ["message"]},
+  {"method": "list_loader_versions", "params": {"mc_version": "1.20.1", "loader": "fabric"}, "timeout": 90},
+  {"method": "list_loader_versions", "params": {"mc_version": "1.20.1", "loader": "quilt"}, "timeout": 90},
+  {"method": "list_loader_versions", "params": {"mc_version": "1.20.1", "loader": "forge"}, "timeout": 120},
+  {"method": "list_loader_versions", "params": {"mc_version": "1.20.1", "loader": "neoforge"}, "timeout": 120},
+  {"method": "list_loader_versions", "params": {"mc_version": "1.20.1", "loader": "optifine"}, "timeout": 90},
+  {"method": "list_loader_versions", "params": {"mc_version": "1.12.2", "loader": "liteloader"}, "timeout": 90},
+  {"method": "list_loader_versions", "params": {"mc_version": "1.20.1", "loader": "none"}}
+]

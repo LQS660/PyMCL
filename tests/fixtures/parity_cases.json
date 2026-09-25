@@ -1,0 +1,1334 @@
+[
+ {
+  "method": "get_settings",
+  "params": {}
+ },
+ {
+  "method": "get_setting",
+  "params": {
+   "key": "memory_mb"
+  }
+ },
+ {
+  "method": "get_setting",
+  "params": {
+   "key": "no_such_key",
+   "default": "fallback"
+  }
+ },
+ {
+  "method": "get_language",
+  "params": {}
+ },
+ {
+  "method": "available_languages",
+  "params": {}
+ },
+ {
+  "method": "translate",
+  "params": {
+   "key": "新对话"
+  }
+ },
+ {
+  "method": "translate",
+  "params": {
+   "key": "新对话",
+   "lang": "en"
+  }
+ },
+ {
+  "method": "get_instances",
+  "params": {}
+ },
+ {
+  "method": "get_installed_versions",
+  "params": {
+   "instance": "default"
+  }
+ },
+ {
+  "method": "get_installed_versions",
+  "params": {
+   "instance": ".minecraft",
+   "include_hidden": true
+  }
+ },
+ {
+  "method": "get_installed_versions",
+  "params": {
+   "instance": ""
+  }
+ },
+ {
+  "method": "get_version_rows",
+  "params": {}
+ },
+ {
+  "method": "get_version_rows",
+  "params": {
+   "include_hidden": true
+  }
+ },
+ {
+  "method": "get_version_isolation",
+  "params": {
+   "version": "1.20.1"
+  }
+ },
+ {
+  "method": "get_version_settings",
+  "params": {
+   "instance": "default",
+   "version": "1.20.1"
+  }
+ },
+ {
+  "method": "loader_of",
+  "params": {
+   "version_id": "fabric-loader-0.15.11-1.20.1"
+  }
+ },
+ {
+  "method": "loader_of",
+  "params": {
+   "version_id": "1.20.1"
+  }
+ },
+ {
+  "method": "list_saves",
+  "params": {
+   "instance": "default"
+  }
+ },
+ {
+  "method": "list_save_backups",
+  "params": {
+   "instance": "default",
+   "name": "Parity World"
+  }
+ },
+ {
+  "method": "list_save_backups",
+  "params": {
+   "instance": "default"
+  }
+ },
+ {
+  "method": "list_media",
+  "params": {
+   "instance": "default",
+   "kind": "screenshots"
+  }
+ },
+ {
+  "method": "list_media",
+  "params": {
+   "instance": "default",
+   "kind": "crash-reports"
+  }
+ },
+ {
+  "method": "list_media",
+  "params": {
+   "instance": "default",
+   "kind": "logs"
+  }
+ },
+ {
+  "method": "list_media",
+  "params": {
+   "instance": "default",
+   "kind": "videos"
+  }
+ },
+ {
+  "method": "get_installed_mod_entries",
+  "params": {
+   "instance": "default"
+  }
+ },
+ {
+  "method": "get_installed_mod_entries",
+  "params": {
+   "instance": "default",
+   "version": "1.20.1"
+  }
+ },
+ {
+  "method": "get_mods_targets",
+  "params": {
+   "instance": "default"
+  }
+ },
+ {
+  "method": "get_saves_targets",
+  "params": {}
+ },
+ {
+  "method": "list_global_mods",
+  "params": {}
+ },
+ {
+  "method": "list_themes",
+  "params": {}
+ },
+ {
+  "method": "get_all_playtime",
+  "params": {}
+ },
+ {
+  "method": "get_playtime",
+  "params": {
+   "instance": "default"
+  }
+ },
+ {
+  "method": "get_playtime",
+  "params": {
+   "instance": ".minecraft"
+  }
+ },
+ {
+  "method": "get_total_playtime",
+  "params": {}
+ },
+ {
+  "method": "format_playtime",
+  "params": {
+   "seconds": 3725
+  }
+ },
+ {
+  "method": "format_playtime",
+  "params": {
+   "seconds": 59
+  }
+ },
+ {
+  "method": "format_playtime",
+  "params": {
+   "seconds": -5
+  }
+ },
+ {
+  "method": "game_root_name",
+  "params": {}
+ },
+ {
+  "method": "game_root_path",
+  "params": {}
+ },
+ {
+  "method": "is_game_running",
+  "params": {}
+ },
+ {
+  "method": "allow_multi_instance",
+  "params": {}
+ },
+ {
+  "method": "java_vendor_list",
+  "params": {}
+ },
+ {
+  "method": "java_vendor_label",
+  "params": {
+   "vendor": "adoptium"
+  }
+ },
+ {
+  "method": "java_vendor_label",
+  "params": {
+   "vendor": "Unknown-Vendor"
+  }
+ },
+ {
+  "method": "normalize_java_pref",
+  "params": {
+   "java": "自动选择"
+  }
+ },
+ {
+  "method": "normalize_java_pref",
+  "params": {
+   "java": "C:\\no\\such\\java.exe"
+  }
+ },
+ {
+  "method": "get_java_list",
+  "params": {}
+ },
+ {
+  "method": "get_instance_java",
+  "params": {
+   "name": "default"
+  }
+ },
+ {
+  "method": "instance_java_label",
+  "params": {
+   "name": "default"
+  }
+ },
+ {
+  "method": "catalog_favorites",
+  "params": {}
+ },
+ {
+  "method": "help_articles",
+  "params": {}
+ },
+ {
+  "method": "help_articles",
+  "params": {
+   "query": "java"
+  }
+ },
+ {
+  "method": "help_articles",
+  "params": {
+   "query": "  MODRINTH "
+  }
+ },
+ {
+  "method": "help_article",
+  "params": {
+   "article_id": "java"
+  }
+ },
+ {
+  "method": "help_article",
+  "params": {
+   "article_id": "no-such-article"
+  }
+ },
+ {
+  "method": "cleaner_preview",
+  "params": {}
+ },
+ {
+  "method": "lan_hint",
+  "params": {}
+ },
+ {
+  "method": "lan_hint",
+  "params": {
+   "port": 25570
+  }
+ },
+ {
+  "method": "local_ips",
+  "params": {}
+ },
+ {
+  "method": "get_smart_recommendation",
+  "params": {}
+ },
+ {
+  "method": "is_download_title",
+  "params": {
+   "title": "安装游戏"
+  }
+ },
+ {
+  "method": "is_download_title",
+  "params": {
+   "title": "启动游戏 1.20.1"
+  }
+ },
+ {
+  "method": "task_title",
+  "params": {
+   "task_id": "no-such-task"
+  }
+ },
+ {
+  "method": "list_tasks",
+  "params": {}
+ },
+ {
+  "method": "wait_task",
+  "params": {
+   "task_id": "no-such-task",
+   "timeout": 0.5
+  }
+ },
+ {
+  "method": "list_servers",
+  "params": {
+   "instance": "default"
+  }
+ },
+ {
+  "method": "get_layout",
+  "params": {}
+ },
+ {
+  "method": "get_accounts",
+  "params": {}
+ },
+ {
+  "method": "get_account_rows",
+  "params": {}
+ },
+ {
+  "method": "authlib_presets",
+  "params": {}
+ },
+ {
+  "method": "skin_urls",
+  "params": {}
+ },
+ {
+  "method": "skin_urls",
+  "params": {
+   "account_name": "Alex Smith"
+  }
+ },
+ {
+  "method": "get_account_skin",
+  "params": {
+   "name": "nobody"
+  }
+ },
+ {
+  "method": "default_export_dir",
+  "params": {}
+ },
+ {
+  "method": "background_history",
+  "params": {}
+ },
+ {
+  "method": "can_undo_background",
+  "params": {}
+ },
+ {
+  "method": "ai_list_chats",
+  "params": {},
+  "ignore": [
+   "active_id",
+   "chats.*.id",
+   "chats.*.updated"
+  ],
+  "file_ignore": [
+   "active_id",
+   "chats.*.id",
+   "chats.*.updated"
+  ]
+ },
+ {
+  "method": "ai_new_chat",
+  "params": {},
+  "ignore": [
+   "active_id",
+   "chats.*.id",
+   "chats.*.updated"
+  ],
+  "file_ignore": [
+   "active_id",
+   "chats.*.id",
+   "chats.*.updated"
+  ]
+ },
+ {
+  "method": "ai_delete_chat",
+  "params": {
+   "chat_id": "no-such-chat"
+  },
+  "ignore": [
+   "active_id",
+   "chats.*.id",
+   "chats.*.updated"
+  ],
+  "file_ignore": [
+   "active_id",
+   "chats.*.id",
+   "chats.*.updated"
+  ]
+ },
+ {
+  "method": "ai_set_active",
+  "params": {
+   "chat_id": "no-such-chat"
+  },
+  "ignore": [
+   "active_id",
+   "chats.*.id",
+   "chats.*.updated"
+  ]
+ },
+ {
+  "method": "ai_permission_rule_add",
+  "params": {
+   "tool": "install_mod",
+   "behavior": "allow",
+   "content": " sodium "
+  }
+ },
+ {
+  "method": "ai_permission_rule_add",
+  "params": {
+   "tool": "delete_mod",
+   "behavior": "deny",
+   "instance": ".minecraft"
+  }
+ },
+ {
+  "method": "ai_permission_rule_add",
+  "params": {
+   "tool": "install_mod",
+   "behavior": "allow",
+   "content": "sodium"
+  }
+ },
+ {
+  "method": "ai_permission_rule_add",
+  "params": {
+   "tool": "bogus_tool"
+  }
+ },
+ {
+  "method": "ai_permission_rule_add",
+  "params": {
+   "tool": "install_mod",
+   "behavior": "maybe"
+  }
+ },
+ {
+  "method": "ai_permission_rules",
+  "params": {}
+ },
+ {
+  "method": "ai_permission_rule_remove",
+  "params": {
+   "key": "install_mod\u0000sodium"
+  }
+ },
+ {
+  "method": "ai_permission_rule_remove",
+  "params": {
+   "key": "delete_mod\u0000",
+   "instance": ".minecraft"
+  }
+ },
+ {
+  "method": "test_ai_connection",
+  "params": {
+   "settings": {
+    "ai_mode": "custom"
+   }
+  }
+ },
+ {
+  "method": "test_ai_connection",
+  "params": {
+   "settings": {
+    "ai_mode": "custom",
+    "ai_base_url": "http://127.0.0.1:9/"
+   }
+  }
+ },
+ {
+  "method": "test_ai_connection",
+  "params": {}
+ },
+ {
+  "method": "ai_permission_rules",
+  "params": {}
+ },
+ {
+  "method": "get_crash",
+  "params": {}
+ },
+ {
+  "method": "delete_modpack",
+  "params": {
+   "instance": "default"
+  }
+ },
+ {
+  "method": "set_global_mod_enabled",
+  "params": {
+   "filename": "global-b-1.0.jar.disabled",
+   "enabled": true
+  }
+ },
+ {
+  "method": "set_global_mod_enabled",
+  "params": {
+   "filename": "global-a-1.0.jar",
+   "enabled": false
+  }
+ },
+ {
+  "method": "set_global_mod_enabled",
+  "params": {
+   "filename": "missing.jar",
+   "enabled": true
+  }
+ },
+ {
+  "method": "list_global_mods",
+  "params": {}
+ },
+ {
+  "method": "save_theme",
+  "params": {
+   "name": "My Theme"
+  }
+ },
+ {
+  "method": "list_themes",
+  "params": {}
+ },
+ {
+  "method": "load_theme",
+  "params": {
+   "name": "Ocean"
+  }
+ },
+ {
+  "method": "load_theme",
+  "params": {
+   "name": "no such theme"
+  }
+ },
+ {
+  "method": "export_theme",
+  "params": {
+   "name": "Ocean",
+   "dest": "<ROOT>\\ocean-export.json"
+  }
+ },
+ {
+  "method": "import_theme",
+  "params": {
+   "path": "<ROOT>\\ocean-export.json"
+  }
+ },
+ {
+  "method": "delete_theme",
+  "params": {
+   "name": "My Theme"
+  }
+ },
+ {
+  "method": "list_themes",
+  "params": {}
+ },
+ {
+  "method": "export_save",
+  "params": {
+   "instance": "default",
+   "name": "Parity World",
+   "dest": "<ROOT>\\exports"
+  }
+ },
+ {
+  "method": "export_save",
+  "params": {
+   "instance": "default",
+   "name": "Parity World",
+   "dest": "<ROOT>\\exports\\world.dat"
+  }
+ },
+ {
+  "method": "restore_save_backup",
+  "params": {
+   "instance": "default",
+   "backup_name": "Parity World-20240101-000000.zip"
+  }
+ },
+ {
+  "method": "list_saves",
+  "params": {
+   "instance": "default"
+  }
+ },
+ {
+  "method": "install_datapack_into_save",
+  "params": {
+   "instance": "default",
+   "filename": "fixture-pack.zip",
+   "save_name": "Parity World"
+  }
+ },
+ {
+  "method": "install_datapack_into_save",
+  "params": {
+   "instance": "default",
+   "filename": "missing.zip",
+   "save_name": "Parity World"
+  }
+ },
+ {
+  "method": "delete_save",
+  "params": {
+   "instance": "default",
+   "name": "Parity World-还原"
+  }
+ },
+ {
+  "method": "delete_save",
+  "params": {
+   "instance": "default",
+   "name": "..\\escape"
+  }
+ },
+ {
+  "method": "delete_save",
+  "params": {
+   "instance": "default",
+   "name": "Nope World"
+  }
+ },
+ {
+  "method": "delete_save_backup",
+  "params": {
+   "instance": "default",
+   "backup_name": "missing.zip"
+  }
+ },
+ {
+  "method": "delete_save_backup",
+  "params": {
+   "instance": "default",
+   "backup_name": "Parity World-20240101-000000.zip"
+  }
+ },
+ {
+  "method": "list_save_backups",
+  "params": {
+   "instance": "default"
+  }
+ },
+ {
+  "method": "remember_export_dir",
+  "params": {
+   "path": "<ROOT>\\exports"
+  }
+ },
+ {
+  "method": "remember_export_dir",
+  "params": {
+   "path": "<ROOT>\\no-such-dir"
+  }
+ },
+ {
+  "method": "default_export_dir",
+  "params": {}
+ },
+ {
+  "method": "set_multi_instance",
+  "params": {
+   "allow": true
+  }
+ },
+ {
+  "method": "allow_multi_instance",
+  "params": {}
+ },
+ {
+  "method": "toggle_favorite",
+  "params": {
+   "item": {
+    "name": "Sodium",
+    "source": "Modrinth",
+    "slug": "sodium"
+   }
+  }
+ },
+ {
+  "method": "toggle_favorite",
+  "params": {
+   "item": {
+    "name": "Lithium",
+    "source": "Modrinth",
+    "id": "gvQqBUqZ"
+   }
+  }
+ },
+ {
+  "method": "toggle_favorite",
+  "params": {
+   "item": {
+    "name": "Sodium",
+    "source": "Modrinth",
+    "slug": "sodium"
+   }
+  }
+ },
+ {
+  "method": "catalog_favorites",
+  "params": {}
+ },
+ {
+  "method": "reset_background",
+  "params": {}
+ },
+ {
+  "method": "undo_background",
+  "params": {}
+ },
+ {
+  "method": "cleaner_apply",
+  "params": {
+   "kinds": [
+    "parts"
+   ]
+  }
+ },
+ {
+  "method": "stash_upload",
+  "params": {
+   "name": "hello.txt",
+   "data": "aGVsbG8="
+  }
+ },
+ {
+  "method": "stash_upload",
+  "params": {
+   "name": "bad.txt",
+   "data": "***"
+  }
+ },
+ {
+  "method": "stash_upload",
+  "params": {
+   "name": "empty.txt",
+   "data": ""
+  }
+ },
+ {
+  "method": "add_server",
+  "params": {
+   "instance": "default",
+   "name": "Hypixel",
+   "ip": "mc.hypixel.net"
+  }
+ },
+ {
+  "method": "add_server",
+  "params": {
+   "instance": "default",
+   "name": "",
+   "ip": " play.example.org:25570 ",
+   "description": " test "
+  }
+ },
+ {
+  "method": "add_server",
+  "params": {
+   "instance": "default",
+   "name": "Bad",
+   "ip": "   "
+  }
+ },
+ {
+  "method": "add_server",
+  "params": {
+   "instance": "default",
+   "name": "Bad",
+   "ip": "x.org",
+   "port": 70000
+  }
+ },
+ {
+  "method": "list_servers",
+  "params": {
+   "instance": "default"
+  }
+ },
+ {
+  "method": "update_server",
+  "params": {
+   "instance": "default",
+   "index": 1,
+   "name": "Example",
+   "port": 25580,
+   "hidden": true
+  }
+ },
+ {
+  "method": "update_server",
+  "params": {
+   "instance": "default",
+   "index": 9,
+   "name": "x"
+  }
+ },
+ {
+  "method": "import_servers",
+  "params": {
+   "instance": "default",
+   "text": "# comment\nLobby\tlobby.example.org:25566\nmc.hypixel.net\n\nraw.example.org\n"
+  }
+ },
+ {
+  "method": "export_servers",
+  "params": {
+   "instance": "default"
+  }
+ },
+ {
+  "method": "delete_server",
+  "params": {
+   "instance": "default",
+   "index": 0
+  }
+ },
+ {
+  "method": "delete_server",
+  "params": {
+   "instance": "default",
+   "index": 99
+  }
+ },
+ {
+  "method": "list_servers",
+  "params": {
+   "instance": "default"
+  }
+ },
+ {
+  "method": "hide_version",
+  "params": {
+   "instance": "default",
+   "version": "1.20.1",
+   "hidden": true
+  }
+ },
+ {
+  "method": "get_installed_versions",
+  "params": {
+   "instance": "default"
+  }
+ },
+ {
+  "method": "get_version_rows",
+  "params": {}
+ },
+ {
+  "method": "hide_version",
+  "params": {
+   "instance": "default",
+   "version": "1.20.1",
+   "hidden": false
+  }
+ },
+ {
+  "method": "hide_version",
+  "params": {
+   "instance": "default",
+   "version": "no-such"
+  }
+ },
+ {
+  "method": "copy_version",
+  "params": {
+   "instance": "default",
+   "version": "1.20.1",
+   "new_id": " My: Copy? "
+  }
+ },
+ {
+  "method": "copy_version",
+  "params": {
+   "instance": "default",
+   "version": "1.20.1",
+   "new_id": "My- Copy-"
+  }
+ },
+ {
+  "method": "copy_version",
+  "params": {
+   "instance": "default",
+   "version": "1.20.1",
+   "new_id": "   "
+  }
+ },
+ {
+  "method": "rename_version",
+  "params": {
+   "instance": "default",
+   "version": "My- Copy-",
+   "new_id": "Renamed"
+  }
+ },
+ {
+  "method": "rename_version",
+  "params": {
+   "instance": "default",
+   "version": "Renamed",
+   "new_id": "Renamed"
+  }
+ },
+ {
+  "method": "get_installed_versions",
+  "params": {
+   "instance": "default"
+  }
+ },
+ {
+  "method": "set_version_isolation",
+  "params": {
+   "version": "Renamed",
+   "mode": "all"
+  }
+ },
+ {
+  "method": "set_version_isolation",
+  "params": {
+   "version": "Renamed",
+   "mode": "bogus"
+  }
+ },
+ {
+  "method": "toggle_version_isolation",
+  "params": {
+   "version": "Renamed",
+   "isolated": false
+  }
+ },
+ {
+  "method": "get_mods_targets",
+  "params": {
+   "instance": "default"
+  }
+ },
+ {
+  "method": "export_content",
+  "params": {
+   "kind": "mod",
+   "name": "parity-mod-1.0.0.jar",
+   "dest_dir": "<ROOT>\\exp"
+  }
+ },
+ {
+  "method": "export_content",
+  "params": {
+   "kind": "mod",
+   "name": "parity-mod-1.0.0.jar",
+   "dest_dir": "<ROOT>\\exp"
+  }
+ },
+ {
+  "method": "export_content",
+  "params": {
+   "kind": "world",
+   "name": "Parity World",
+   "dest_dir": "<ROOT>\\exp"
+  }
+ },
+ {
+  "method": "export_content",
+  "params": {
+   "kind": "bogus",
+   "name": "x"
+  }
+ },
+ {
+  "method": "export_content",
+  "params": {
+   "kind": "mod",
+   "name": "missing.jar"
+  }
+ },
+ {
+  "method": "export_contents",
+  "params": {
+   "kind": "mod",
+   "names": [
+    "parity-mod-1.0.0.jar",
+    "missing.jar"
+   ],
+   "dest_dir": "<ROOT>\\exp2"
+  }
+ },
+ {
+  "method": "official_launcher_dir",
+  "params": {}
+ },
+ {
+  "method": "detect_official_launcher",
+  "params": {}
+ },
+ {
+  "method": "scan_official_versions",
+  "params": {}
+ },
+ {
+  "method": "thumb_path",
+  "params": {
+   "url": "https://cdn.modrinth.com/data/AANobbMI/icon.PNG?size=64"
+  }
+ },
+ {
+  "method": "thumb_path",
+  "params": {
+   "url": "https://example.org/a/b"
+  }
+ },
+ {
+  "method": "thumb_path",
+  "params": {
+   "url": ""
+  }
+ },
+ {
+  "method": "cached_news",
+  "params": {}
+ },
+ {
+  "method": "cached_news",
+  "params": {}
+ },
+ {
+  "method": "set_language",
+  "params": {
+   "lang": "en"
+  }
+ },
+ {
+  "method": "get_language",
+  "params": {}
+ },
+ {
+  "method": "translate",
+  "params": {
+   "key": "新对话"
+  }
+ },
+ {
+  "method": "get_instances",
+  "params": {}
+ },
+ {
+  "method": "set_language",
+  "params": {
+   "lang": "xx-YY"
+  }
+ },
+ {
+  "method": "get_language",
+  "params": {}
+ },
+ {
+  "method": "set_game_dir",
+  "params": {
+   "path": ".minecraft"
+  }
+ },
+ {
+  "method": "game_root_path",
+  "params": {}
+ },
+ {
+  "method": "build_launch_command",
+  "params": {
+   "instance": ".minecraft",
+   "version": "1.20.1",
+   "account": "",
+   "username": "Parity",
+   "memory_mb": 1024,
+   "width": 800,
+   "height": 600,
+   "java": "自动选择"
+  }
+ },
+ {
+  "method": "build_launch_command",
+  "params": {
+   "instance": ".minecraft",
+   "version": "",
+   "account": "离线模式",
+   "username": "Player",
+   "memory_mb": 4096,
+   "width": 854,
+   "height": 480,
+   "java": "自动选择"
+  }
+ },
+ {
+  "method": "build_launch_command",
+  "params": {
+   "instance": ".minecraft",
+   "version": "1.20.1",
+   "account": "nobody",
+   "username": "Player",
+   "memory_mb": 4096,
+   "width": 854,
+   "height": 480,
+   "java": "自动选择"
+  }
+ },
+ {
+  "method": "build_launch_command",
+  "params": {
+   "instance": ".minecraft",
+   "version": "9.9.9",
+   "account": "",
+   "username": "Player",
+   "memory_mb": 4096,
+   "width": 854,
+   "height": 480,
+   "java": "自动选择"
+  }
+ },
+ {
+  "method": "get_launch_command",
+  "params": {
+   "instance": ".minecraft",
+   "version": "1.20.1",
+   "account": "",
+   "username": "Parity",
+   "memory_mb": 0
+  }
+ },
+ {
+  "method": "get_launch_command",
+  "params": {
+   "instance": ".minecraft",
+   "version": "",
+   "account": "",
+   "username": "Player",
+   "memory_mb": 0
+  }
+ },
+ {
+  "method": "get_launch_command",
+  "params": {
+   "instance": ".minecraft",
+   "version": "9.9.9",
+   "account": "",
+   "username": "Player",
+   "memory_mb": 0
+  }
+ },
+ {
+  "method": "terracotta_snapshot",
+  "params": {}
+ },
+ {
+  "method": "terracotta_player",
+  "params": {}
+ },
+ {
+  "method": "terracotta_idle",
+  "params": {}
+ },
+ {
+  "method": "terracotta_shutdown",
+  "params": {}
+ },
+ {
+  "method": "terracotta_enter_world",
+  "params": {}
+ },
+ {
+  "method": "terracotta_allow_firewall",
+  "params": {}
+ },
+ {
+  "method": "terracotta_join",
+  "params": {}
+ },
+ {
+  "method": "terracotta_join",
+  "params": {
+   "room": ""
+  }
+ },
+ {
+  "method": "terracotta_join",
+  "params": {
+   "room": "   "
+  }
+ },
+ {
+  "method": "terracotta_join",
+  "params": {
+   "room": "abc"
+  }
+ },
+ {
+  "method": "terracotta_join",
+  "params": {
+   "room": "U/1234-5678-9ABC-DEFG"
+  }
+ },
+ {
+  "method": "terracotta_join",
+  "params": {
+   "room": "ABCDE-ABCDE-ABCDE-ABCDE-ABCDE"
+  }
+ },
+ {
+  "method": "terracotta_join",
+  "params": {
+   "room": "23456789AB"
+  }
+ },
+ {
+  "method": "terracotta_join",
+  "params": {
+   "room": "uvw"
+  }
+ },
+ {
+  "method": "terracotta_join",
+  "params": {
+   "room": "U/7Z9D-SCMV-3000-0000"
+  }
+ },
+ {
+  "method": "terracotta_join",
+  "params": {
+   "room": "邀请码 u/7z9d-scmv-3000-0000 谢谢"
+  }
+ },
+ {
+  "method": "terracotta_host",
+  "params": {}
+ },
+ {
+  "method": "terracotta_direct_connect",
+  "params": {}
+ },
+ {
+  "method": "terracotta_direct_connect",
+  "params": {
+   "address": ""
+  }
+ },
+ {
+  "method": "terracotta_direct_connect",
+  "params": {
+   "address": "127.0.0.1:25565"
+  }
+ },
+ {
+  "method": "terracotta_direct_connect",
+  "params": {
+   "address": "localhost"
+  }
+ },
+ {
+  "method": "terracotta_direct_connect",
+  "params": {
+   "address": "1.2.3.4:abc"
+  }
+ },
+ {
+  "method": "terracotta_direct_connect",
+  "params": {
+   "address": "tcp://:25565"
+  }
+ },
+ {
+  "method": "terracotta_snapshot",
+  "params": {}
+ }
+]
