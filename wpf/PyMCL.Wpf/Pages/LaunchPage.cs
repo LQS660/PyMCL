@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Windows;
@@ -1029,7 +1030,9 @@ public sealed class LaunchPage : PageBase
             string? cmd;
             try
             {
-                cmd = await Api.CallAsync<string>("build_launch_command", new
+                // bridge/api.py 的 build_launch_command 返回的是参数数组（launcher.build_launch_command
+                // 的第一个返回值），按 string 反序列化只会得到 null——按数组取再自己拼成一行
+                var parts = await Api.CallAsync<List<string>>("build_launch_command", new
                 {
                     instance = _inst.Str(),
                     version = ver,
@@ -1040,6 +1043,7 @@ public sealed class LaunchPage : PageBase
                     height = Int(_hBox.Text, 480),
                     java = SelectedJava(),
                 });
+                cmd = parts is { Count: > 0 } ? string.Join(" ", parts) : null;
             }
             catch (BridgeCallException)
             {
