@@ -119,6 +119,39 @@ class CompactNoteUiTests(unittest.TestCase):
         self.assertEqual(roles_ids[1], ("user", ""))
         self.assertEqual(roles_ids[-1], ("assistant", ""))
 
+    def test_finish_persists_drained_steer_in_place(self):
+        page = self._page([])
+        page._pending_user = "装 Iris"
+        call = {"id": "c1", "type": "function",
+                "function": {"name": "install_mod", "arguments": "{}"}}
+        result = SimpleNamespace(
+            stop_reason=StopReason.COMPLETED,
+            turn_messages=[
+                {"role": "user", "content": "装 Iris"},
+                {"role": "assistant", "content": "", "tool_calls": [call]},
+                {"role": "tool", "content": "ok", "tool_call_id": "c1"},
+                {"role": "user", "content": "顺便装钠", "id": "steer_t_0"},
+                {"role": "assistant", "content": "都装好了"},
+            ],
+            usage={"requests": 1},
+            plan=[],
+        )
+        page._finish("都装好了", True, result)
+        self.assertEqual([(m.get("role"), m.get("content")) for m in page._history],
+                         [("user", "装 Iris"), ("assistant", ""), ("tool", "ok"),
+                          ("user", "顺便装钠"), ("assistant", "都装好了")])
+
+    def test_retry_skips_steer_message(self):
+        page = self._page([
+            {"role": "user", "content": "装 Iris"},
+            {"role": "user", "content": "顺便装钠", "id": "steer_t_0"},
+            {"role": "assistant", "content": "都装好了"},
+        ])
+        sent = []
+        page._send = lambda text, **kw: sent.append(text)
+        page._retry()
+        self.assertEqual(sent, ["装 Iris"], "重试重发的是回合开头那句，不是插的那句")
+
 
 if __name__ == "__main__":
     unittest.main()

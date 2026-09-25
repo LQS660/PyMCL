@@ -356,6 +356,24 @@ class InterruptAndSteeringTests(unittest.TestCase):
         self.assertEqual(len(steer), 1, "插话必须作为 user 消息进入下一轮请求")
         self.assertEqual(res.stop_reason, StopReason.COMPLETED)
 
+    def test_drained_steer_is_exported_in_place_for_persistence(self):
+        """被读到的插话要随 turn_messages 入库：按原位置、带 steer_ id；发给模型的原件不带 id。"""
+        streams = [
+            [{"type": "tool_calls", "tool_calls": [_tc("a", "list_mods")]}],
+            [{"type": "delta", "text": "好的，内存改到 8G。"}, {"type": "done"}],
+        ]
+        queue = [[], ["内存加到 8G"]]    # 第 2 轮开头才读到：夹在工具结果和最终答复之间
+        res, seen = self._run(streams, drain_inputs_fn=lambda: queue.pop(0))
+        roles = [m.get("role") for m in res.turn_messages]
+        steer_at = next(i for i, m in enumerate(res.turn_messages)
+                        if m.get("content") == "内存加到 8G")
+        self.assertTrue(str(res.turn_messages[steer_at].get("id") or "").startswith("steer_"))
+        self.assertLess(roles.index("tool"), steer_at)
+        self.assertEqual(roles[steer_at + 1:], ["assistant"])
+        sent = [m for m in seen[1] if m.get("content") == "内存加到 8G"]
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn("id", sent[0], "发给模型的消息不能多出 id 字段")
+
     def test_truncation_continuation_messages(self):
         """W4-4：截断后续写请求注入 assistant+user 两条消息。"""
         streams = [

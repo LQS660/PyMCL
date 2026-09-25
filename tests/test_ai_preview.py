@@ -177,6 +177,28 @@ class RewindTests(unittest.TestCase):
         data3 = chat_store.load()
         self.assertEqual(chat_store.get_chat(data3, cid)["messages"], [])
 
+    def test_rewind_takes_whole_turn_with_steer(self):
+        """入库的插话是 user 消息，但不是回合开头：撤回要撤整个回合，不能只截到插的那句。"""
+        data = chat_store.load()
+        cid = data["active_id"]
+        chat = chat_store.get_chat(data, cid)
+        call = {"id": "c1", "type": "function",
+                "function": {"name": "install_mod", "arguments": "{}"}}
+        chat["messages"] = [
+            {"role": "user", "content": "装钠"},
+            {"role": "assistant", "content": "装好了"},
+            {"role": "user", "content": "再装 Iris"},
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+            {"role": "tool", "content": "ok", "tool_call_id": "c1"},
+            {"role": "user", "content": "顺便装 Sodium Extra", "id": "steer_t2_0"},
+            {"role": "assistant", "content": "都装好了"},
+        ]
+        chat_store.save(data)
+        res = ai_rewind.rewind_last_round(cid)
+        self.assertTrue(res["truncated"])
+        msgs = chat_store.get_chat(chat_store.load(), cid)["messages"]
+        self.assertEqual([m["content"] for m in msgs], ["装钠", "装好了"])
+
     def test_rewind_empty_chat_is_noop(self):
         data = chat_store.load()
         cid = data["active_id"]

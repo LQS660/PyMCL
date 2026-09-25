@@ -379,8 +379,10 @@ public sealed class AiPage : PageBase
         ScrollDown();
     }
 
+    /// <summary>最近一回合开头那句；入库的插话（id=steer_*）不是回合开头，重试 / 撤回都得跳过。</summary>
     private string LastUserText() =>
-        ActiveChat?.Messages.LastOrDefault(m => m.Role == "user" && !string.IsNullOrWhiteSpace(m.Content))?.Content ?? "";
+        ActiveChat?.Messages.LastOrDefault(m => m.Role == "user" && !string.IsNullOrWhiteSpace(m.Content)
+                                                && !m.Id.StartsWith("steer_", StringComparison.Ordinal))?.Content ?? "";
 
     // ==================== 发送 ====================
     private Task SendAsync() => SendTextAsync(_input.Text);

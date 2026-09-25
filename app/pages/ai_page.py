@@ -1547,7 +1547,8 @@ class AiPage(QWidget):
     def _retry(self):
         last = None
         for m in reversed(self._history):
-            if m.get("role") == "user" and (m.get("content") or "").strip():
+            if m.get("role") == "user" and (m.get("content") or "").strip() \
+                    and not chat_store.is_steer_message(m):
                 last = m["content"]
                 break
         if last and not self._worker:
@@ -1872,9 +1873,11 @@ class AiPage(QWidget):
             # 本回合的工具轨迹一并入库（W5-1）：重开程序模型才知道上次做到哪。
             # 只取 turn_messages（本回合新增那一段）：result.messages 是模型侧完整历史，
             # 里面还有上几轮的工具消息，照抄进来每轮都会把旧轨迹重复存一遍。
+            # 被内核读到的插话（id=steer_*）按原位置跟着入库，别只活在当回合里。
             for m in turn_msgs:
                 role = m.get("role") if isinstance(m, dict) else None
-                if role == "tool" or (role == "assistant" and m.get("tool_calls")):
+                if role == "tool" or (role == "assistant" and m.get("tool_calls")) \
+                        or chat_store.is_steer_message(m):
                     self._history.append(dict(m))
             # 「为什么停」的提示不进正文（模型下一轮会读到自己上一句后面挂着
             # 「没有真的开始执行」），拆成 note 字段存，渲染历史时再拼回去

@@ -556,9 +556,11 @@ class AiFixDialog(QDialog):
                         and str(m.get("id") or "").startswith("compact_"):
                     self._history.append(dict(m))
             self._history.append({"role": "user", "content": user})
+            # 工具轨迹和被内核读到的插话（id=steer_*）按原顺序留着，下一轮追问才接得上
             for m in turn_msgs:
                 role = m.get("role") if isinstance(m, dict) else None
-                if role == "tool" or (role == "assistant" and m.get("tool_calls")):
+                if role == "tool" or (role == "assistant" and m.get("tool_calls")) \
+                        or chat_store.is_steer_message(m):
                     self._history.append(dict(m))
             note = self._stop_note(result) if (ok and result is not None) else ""
             content = shown or ""

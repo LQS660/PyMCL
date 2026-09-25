@@ -492,6 +492,15 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
     # ---- 3.4 计划工作流：模型出的结构化待办 + plan 档批准门禁 ----
     plan_holder = {"items": [], "turn_id": "", "approved": False}
 
+    # 本回合被读到的插话原件：发给模型的不带 id，导出入库时按对象认出来再补 steer_ id
+    steer_msgs: list[dict] = []
+
+    def _persisted(m: dict) -> dict:
+        for k, s in enumerate(steer_msgs):
+            if m is s:
+                return dict(m, id=f"{chat_store.STEER_ID_PREFIX}{turn.id}_{k}")
+        return dict(m)
+
     # ---- 6.2 回合埋点：停止原因/轮数/工具调用数/失败数/耗时 ----
     turn_started_at = time.monotonic()
     tool_counts = {"calls": 0, "failures": 0}
@@ -571,8 +580,11 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 # 不了新旧，抄进去就是重复入库。
                 turn_slice = [{"role": "user", "content": user_text}]
                 turn_slice += [dict(m) for m in messages if _is_compact_msg(m)]
+                # 没被压进摘要的插话照样入库（被压掉的已经在摘要里了）
+                turn_slice += [_persisted(m) for m in messages
+                               if any(m is s for s in steer_msgs)]
             else:
-                turn_slice = [dict(m) for m in messages[base_len:]
+                turn_slice = [_persisted(m) for m in messages[base_len:]
                               if isinstance(m, dict) and m.get("role") != "system"]
                 # 截断摘要同样入库（UI 会插在用户这句之前），下一轮被裁段里
                 # 找得到它就复用，不必每回合重新摘要
@@ -630,7 +642,9 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 for steer_text in steers:
                     if not steer_text:
                         continue
-                    messages.append({"role": "user", "content": steer_text})
+                    steer_msg = {"role": "user", "content": steer_text}
+                    messages.append(steer_msg)
+                    steer_msgs.append(steer_msg)
                     _status("steer", {"text": steer_text[:200]})
 
             if turn.phase == TurnPhase.PROCESSING_INPUT:

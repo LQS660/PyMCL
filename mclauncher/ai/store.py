@@ -19,6 +19,9 @@ MAX_MESSAGES = 200
 # note = 「为什么停」的提示，只给界面渲染；api_messages 不会把它喂给模型
 _KEEP_FIELDS = ("tool_calls", "tool_call_id", "name", "id", "note")
 
+# 被内核读到的运行中插话，入库时带这个前缀的 id（内核导出 turn_messages 时补上）
+STEER_ID_PREFIX = "steer_"
+
 # 会话事件日志目录；测试可覆盖。None = 默认 utils.ROOT/cache/ai_sessions
 SESSIONS_DIR = None
 _EVENT_LOCK = threading.Lock()
@@ -44,6 +47,13 @@ def _blank_chat(cid: str | None = None) -> dict:
         "updated": now,
         "messages": [],
     }
+
+
+def is_steer_message(m) -> bool:
+    """运行中插话：按原位置存进历史、重载后照样是用户气泡，但它不是一回合的开头——
+    撤回 / 重试找「最近一条用户消息」时必须跳过，否则只撤半个回合、重试只重发插的那句。"""
+    return isinstance(m, dict) and m.get("role") == "user" \
+        and str(m.get("id") or "").startswith(STEER_ID_PREFIX)
 
 
 def _load_message(m: dict) -> dict:

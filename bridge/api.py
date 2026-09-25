@@ -2965,15 +2965,17 @@ class BackendAPI:
             return out
 
         def _turn_compact_and_trajectory(reply) -> tuple:
-            """(压缩摘要消息, 工具轨迹)。摘要（id=compact_*）入库且插在用户这句
+            """(压缩摘要消息, 工具轨迹与插话)。摘要（id=compact_*）入库且插在用户这句
             之前：下一轮 _trim_history 在被裁段里找到它就直接复用，不再每回合
-            重新摘要；autocompact 的摘要同样靠它活过回合结束。"""
+            重新摘要；autocompact 的摘要同样靠它活过回合结束。被内核读到的插话
+            （id=steer_*）按原位置夹在工具轨迹里，重开程序模型和用户都还看得到。"""
             compacts, rows = [], []
             for m in (getattr(reply, "turn_messages", None) or []):
                 if not isinstance(m, dict):
                     continue
                 role = m.get("role")
-                if role == "tool" or (role == "assistant" and m.get("tool_calls")):
+                if role == "tool" or (role == "assistant" and m.get("tool_calls")) \
+                        or chat_store.is_steer_message(m):
                     rows.append(dict(m))
                 elif role == "user" and str(m.get("id") or "").startswith("compact_"):
                     compacts.append(dict(m))

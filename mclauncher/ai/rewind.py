@@ -90,7 +90,7 @@ def rewind_last_round(chat_id: str) -> dict:
     msgs = chat.get("messages") or []
     idx = None
     for i in range(len(msgs) - 1, -1, -1):
-        if msgs[i].get("role") == "user":
+        if msgs[i].get("role") == "user" and not chat_store.is_steer_message(msgs[i]):
             idx = i
             break
     if idx is None:

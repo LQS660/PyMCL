@@ -299,6 +299,31 @@ class BridgeAiRunSteerTests(unittest.TestCase):
         self.assertEqual(self.api._ai_steer, [])
         self.assertFalse(self.api._ai_busy)
 
+    def test_drained_steer_is_persisted_in_place(self):
+        from mclauncher.ai import store as chat_store
+        from mclauncher.ai.result import AgentResult
+        call = {"id": "c1", "type": "function",
+                "function": {"name": "list_mods", "arguments": "{}"}}
+
+        def fake(*a, **kw):
+            res = AgentResult("done")
+            res.turn_messages = [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "", "tool_calls": [call]},
+                {"role": "tool", "content": "ok", "tool_call_id": "c1"},
+                {"role": "user", "content": "also B", "id": "steer_t_0"},
+                {"role": "assistant", "content": "done"},
+            ]
+            return res
+
+        self._run(fake)
+        data = chat_store.load()
+        msgs = chat_store.get_chat(data, data["active_id"])["messages"]
+        self.assertEqual([(m["role"], m["content"]) for m in msgs],
+                         [("user", "hi"), ("assistant", ""), ("tool", "ok"),
+                          ("user", "also B"), ("assistant", "done")])
+        self.assertTrue(chat_store.is_steer_message(msgs[3]))
+
     def test_fail_also_returns_unsent(self):
         from mclauncher.ai.client import AIClientError
 
