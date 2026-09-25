@@ -1,4 +1,5 @@
 #include "pymcl.h"
+#include <ctype.h>
 
 static cJSON *load_parent_ud(const char *pid, void *ud) {
     const char *inst = (const char *)ud;
@@ -111,26 +112,179 @@ static void apply_memory(char ***args, int *n, int memory_mb) {
     *args = out; *n = no;
 }
 
+/* 把客户端 jar 等补进 -DignoreList=（同 Python _patch_ignore_list）：BootstrapLauncher 按「文件名以某前缀开头」
+   排除 jar，所以只有没有任何前缀能匹配时才补；空项丢掉。漏补的原版 jar 会变成自动模块，Forge 1.17+ 直接起不来 */
 static void patch_ignore(char **args, int n, const char **names, int nn) {
+    static const char key[] = "-DignoreList=";
     for (int i = 0; i < n; i++) {
-        if (!pymcl_startswith(args[i], "-DignoreList=")) continue;
-        char buf[2048];
-        snprintf(buf, sizeof(buf), "%s", args[i]);
+        if (!pymcl_startswith(args[i], key)) continue;
+        size_t cap = strlen(args[i]) + 1;
+        for (int k = 0; k < nn; k++) if (names[k]) cap += strlen(names[k]) + 1;
+        char *list = pymcl_strdup(args[i] + sizeof(key) - 1);
+        const char **prefixes = (const char **)calloc((size_t)nn + strlen(list) + 1, sizeof(char *));
+        int np = 0;
+        for (char *p = list; *p;) {
+            char *comma = strchr(p, ',');
+            if (comma) *comma = 0;
+            if (*p) prefixes[np++] = p;
+            if (!comma) break;
+            p = comma + 1;
+        }
         for (int k = 0; k < nn; k++) {
             if (!names[k] || !names[k][0]) continue;
-            if (!strstr(buf, names[k])) {
-                size_t L = strlen(buf);
-                snprintf(buf + L, sizeof(buf) - L, ",%s", names[k]);
-            }
+            int covered = 0;
+            for (int j = 0; j < np && !covered; j++) covered = pymcl_startswith(names[k], prefixes[j]);
+            if (!covered) prefixes[np++] = names[k];
         }
+        char *out = (char *)malloc(cap), *w = out;
+        memcpy(w, key, sizeof(key) - 1);
+        w += sizeof(key) - 1;
+        for (int j = 0; j < np; j++) {
+            if (j) *w++ = ',';
+            size_t L = strlen(prefixes[j]);
+            memcpy(w, prefixes[j], L);
+            w += L;
+        }
+        *w = 0;
+        free(prefixes);
+        free(list);
         free(args[i]);
-        args[i] = pymcl_strdup(buf);
+        args[i] = out;
     }
 }
 
-int build_launch_command(const char *instance, const char *version, cJSON *account_props,
-                         const char *java_exe, int memory_mb, int width, int height,
-                         char ***argv, int *argc, char *natives_out, size_t nn) {
+/* 有库声明了本平台的 natives 分类器，启动前就必须真的解压出来了（同 Python） */
+static int needs_natives(cJSON *resolved) {
+    cJSON *lib;
+    cJSON_ArrayForEach(lib, cJSON_GetObjectItem(resolved, "libraries")) {
+        if (cJSON_IsFalse(cJSON_GetObjectItem(lib, "clientreq"))) continue;
+        if (!pymcl_check_rules(cJSON_GetObjectItem(lib, "rules"), 0)) continue;
+        char *cls = select_native_classifier(lib);
+        if (cls) { free(cls); return 1; }
+    }
+    return 0;
+}
+
+/* authlib.injector_path / nide8.jar_path：代码根目录下的固定文件名。
+   源码布局下 exe 在 native/build/，代码根要往上两级；打包布局下就是 exe 旁边 */
+static void code_root_jar(const char *name, char *out, size_t n) {
+    wchar_t w[PYMCL_PATH];
+    DWORD len = GetModuleFileNameW(NULL, w, PYMCL_PATH);
+    char exe[PYMCL_PATH];
+    if (len > 0 && len < PYMCL_PATH) {
+        char *u = pymcl_wide_to_u8(w);
+        snprintf(exe, sizeof(exe), "%s", u ? u : ".");
+        free(u);
+    } else snprintf(exe, sizeof(exe), ".");
+    char d[PYMCL_PATH];
+    pymcl_parent(exe, d, sizeof(d));
+    char cand[PYMCL_PATH];
+    pymcl_path_join(cand, sizeof(cand), d, name);
+    if (pymcl_file_exists(cand)) { snprintf(out, n, "%s", cand); return; }
+    char up[PYMCL_PATH];
+    pymcl_parent(d, up, sizeof(up));
+    char up2[PYMCL_PATH];
+    pymcl_parent(up, up2, sizeof(up2));
+    pymcl_path_join(cand, sizeof(cand), up2, name);
+    snprintf(out, n, "%s", cand);
+}
+
+/* authlib.normalize_api：去空白与尾斜杠，无 scheme 补 https://，必须有主机。
+   urlparse 认不出的裸 "http…"（没有 ://）按 netloc 为空处理 */
+static int normalize_api_url(const char *in, char *out, size_t n) {
+    const char *p = in ? in : "";
+    while (*p && isspace((unsigned char)*p)) p++;
+    char raw[512];
+    snprintf(raw, sizeof(raw), "%s", p);
+    size_t L = strlen(raw);
+    while (L && (raw[L - 1] == '/' || isspace((unsigned char)raw[L - 1]))) raw[--L] = 0;
+    if (!L) { pymcl_set_error("请填写皮肤站 Yggdrasil API 地址"); return -1; }
+    if (strncmp(raw, "http", 4) != 0) {
+        char t[600];
+        snprintf(t, sizeof(t), "https://%s", raw);
+        snprintf(raw, sizeof(raw), "%s", t);
+    }
+    const char *host = strstr(raw, "://");
+    host = host ? host + 3 : "";
+    if (!host[0] || *host == '/') { pymcl_set_error("皮肤站地址无效"); return -1; }
+    snprintf(out, n, "%s", raw);
+    return 0;
+}
+
+/* nide8.normalize_server_id：正文里找第一段 32 位十六进制（与 _SID_RE.search 一致），小写化 */
+static int normalize_server_sid(const char *in, char *out, size_t n) {
+    const char *p = in ? in : "";
+    while (*p && isspace((unsigned char)*p)) p++;
+    char raw[512];
+    snprintf(raw, sizeof(raw), "%s", p);
+    size_t L = strlen(raw);
+    while (L && isspace((unsigned char)raw[L - 1])) raw[--L] = 0;
+    if (!L) { pymcl_set_error("请填写统一通行证服务器 ID"); return -1; }
+    for (const char *q = raw; *q; q++) {
+        size_t k = 0;
+        while (k < 32 && isxdigit((unsigned char)q[k])) k++;
+        if (k == 32) {
+            for (size_t i = 0; i < 32; i++) out[i] = (char)tolower((unsigned char)q[i]);
+            out[32] = 0;
+            return 0;
+        }
+    }
+    pymcl_set_error("服务器 ID 应为 32 位十六进制，或含该 ID 的链接");
+    return -1;
+}
+
+/* 加 -javaagent: 时先摘掉已有的（同 Python launcher.py 468-480） */
+static void prepend_agent(char ***pjvm, int *pn, const char *agent) {
+    char **jvm = *pjvm;
+    int n = *pn;
+    char **out = (char **)calloc((size_t)n + 2, sizeof(char *));
+    int no = 0;
+    out[no++] = pymcl_strdup(agent);
+    for (int i = 0; i < n; i++) {
+        if (pymcl_startswith(jvm[i], "-javaagent:")) { free(jvm[i]); continue; }
+        out[no++] = jvm[i];
+    }
+    free(jvm);
+    *pjvm = out;
+    *pn = no;
+}
+
+/* 启动前最后一次核对 Java（同 Python _coerce_java_exe）：给定的不能用就换自动挑选，
+   再不行把已下载的、系统里的 Java 挨个试；都不行才报错 */
+static char *coerce_java(cJSON *resolved, const char *java_exe) {
+    if (java_exe && java_usable_for(resolved, java_exe)) return pymcl_strdup(java_exe);
+    char *alt = java_pick(resolved, NULL);
+    if (alt && java_usable_for(resolved, alt)) return alt;
+    free(alt);
+    cJSON *(*listers[])(void) = { java_list_installed, java_list_system };
+    for (size_t i = 0; i < sizeof(listers) / sizeof(listers[0]); i++) {
+        cJSON *rows = listers[i]();
+        char *found = NULL;
+        cJSON *row;
+        cJSON_ArrayForEach(row, rows) {
+            const char *cand = cJSON_GetStringValue(cJSON_GetObjectItem(row, "exe"));
+            if (!found && cand && cand[0] && java_usable_for(resolved, cand)) found = pymcl_strdup(cand);
+        }
+        cJSON_Delete(rows);
+        if (found) return found;
+    }
+    int got = (java_exe && java_exe[0]) ? java_get_major(java_exe) : -1;
+    char gs[16];
+    if (got > 0) snprintf(gs, sizeof(gs), "%d", got);
+    else snprintf(gs, sizeof(gs), "?");
+    pymcl_set_error("Java %s 无法启动此版本（需要 Java %d+）。"
+                    "Forge 1.17+ 会向 JVM 传入 --module-path，Java 8 会报 Unrecognized option: -p。"
+                    "请到「Java」页下载 Java 17，启动页 Java 选「自动选择」。",
+                    gs, java_required_major(resolved));
+    return NULL;
+}
+
+int build_launch_command_ex(const char *instance, const char *version, cJSON *account_props,
+                            const char *java_exe, int memory_mb, int width, int height,
+                            const char *game_dir_override,
+                            char **extra_game_args, int n_ega,
+                            char **extra_jvm_args, int n_eja,
+                            char ***argv, int *argc, char *natives_out, size_t nn) {
     cJSON *vjson = instance_version_json(instance, version);
     if (!vjson) { pymcl_set_error("版本 %s 未安装，请先安装。", version); return -1; }
     /* 合并完继承链就没有 inheritsFrom 了，找客户端 jar 的回退得看原始 JSON（同 Python _client_jar_path）：
@@ -143,17 +297,8 @@ int build_launch_command(const char *instance, const char *version, cJSON *accou
     cJSON_Delete(vjson);
     if (!resolved) return -1;
 
-    char *jexe = pymcl_strdup(java_exe);
-    if (!java_usable_for(resolved, jexe)) {
-        free(jexe);
-        jexe = java_pick(resolved, NULL);
-    }
-    if (!jexe || !java_usable_for(resolved, jexe)) {
-        cJSON_Delete(resolved);
-        pymcl_set_error("Java 无法启动此版本。请到 Java 页下载 Java 17。");
-        free(jexe);
-        return -1;
-    }
+    char *jexe = coerce_java(resolved, java_exe);
+    if (!jexe) { cJSON_Delete(resolved); return -1; }
 
     char vdir[PYMCL_PATH], jar[PYMCL_PATH];
     instance_versions_dir(instance, vdir, sizeof(vdir));
@@ -181,10 +326,12 @@ int build_launch_command(const char *instance, const char *version, cJSON *accou
     }
 
     char natives[PYMCL_PATH];
-    if (extract_natives(instance, resolved, version, natives, sizeof(natives)) != 0) {
-        /* continue; extract_natives still fills path */
-    }
+    extract_natives(instance, resolved, version, natives, sizeof(natives));
     if (natives_out) snprintf(natives_out, nn, "%s", natives);
+    if (needs_natives(resolved) && !natives_present(natives)) {
+        pymcl_set_error("缺少 LWJGL 本地库（natives）。请重新安装该 Minecraft 版本后再启动。");
+        cJSON_Delete(resolved); free(jexe); return -1;
+    }
 
     char libs[PYMCL_PATH], assets[PYMCL_PATH], ip[PYMCL_PATH];
     instance_libraries_dir(instance, libs, sizeof(libs));
@@ -248,7 +395,8 @@ int build_launch_command(const char *instance, const char *version, cJSON *accou
     cJSON_AddStringToObject(ph, "clientid", config_str("microsoft_client_id", PYMCL_MS_CLIENT_DEFAULT));
     cJSON_AddStringToObject(ph, "version_name", version);
     cJSON_AddStringToObject(ph, "version_type", cJSON_GetStringValue(cJSON_GetObjectItem(resolved, "type")) ?: "release");
-    cJSON_AddStringToObject(ph, "game_directory", ip);
+    cJSON_AddStringToObject(ph, "game_directory",
+                            game_dir_override && game_dir_override[0] ? game_dir_override : ip);
     cJSON_AddStringToObject(ph, "assets_root", assets);
     cJSON *idx = cJSON_GetObjectItem(resolved, "assetIndex");
     cJSON_AddStringToObject(ph, "assets_index_name", cJSON_GetStringValue(cJSON_GetObjectItem(idx, "id")) ?: "legacy");
@@ -312,14 +460,20 @@ int build_launch_command(const char *instance, const char *version, cJSON *accou
         jvm[nj++] = pymcl_strdup(classpath);
     }
     drop_orphan(&jvm, &nj);
-    const char *ign[8]; int ni = 0;
+    const char **ign = (const char **)calloc((size_t)ncp + 2, sizeof(char *));
+    int ni = 0;
     ign[ni++] = pymcl_basename(jar);
     const char *parent = cJSON_GetStringValue(cJSON_GetObjectItem(resolved, "inheritsFrom"));
-    char pjar[128];
+    if (!parent) parent = cJSON_GetStringValue(cJSON_GetObjectItem(resolved, "jar"));
+    char pjar[256];
     if (parent) { snprintf(pjar, sizeof(pjar), "%s.jar", parent); ign[ni++] = pjar; }
     for (int i = 0; i < ncp; i++) if (pymcl_endswith(cp[i], "-extra.jar")) ign[ni++] = pymcl_basename(cp[i]);
     patch_ignore(jvm, nj, ign, ni);
-    if (mine_args && strstr(mine_args, "tweakClass")) {
+    free(ign);
+    /* 旧 Forge（LaunchWrapper）的 tweakClass 也可能写在新格式参数里（同 Python） */
+    int tweak = !cJSON_IsObject(args) && mine_args && strstr(mine_args, "tweakClass");
+    for (int i = 0; i < ng && !tweak; i++) tweak = strstr(game[i], "tweakClass") != NULL;
+    if (tweak) {
         jvm = (char **)realloc(jvm, sizeof(char *) * (size_t)(nj + 2));
         jvm[nj++] = pymcl_strdup("-Dfml.ignoreInvalidMinecraftCertificates=true");
         jvm[nj++] = pymcl_strdup("-Dfml.ignorePatchDiscrepancies=true");
@@ -354,14 +508,80 @@ int build_launch_command(const char *instance, const char *version, cJSON *accou
             jvm[nj++] = pymcl_strdup(a);
         }
     }
+    /* CONFIG default_jvm_args 与调用方的 extra_jvm_args 前置，再吃一次内存旗标；
+       然后 authlib / nide8 的 -javaagent 前置并摘掉旧的（同 Python launcher.py 461-483） */
+    {
+        char **dj = NULL;
+        int ndj = 0;
+        pymcl_split_args(config_str("default_jvm_args", ""), &dj, &ndj);
+        char **nj2 = (char **)calloc((size_t)ndj + (size_t)n_eja + (size_t)nj + 4, sizeof(char *));
+        int k2 = 0;
+        for (int i = 0; i < ndj; i++) nj2[k2++] = dj[i];
+        for (int i = 0; i < n_eja; i++)
+            if (extra_jvm_args && extra_jvm_args[i] && extra_jvm_args[i][0])
+                nj2[k2++] = pymcl_strdup(extra_jvm_args[i]);
+        for (int i = 0; i < nj; i++) nj2[k2++] = jvm[i];
+        free(jvm);
+        free(dj);
+        jvm = nj2;
+        nj = k2;
+        apply_memory(&jvm, &nj, memory_mb);
+        const char *api = cJSON_GetStringValue(cJSON_GetObjectItem(account_props, "authlib_api")) ?: "";
+        if (api[0]) {
+            char api_n[512], jar[PYMCL_PATH], agent[PYMCL_PATH + 560];
+            if (normalize_api_url(api, api_n, sizeof(api_n)) != 0) {
+                for (int i = 0; i < nj; i++) free(jvm[i]);
+                free(jvm);
+                for (int i = 0; i < ng; i++) free(game[i]);
+                free(game);
+                for (int i = 0; i < ncp; i++) free(cp[i]);
+                free(cp);
+                free(classpath);
+                free(jexe);
+                cJSON_Delete(ph);
+                cJSON_Delete(resolved);
+                return -1;
+            }
+            code_root_jar("authlib-injector.jar", jar, sizeof(jar));
+            snprintf(agent, sizeof(agent), "-javaagent:%s=%s", jar, api_n);
+            prepend_agent(&jvm, &nj, agent);
+        }
+        const char *sid = cJSON_GetStringValue(cJSON_GetObjectItem(account_props, "nide8_id")) ?: "";
+        if (sid[0]) {
+            char sid_n[64], jar[PYMCL_PATH], agent[PYMCL_PATH + 96];
+            if (normalize_server_sid(sid, sid_n, sizeof(sid_n)) != 0) {
+                for (int i = 0; i < nj; i++) free(jvm[i]);
+                free(jvm);
+                for (int i = 0; i < ng; i++) free(game[i]);
+                free(game);
+                for (int i = 0; i < ncp; i++) free(cp[i]);
+                free(cp);
+                free(classpath);
+                free(jexe);
+                cJSON_Delete(ph);
+                cJSON_Delete(resolved);
+                return -1;
+            }
+            code_root_jar("nide8auth.jar", jar, sizeof(jar));
+            snprintf(agent, sizeof(agent), "-javaagent:%s=%s", jar, sid_n);
+            prepend_agent(&jvm, &nj, agent);
+        }
+    }
     const char *mainc = cJSON_GetStringValue(cJSON_GetObjectItem(resolved, "mainClass")) ?: "net.minecraft.client.main.Main";
-    int total = 1 + nj + 1 + ng;
+    int total = 1 + nj + 1 + ng + n_ega;
     char **cmd = (char **)calloc((size_t)total, sizeof(char *));
     int k = 0;
     cmd[k++] = pymcl_strdup(jexe);
     for (int i = 0; i < nj; i++) cmd[k++] = jvm[i];
     cmd[k++] = pymcl_strdup(mainc);
     for (int i = 0; i < ng; i++) cmd[k++] = game[i];
+    for (int i = 0; n_ega > 0 && extra_game_args && i < n_ega; i++)
+        if (extra_game_args[i] && extra_game_args[i][0]) cmd[k++] = pymcl_strdup(extra_game_args[i]);
+    /* Java 8 不认模块参数，带着它们必崩（同 Python 的最后一道拦截）；命令里真有模块参数才去问 Java 版本 */
+    int jmajor = 0;
+    for (int i = 0; i < k && !jmajor; i++)
+        if (!strcmp(cmd[i], "-p") || !strcmp(cmd[i], "--module-path") || !strcmp(cmd[i], "--add-modules"))
+            jmajor = java_get_major(jexe);
     free(jvm); free(game);
     for (int i = 0; i < ncp; i++) free(cp[i]);
     free(cp);
@@ -369,9 +589,23 @@ int build_launch_command(const char *instance, const char *version, cJSON *accou
     free(jexe);
     cJSON_Delete(ph);
     cJSON_Delete(resolved);
+    if (jmajor > 0 && jmajor < 9) {
+        for (int i = 0; i < k; i++) free(cmd[i]);
+        free(cmd);
+        pymcl_set_error("拒绝用 Java %d 启动：命令含模块参数。请改用 Java 17。", jmajor);
+        return -1;
+    }
     *argv = cmd;
     *argc = k;
     return 0;
+}
+
+int build_launch_command(const char *instance, const char *version, cJSON *account_props,
+                         const char *java_exe, int memory_mb, int width, int height,
+                         char ***argv, int *argc, char *natives_out, size_t nn) {
+    return build_launch_command_ex(instance, version, account_props, java_exe, memory_mb,
+                                   width, height, NULL, NULL, 0, NULL, 0,
+                                   argv, argc, natives_out, nn);
 }
 
 HANDLE game_spawn(const char **argv, int argc, const char *cwd, HANDLE *pipe) {

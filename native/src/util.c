@@ -4,10 +4,12 @@
 #include <direct.h>
 #include <errno.h>
 #include <ctype.h>
+#include <math.h>
 
 #pragma comment(lib, "bcrypt.lib")
 
-static char g_err[PYMCL_ERR];
+/* 每个线程一份：桥是多线程 HTTP 服务，共用一份会把 A 请求的错误回给 B 请求 */
+static _Thread_local char g_err[PYMCL_ERR];
 char g_root[PYMCL_PATH];
 
 const char *pymcl_error(void) { return g_err[0] ? g_err : ""; }
@@ -41,6 +43,11 @@ int pymcl_snprintf(char *buf, size_t n, const char *fmt, ...) {
 void pymcl_path_join(char *out, size_t n, const char *a, const char *b) {
     if (!a || !a[0]) { snprintf(out, n, "%s", b ? b : ""); return; }
     if (!b || !b[0]) { snprintf(out, n, "%s", a); return; }
+    /* 与 pathlib 一致：后半截是绝对路径（盘符或 UNC）就以它为准，比如 instances_dir 填了 D:\Games */
+    if ((isalpha((unsigned char)b[0]) && b[1] == ':') || (b[0] == '\\' && b[1] == '\\')) {
+        snprintf(out, n, "%s", b);
+        return;
+    }
     size_t la = strlen(a);
     if (a[la - 1] == '/' || a[la - 1] == '\\')
         snprintf(out, n, "%s%s", a, b);
@@ -137,6 +144,13 @@ int pymcl_file_exists(const char *path) {
     DWORD a = GetFileAttributesW(w);
     free(w);
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+int pymcl_path_exists(const char *path) {
+    wchar_t *w = pymcl_u8_to_wide(path);
+    if (!w) return 0;
+    DWORD a = GetFileAttributesW(w);
+    free(w);
+    return a != INVALID_FILE_ATTRIBUTES;
 }
 int pymcl_dir_exists(const char *path) {
     wchar_t *w = pymcl_u8_to_wide(path);
@@ -254,19 +268,272 @@ void pymcl_copy_tree(const char *src, const char *dst) {
     FindClose(h);
     free(ws);
 }
+/* int(p.stat().st_mtime) */
+long long pymcl_file_mtime(const char *path) {
+    wchar_t *w = pymcl_u8_to_wide(path);
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    long long r = 0;
+    if (w && GetFileAttributesExW(w, GetFileExInfoStandard, &fa)) {
+        ULARGE_INTEGER u;
+        u.LowPart = fa.ftLastWriteTime.dwLowDateTime;
+        u.HighPart = fa.ftLastWriteTime.dwHighDateTime;
+        r = (long long)((u.QuadPart - 116444736000000000ULL) / 10000000ULL);
+    }
+    free(w);
+    return r;
+}
+
+static const char k_b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+char *pymcl_b64encode(const unsigned char *data, size_t len) {
+    size_t outlen = 4 * ((len + 2) / 3);
+    char *out = (char *)malloc(outlen + 1);
+    if (!out) return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < len; i += 3) {
+        uint32_t v = (uint32_t)data[i] << 16;
+        if (i + 1 < len) v |= (uint32_t)data[i + 1] << 8;
+        if (i + 2 < len) v |= data[i + 2];
+        out[o++] = k_b64[(v >> 18) & 63];
+        out[o++] = k_b64[(v >> 12) & 63];
+        out[o++] = i + 1 < len ? k_b64[(v >> 6) & 63] : '=';
+        out[o++] = i + 2 < len ? k_b64[v & 63] : '=';
+    }
+    out[o] = 0;
+    return out;
+}
+
+/* base64.b64decode(validate=True)：只认标准字母表，长度与填充不对就失败（返回 NULL） */
+unsigned char *pymcl_b64decode(const char *text, size_t *out_len) {
+    size_t len = text ? strlen(text) : 0;
+    if (len % 4 != 0) return NULL;
+    unsigned char *out = (unsigned char *)malloc(len / 4 * 3 + 1);
+    if (!out) return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < len; i += 4) {
+        int v[4];
+        for (int k = 0; k < 4; k++) {
+            char c = text[i + k];
+            const char *p = c ? strchr(k_b64, c) : NULL;
+            if (p) v[k] = (int)(p - k_b64);
+            else if (c == '=' && i + 4 == len && k >= 2) v[k] = -1;
+            else { free(out); return NULL; }
+        }
+        if (v[2] < 0 && v[3] >= 0) { free(out); return NULL; }
+        out[o++] = (unsigned char)((v[0] << 2) | (v[1] >> 4));
+        if (v[2] >= 0) out[o++] = (unsigned char)(((v[1] & 15) << 4) | (v[2] >> 2));
+        if (v[3] >= 0) out[o++] = (unsigned char)(((v[2] & 3) << 6) | v[3]);
+    }
+    if (out_len) *out_len = o;
+    return out;
+}
+
+/* urllib.parse.quote(s)（safe="/"）：UTF-8 字节里除字母数字与 _.-~/ 之外都转成 %XX */
+void pymcl_url_quote(const char *s, char *out, size_t n) {
+    size_t o = 0;
+    for (const unsigned char *p = (const unsigned char *)(s ? s : ""); *p && o + 4 < n; p++) {
+        if (isalnum(*p) || strchr("_.-~/", *p)) out[o++] = (char)*p;
+        else o += (size_t)snprintf(out + o, n - o, "%%%02X", *p);
+    }
+    out[o] = 0;
+}
+
+static int cmp_names(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* WindowsPath 之间比较不分大小写（Python 里 sorted(folder.iterdir()) 就是这个口径） */
+static int cmp_names_nocase(const void *a, const void *b) {
+    wchar_t *wa = pymcl_u8_to_wide(*(const char *const *)a), *wb = pymcl_u8_to_wide(*(const char *const *)b);
+    int r = 0;
+    if (wa && wb) {
+        CharLowerW(wa);
+        CharLowerW(wb);
+        r = wcscmp(wa, wb);
+    }
+    free(wa);
+    free(wb);
+    return r;
+}
+
+cJSON *pymcl_list_dir(const char *dir, int want_dirs, int nocase) {
+    cJSON *out = cJSON_CreateArray();
+    wchar_t *w = pymcl_u8_to_wide(dir);
+    if (!w) return out;
+    wchar_t pat[PYMCL_PATH];
+    _snwprintf(pat, PYMCL_PATH, L"%s\\*", w);
+    free(w);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return out;
+    char **names = NULL;
+    size_t cnt = 0, cap = 0;
+    do {
+        int is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        if (want_dirs == 0 && is_dir) continue;
+        if (want_dirs == 1 && !is_dir) continue;
+        char *name = pymcl_wide_to_u8(fd.cFileName);
+        if (!name) continue;
+        if (cnt == cap) {
+            cap = cap ? cap * 2 : 32;
+            char **nn = (char **)realloc(names, cap * sizeof(char *));
+            if (!nn) { free(name); break; }
+            names = nn;
+        }
+        names[cnt++] = name;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    if (cnt) qsort(names, cnt, sizeof(char *), nocase ? cmp_names_nocase : cmp_names);
+    for (size_t i = 0; i < cnt; i++) {
+        cJSON_AddItemToArray(out, cJSON_CreateString(names[i]));
+        free(names[i]);
+    }
+    free(names);
+    return out;
+}
+
+/* str(Path(s))：斜杠换成反斜杠、去掉重复分隔符与 "."、去掉末尾分隔符（盘符根除外） */
+void pymcl_py_path(const char *in, char *out, size_t n) {
+    char tmp[PYMCL_PATH];
+    snprintf(tmp, sizeof(tmp), "%s", in ? in : "");
+    pymcl_replace_char(tmp, '/', '\\');
+    size_t o = 0, i = 0, len = strlen(tmp);
+    char buf[PYMCL_PATH];
+    if (len >= 2 && tmp[0] == '\\' && tmp[1] == '\\') { buf[o++] = '\\'; buf[o++] = '\\'; i = 2; }
+    for (; i < len && o + 1 < sizeof(buf); i++) {
+        if (tmp[i] == '\\' && o > 0 && buf[o - 1] == '\\') continue;
+        buf[o++] = tmp[i];
+    }
+    buf[o] = 0;
+    /* 去掉 "\.\" 与开头的 ".\"，结尾的 "\." */
+    char *p;
+    while ((p = strstr(buf, "\\.\\")) != NULL) memmove(p, p + 2, strlen(p + 2) + 1);
+    while (strncmp(buf, ".\\", 2) == 0 && buf[2]) memmove(buf, buf + 2, strlen(buf + 2) + 1);
+    len = strlen(buf);
+    if (len >= 2 && buf[len - 1] == '.' && buf[len - 2] == '\\') buf[len -= 2] = 0;
+    while (len > 1 && buf[len - 1] == '\\' && !(len == 3 && buf[1] == ':')) buf[--len] = 0;
+    if (len == 2 && buf[1] == ':') { /* "C:" 保持原样 */ }
+    snprintf(out, n, "%s", buf[0] ? buf : ".");
+}
+
 cJSON *pymcl_read_json(const char *path) {
     char *buf = NULL; size_t n = 0;
     if (pymcl_read_file(path, &buf, &n) != 0) return NULL;
-    cJSON *j = cJSON_Parse(buf);
+    /* 记事本 / PowerShell 存的 UTF-8 带 BOM；Python 端按 utf-8-sig 读，这边也得认 */
+    const char *p = buf;
+    if (n >= 3 && (unsigned char)p[0] == 0xEF && (unsigned char)p[1] == 0xBB && (unsigned char)p[2] == 0xBF) p += 3;
+    cJSON *j = cJSON_Parse(p);
     free(buf);
     return j;
 }
+
+typedef struct { char *p; size_t len, cap; } sbuf;
+
+static void sb_put(sbuf *b, const char *s, size_t n) {
+    if (b->len + n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 256;
+        while (b->len + n + 1 > cap) cap *= 2;
+        char *np = (char *)realloc(b->p, cap);
+        if (!np) return;
+        b->p = np;
+        b->cap = cap;
+    }
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = 0;
+}
+static void sb_puts(sbuf *b, const char *s) { sb_put(b, s, strlen(s)); }
+
+static void py_dump_string(sbuf *b, const char *s) {
+    sb_put(b, "\"", 1);
+    for (const unsigned char *p = (const unsigned char *)(s ? s : ""); *p; p++) {
+        switch (*p) {
+        case '"': sb_put(b, "\\\"", 2); break;
+        case '\\': sb_put(b, "\\\\", 2); break;
+        case '\n': sb_put(b, "\\n", 2); break;
+        case '\r': sb_put(b, "\\r", 2); break;
+        case '\t': sb_put(b, "\\t", 2); break;
+        case '\b': sb_put(b, "\\b", 2); break;
+        case '\f': sb_put(b, "\\f", 2); break;
+        default:
+            if (*p < 0x20) {
+                char esc[8];
+                snprintf(esc, sizeof(esc), "\\u%04x", *p);
+                sb_puts(b, esc);
+            } else {
+                sb_put(b, (const char *)p, 1);
+            }
+        }
+    }
+    sb_put(b, "\"", 1);
+}
+
+static void py_dump_number(sbuf *b, double d) {
+    char num[64];
+    if (d != d) { sb_puts(b, "NaN"); return; }
+    if (d == HUGE_VAL) { sb_puts(b, "Infinity"); return; }
+    if (d == -HUGE_VAL) { sb_puts(b, "-Infinity"); return; }
+    if (d == floor(d) && fabs(d) < 9007199254740992.0) {
+        snprintf(num, sizeof(num), "%lld", (long long)d);
+    } else {
+        for (int prec = 1; prec <= 17; prec++) {
+            snprintf(num, sizeof(num), "%.*g", prec, d);
+            if (strtod(num, NULL) == d) break;
+        }
+    }
+    sb_puts(b, num);
+}
+
+static void py_dump(sbuf *b, const cJSON *it, int depth) {
+    if (!it || cJSON_IsNull(it)) { sb_puts(b, "null"); return; }
+    if (cJSON_IsTrue(it)) { sb_puts(b, "true"); return; }
+    if (cJSON_IsFalse(it)) { sb_puts(b, "false"); return; }
+    if (cJSON_IsNumber(it)) { py_dump_number(b, it->valuedouble); return; }
+    if (cJSON_IsString(it)) { py_dump_string(b, it->valuestring); return; }
+    if (cJSON_IsRaw(it)) { sb_puts(b, it->valuestring ? it->valuestring : "null"); return; }
+    int is_obj = cJSON_IsObject(it);
+    const cJSON *c = it->child;
+    if (!c) { sb_puts(b, is_obj ? "{}" : "[]"); return; }
+    sb_puts(b, is_obj ? "{" : "[");
+    for (; c; c = c->next) {
+        sb_puts(b, "\n");
+        for (int i = 0; i < depth + 1; i++) sb_puts(b, "  ");
+        if (is_obj) {
+            py_dump_string(b, c->string);
+            sb_puts(b, ": ");
+        }
+        py_dump(b, c, depth + 1);
+        if (c->next) sb_puts(b, ",");
+    }
+    sb_puts(b, "\n");
+    for (int i = 0; i < depth; i++) sb_puts(b, "  ");
+    sb_puts(b, is_obj ? "}" : "]");
+}
+
+char *pymcl_json_dumps(const cJSON *obj) {
+    sbuf b = {0};
+    py_dump(&b, obj, 0);
+    return b.p;
+}
+
+/* 与 mclauncher/utils.write_json 同一种落盘：json.dumps(indent=2, ensure_ascii=False)，
+   先写临时文件再原子替换。两个桥轮流写同一份 config.json / accounts.json 时内容逐字节一致。 */
 int pymcl_write_json(const char *path, cJSON *obj) {
-    char *s = cJSON_Print(obj);
+    char *s = pymcl_json_dumps(obj);
     if (!s) return -1;
-    int r = pymcl_write_file(path, s, strlen(s));
-    cJSON_free(s);
-    return r;
+    char tmp[PYMCL_PATH];
+    snprintf(tmp, sizeof(tmp), "%s.%lu.tmp", path, (unsigned long)GetCurrentThreadId());
+    int r = pymcl_write_file(tmp, s, strlen(s));
+    free(s);
+    if (r != 0) return r;
+    wchar_t *wt = pymcl_u8_to_wide(tmp), *wp = pymcl_u8_to_wide(path);
+    BOOL ok = wt && wp && MoveFileExW(wt, wp, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    if (!ok && wt) DeleteFileW(wt);
+    free(wt);
+    free(wp);
+    if (!ok) { pymcl_set_error("无法写入 %s", path); return -1; }
+    return 0;
 }
 
 static int hash_file(const char *path, LPCWSTR alg, char *hex, size_t hexn, int bytes) {
@@ -578,6 +845,16 @@ void pymcl_set_root(const char *root) {
     wchar_t *win = pymcl_u8_to_wide(root && root[0] ? root : ".");
     wchar_t full[PYMCL_PATH];
     DWORD n = win ? GetFullPathNameW(win, PYMCL_PATH, full, NULL) : 0;
+    /* 环境变量 TMP 常是 8.3 短路径（ADMINI~1），Python 端 Path.resolve() 会展开成长路径，
+       这里跟齐，否则两边拼出的绝对路径对不上 */
+    if (n && n < PYMCL_PATH) {
+        wchar_t longp[PYMCL_PATH];
+        DWORD ln = GetLongPathNameW(full, longp, PYMCL_PATH);
+        if (ln > 0 && ln < PYMCL_PATH) {
+            memcpy(full, longp, sizeof(wchar_t) * (size_t)ln);
+            full[ln] = 0;
+        }
+    }
     free(win);
     char *u8 = (n && n < PYMCL_PATH) ? pymcl_wide_to_u8(full) : pymcl_strdup(root ? root : ".");
     snprintf(g_root, sizeof(g_root), "%s", u8 ? u8 : ".");
@@ -597,4 +874,67 @@ void pymcl_java_dir(char *out, size_t n) {
 }
 void pymcl_cache_dir(char *out, size_t n) {
     pymcl_path_join(out, n, g_root, "cache");
+}
+
+/* ---------- argsplit.split_args：shlex POSIX 风格切分（认引号） ---------- */
+
+static void split_args_push(char ***out, int *n, const char *begin, size_t len) {
+    *out = (char **)realloc(*out, sizeof(char *) * (size_t)(*n + 1));
+    char *s = (char *)malloc(len + 1);
+    memcpy(s, begin, len);
+    s[len] = 0;
+    (*out)[(*n)++] = s;
+}
+
+int pymcl_split_args(const char *text, char ***out, int *n) {
+    *out = NULL; *n = 0;
+    const char *p = text ? text : "";
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (!*p) return 0;
+    char buf[8192];
+    size_t bl = 0;
+    int unbalanced = 0;
+    const char *tok = NULL;
+    for (; *p; p++) {
+        if (tok && isspace((unsigned char)*p)) {   /* 段结束 */
+            split_args_push(out, n, buf, bl);
+            buf[0] = 0; bl = 0; tok = NULL;
+            continue;
+        }
+        if (!tok) tok = p;
+        if (*p == '\'') {                          /* 单引号：内容原样 */
+            const char *e = strchr(p + 1, '\'');
+            if (!e) { unbalanced = 1; break; }
+            for (const char *q = p + 1; q < e && bl < sizeof(buf) - 1; q++) buf[bl++] = *q;
+            p = e;
+        } else if (*p == '"') {                    /* 双引号：反斜杠转义引号、反斜杠等 */
+            p++;
+            while (*p && *p != '"') {
+                if (*p == '\\' && (p[1] == '"' || p[1] == '\\' || p[1] == '$' || p[1] == '`') && bl < sizeof(buf) - 1) {
+                    p++; buf[bl++] = *p++;
+                } else if (bl < sizeof(buf) - 1) buf[bl++] = *p++;
+            }
+            if (*p != '"') { unbalanced = 1; break; }
+        } else if (*p == '\\' && p[1]) {           /* 引号外：反斜杠转义下一字符 */
+            if (bl < sizeof(buf) - 1) buf[bl++] = *++p;
+        } else if (bl < sizeof(buf) - 1) {
+            buf[bl++] = *p;
+        }
+    }
+    if (unbalanced) {                              /* shlex ValueError → 退回空白切分 */
+        for (int i = 0; i < *n; i++) free((*out)[i]);
+        free(*out); *out = NULL; *n = 0;
+        const char *q = text ? text : "";
+        while (*q) {
+            while (*q && isspace((unsigned char)*q)) q++;
+            if (!*q) break;
+            const char *e = q;
+            while (*e && !isspace((unsigned char)*e)) e++;
+            split_args_push(out, n, q, (size_t)(e - q));
+            q = e;
+        }
+        return *n;
+    }
+    if (tok || bl) split_args_push(out, n, buf, bl);
+    return *n;
 }

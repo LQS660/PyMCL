@@ -241,3 +241,234 @@ int pymcl_zip_extract_one(const char *zip_path, const char *inner, const char *d
     free(p);
     return r;
 }
+
+/* ---------- 写 zip（对应 Python zipfile.ZipFile(..., "w", ZIP_DEFLATED)） ---------- */
+
+typedef struct {
+    char *name;
+    uint32_t crc, csize, usize, offset;
+    uint16_t method, mtime, mdate, flags;
+} zw_ent;
+
+struct pymcl_zipw {
+    FILE *f;
+    zw_ent *ents;
+    int n, cap;
+};
+
+static void wu16(FILE *f, uint16_t v) { unsigned char b[2] = {(unsigned char)v, (unsigned char)(v >> 8)}; fwrite(b, 1, 2, f); }
+static void wu32(FILE *f, uint32_t v) {
+    unsigned char b[4] = {(unsigned char)v, (unsigned char)(v >> 8), (unsigned char)(v >> 16), (unsigned char)(v >> 24)};
+    fwrite(b, 1, 4, f);
+}
+
+static void dos_time(time_t t, uint16_t *dt, uint16_t *dd) {
+    struct tm lt;
+    if (localtime_s(&lt, &t) != 0 || lt.tm_year < 80) { *dt = 0; *dd = (1 << 5) | 1; return; }
+    *dt = (uint16_t)((lt.tm_hour << 11) | (lt.tm_min << 5) | (lt.tm_sec / 2));
+    *dd = (uint16_t)(((lt.tm_year - 80) << 9) | ((lt.tm_mon + 1) << 5) | lt.tm_mday);
+}
+
+pymcl_zipw *pymcl_zipw_open(const char *path) {
+    char parent[PYMCL_PATH];
+    pymcl_parent(path, parent, sizeof(parent));
+    if (parent[0]) pymcl_ensure_dir(parent);
+    wchar_t *w = pymcl_u8_to_wide(path);
+    FILE *f = w ? _wfopen(w, L"w+b") : NULL;
+    free(w);
+    if (!f) { pymcl_set_error("无法写入 %s", path); return NULL; }
+    pymcl_zipw *z = (pymcl_zipw *)calloc(1, sizeof(*z));
+    if (!z) { fclose(f); return NULL; }
+    z->f = f;
+    return z;
+}
+
+static int zw_begin(pymcl_zipw *z, const char *arcname, time_t mtime, uint16_t method, zw_ent **out) {
+    if (z->n == z->cap) {
+        int cap = z->cap ? z->cap * 2 : 64;
+        zw_ent *ne = (zw_ent *)realloc(z->ents, (size_t)cap * sizeof(zw_ent));
+        if (!ne) return -1;
+        z->ents = ne;
+        z->cap = cap;
+    }
+    zw_ent *e = &z->ents[z->n++];
+    memset(e, 0, sizeof(*e));
+    e->name = pymcl_strdup(arcname);
+    for (char *p = e->name; *p; p++) if (*p == '\\') *p = '/';
+    e->method = method;
+    for (const unsigned char *p = (const unsigned char *)e->name; *p; p++) if (*p >= 0x80) { e->flags |= 0x800; break; }
+    dos_time(mtime, &e->mtime, &e->mdate);
+    e->offset = (uint32_t)ftell(z->f);
+    uint16_t nl = (uint16_t)strlen(e->name);
+    wu32(z->f, 0x04034b50);
+    wu16(z->f, 20);
+    wu16(z->f, e->flags);
+    wu16(z->f, e->method);
+    wu16(z->f, e->mtime);
+    wu16(z->f, e->mdate);
+    wu32(z->f, 0); wu32(z->f, 0); wu32(z->f, 0);   /* crc / 压缩后 / 原始大小，写完再回填 */
+    wu16(z->f, nl);
+    wu16(z->f, 0);
+    fwrite(e->name, 1, nl, z->f);
+    *out = e;
+    return 0;
+}
+
+static void zw_finish(pymcl_zipw *z, zw_ent *e) {
+    long end = ftell(z->f);
+    fseek(z->f, (long)e->offset + 14, SEEK_SET);
+    wu32(z->f, e->crc);
+    wu32(z->f, e->csize);
+    wu32(z->f, e->usize);
+    fseek(z->f, end, SEEK_SET);
+}
+
+/* 流式压缩一个来源：src 为文件路径或内存块二选一 */
+static int zw_add(pymcl_zipw *z, const char *arcname, FILE *src, const unsigned char *mem, size_t memlen,
+                  time_t mtime, int level) {
+    zw_ent *e;
+    uint16_t method = level == 0 ? 0 : 8;
+    if (zw_begin(z, arcname, mtime, method, &e) != 0) return -1;
+    unsigned char in[65536], out[65536];
+    uLong crc = crc32(0L, Z_NULL, 0);
+    uint64_t usize = 0, csize = 0;
+    z_stream s;
+    memset(&s, 0, sizeof(s));
+    if (method == 8 && deflateInit2(&s, level < 0 ? 6 : level, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) return -1;
+    size_t mempos = 0;
+    int flush = Z_NO_FLUSH;
+    do {
+        size_t got;
+        if (src) got = fread(in, 1, sizeof(in), src);
+        else {
+            got = memlen - mempos < sizeof(in) ? memlen - mempos : sizeof(in);
+            memcpy(in, mem + mempos, got);
+            mempos += got;
+        }
+        crc = crc32(crc, in, (uInt)got);
+        usize += got;
+        int eof = src ? feof(src) || got < sizeof(in) : mempos >= memlen;
+        if (method == 0) {
+            fwrite(in, 1, got, z->f);
+            csize += got;
+            if (eof) break;
+            continue;
+        }
+        flush = eof ? Z_FINISH : Z_NO_FLUSH;
+        s.next_in = in;
+        s.avail_in = (uInt)got;
+        do {
+            s.next_out = out;
+            s.avail_out = sizeof(out);
+            deflate(&s, flush);
+            size_t have = sizeof(out) - s.avail_out;
+            fwrite(out, 1, have, z->f);
+            csize += have;
+        } while (s.avail_out == 0);
+    } while (flush != Z_FINISH);
+    if (method == 8) deflateEnd(&s);
+    e->crc = (uint32_t)crc;
+    e->csize = (uint32_t)csize;
+    e->usize = (uint32_t)usize;
+    zw_finish(z, e);
+    return 0;
+}
+
+int pymcl_zipw_add_file(pymcl_zipw *z, const char *src_path, const char *arcname, int level) {
+    wchar_t *w = pymcl_u8_to_wide(src_path);
+    FILE *f = w ? _wfopen(w, L"rb") : NULL;
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    time_t mt = time(NULL);
+    if (w && GetFileAttributesExW(w, GetFileExInfoStandard, &fa)) {
+        ULARGE_INTEGER u;
+        u.LowPart = fa.ftLastWriteTime.dwLowDateTime;
+        u.HighPart = fa.ftLastWriteTime.dwHighDateTime;
+        mt = (time_t)((u.QuadPart - 116444736000000000ULL) / 10000000ULL);
+    }
+    free(w);
+    if (!f) { pymcl_set_error("无法读取 %s", src_path); return -1; }
+    int r = zw_add(z, arcname, f, NULL, 0, mt, level);
+    fclose(f);
+    return r;
+}
+
+int pymcl_zipw_add_bytes(pymcl_zipw *z, const char *arcname, const void *data, size_t len, int level) {
+    return zw_add(z, arcname, NULL, (const unsigned char *)data, len, time(NULL), level);
+}
+
+int pymcl_zipw_close(pymcl_zipw *z) {
+    if (!z) return -1;
+    uint32_t cd_start = (uint32_t)ftell(z->f);
+    for (int i = 0; i < z->n; i++) {
+        zw_ent *e = &z->ents[i];
+        uint16_t nl = (uint16_t)strlen(e->name);
+        wu32(z->f, 0x02014b50);
+        wu16(z->f, 20);          /* made by：0 = MS-DOS/Windows，与 Windows 上的 Python zipfile 一致 */
+        wu16(z->f, 20);
+        wu16(z->f, e->flags);
+        wu16(z->f, e->method);
+        wu16(z->f, e->mtime);
+        wu16(z->f, e->mdate);
+        wu32(z->f, e->crc);
+        wu32(z->f, e->csize);
+        wu32(z->f, e->usize);
+        wu16(z->f, nl);
+        wu16(z->f, 0);
+        wu16(z->f, 0);
+        wu16(z->f, 0);
+        wu16(z->f, 0);
+        wu32(z->f, 0);
+        wu32(z->f, e->offset);
+        fwrite(e->name, 1, nl, z->f);
+    }
+    uint32_t cd_size = (uint32_t)ftell(z->f) - cd_start;
+    wu32(z->f, 0x06054b50);
+    wu16(z->f, 0);
+    wu16(z->f, 0);
+    wu16(z->f, (uint16_t)z->n);
+    wu16(z->f, (uint16_t)z->n);
+    wu32(z->f, cd_size);
+    wu32(z->f, cd_start);
+    wu16(z->f, 0);
+    int ok = fflush(z->f) == 0;
+    fclose(z->f);
+    for (int i = 0; i < z->n; i++) free(z->ents[i].name);
+    free(z->ents);
+    free(z);
+    return ok ? 0 : -1;
+}
+
+void pymcl_zipw_abort(pymcl_zipw *z) {
+    if (!z) return;
+    fclose(z->f);
+    for (int i = 0; i < z->n; i++) free(z->ents[i].name);
+    free(z->ents);
+    free(z);
+}
+
+/* 目录里的全部文件（递归，相对路径用 '\\'），对应 Path.rglob("*") 里 is_file() 的那些 */
+static void walk_files(const char *root, const char *rel, cJSON *out) {
+    char dir[PYMCL_PATH];
+    if (rel[0]) pymcl_path_join(dir, sizeof(dir), root, rel); else snprintf(dir, sizeof(dir), "%s", root);
+    cJSON *files = pymcl_list_dir(dir, 0, 0);
+    cJSON *it;
+    cJSON_ArrayForEach(it, files) {
+        char r[PYMCL_PATH];
+        if (rel[0]) pymcl_path_join(r, sizeof(r), rel, it->valuestring); else snprintf(r, sizeof(r), "%s", it->valuestring);
+        cJSON_AddItemToArray(out, cJSON_CreateString(r));
+    }
+    cJSON_Delete(files);
+    cJSON *dirs = pymcl_list_dir(dir, 1, 0);
+    cJSON_ArrayForEach(it, dirs) {
+        char r[PYMCL_PATH];
+        if (rel[0]) pymcl_path_join(r, sizeof(r), rel, it->valuestring); else snprintf(r, sizeof(r), "%s", it->valuestring);
+        walk_files(root, r, out);
+    }
+    cJSON_Delete(dirs);
+}
+
+cJSON *pymcl_walk_files(const char *root) {
+    cJSON *out = cJSON_CreateArray();
+    if (pymcl_dir_exists(root)) walk_files(root, "", out);
+    return out;
+}

@@ -150,8 +150,16 @@ static void send_resp(SOCKET s, int code, const char *ctype, const char *body, i
     if (body && blen) send_all(s, body, blen);
 }
 
+/* cJSON 的字符串不能含 NUL，而 AI 权限规则的 key 是 "工具\0内容"（与 Python 一致）。
+   进出桥时把 JSON 里的 \u0000 与 \u001f 互换，内部一律用 0x1F 当分隔符。 */
+static void swap_escape(char *js, const char *from, const char *to) {
+    if (!js) return;
+    for (char *p = strstr(js, from); p; p = strstr(p + 6, from)) memcpy(p, to, 6);
+}
+
 static void send_json(SOCKET s, int code, cJSON *obj) {
     char *js = cJSON_PrintUnformatted(obj);
+    swap_escape(js, "\\u001f", "\\u0000");
     send_resp(s, code, "application/json; charset=utf-8", js, js ? (int)strlen(js) : 0);
     cJSON_free(js);
 }
@@ -281,7 +289,10 @@ static int has_browser_origin(const char *req) {
 }
 
 static void handle_rpc(SOCKET s, const char *body) {
-    cJSON *req = cJSON_Parse(body ? body : "{}");
+    char *copy = pymcl_strdup(body ? body : "{}");
+    swap_escape(copy, "\\u0000", "\\u001f");
+    cJSON *req = cJSON_Parse(copy);
+    free(copy);
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddStringToObject(resp, "jsonrpc", "2.0");
     if (!req || !cJSON_IsObject(req)) {
@@ -311,6 +322,7 @@ static void handle_rpc(SOCKET s, const char *body) {
         cJSON_AddStringToObject(err, "message", "hidden method");
         cJSON_AddItemToObject(resp, "error", err);
     } else {
+        pymcl_set_error("%s", "");
         cJSON *result = backend_call(method, params);
         if (!result) {
             cJSON *err = cJSON_CreateObject();

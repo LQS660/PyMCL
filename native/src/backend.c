@@ -3,6 +3,10 @@
 #include <string.h>
 #include <time.h>
 
+/* terracotta.c（M4 陶瓦联机） */
+cJSON *rpc_terracotta_call(const char *method, cJSON *params, sse_emit_fn emit, int *handled);
+int terracotta_prepare_run(pymcl_ctx *ctx, char *msg, size_t n);
+
 static sse_emit_fn g_emit;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static int g_task_n;
@@ -21,6 +25,9 @@ typedef struct {
 static task_t *g_tasks[32];
 static int g_ntasks;
 static cJSON *g_last_crash;
+/* 与 bridge/api.py 的 _titles / _task_results 对应：标题一直留着，结果超过 80 条裁到最近 40 条 */
+static cJSON *g_titles;
+static cJSON *g_results;
 
 #define CRASH_TAIL 200
 static int find_python(char *out, size_t n) {
@@ -42,6 +49,10 @@ static int find_python(char *out, size_t n) {
 
 static cJSON *analyze_game_crash(const char *inst, const char *ver, long code,
                                  char **tail, int tn, int ts, double started) {
+#ifdef PYMCL_NO_PY
+    (void)inst; (void)ver; (void)code; (void)tail; (void)tn; (void)ts; (void)started;
+    return NULL;
+#endif
     char py[PYMCL_PATH], outf[PYMCL_PATH], jsonf[PYMCL_PATH], codebuf[32], startbuf[32];
     find_python(py, sizeof(py));
     snprintf(outf, sizeof(outf), "%s\\game-output-tail.txt", g_root);
@@ -136,6 +147,18 @@ static void finish_task(task_t *t, int ok, const char *msg) {
     cJSON_AddBoolToObject(o, "success", ok);
     cJSON_AddStringToObject(o, "message", msg ? msg : (ok ? "任务完成" : pymcl_error()));
     emit("finished", o);
+    pthread_mutex_lock(&g_mu);
+    if (!g_results) g_results = cJSON_CreateArray();
+    {
+        cJSON *r = cJSON_CreateObject();
+        cJSON_AddStringToObject(r, "task_id", t->id);
+        cJSON_AddBoolToObject(r, "success", ok);
+        cJSON_AddStringToObject(r, "message", cJSON_GetStringValue(cJSON_GetObjectItem(o, "message")));
+        cJSON_AddItemToArray(g_results, r);
+        if (cJSON_GetArraySize(g_results) > 80)
+            while (cJSON_GetArraySize(g_results) > 40) cJSON_DeleteItemFromArray(g_results, 0);
+    }
+    pthread_mutex_unlock(&g_mu);
     cJSON_Delete(o);
     if (ok) emit("ui_changed", cJSON_CreateObject());
     pthread_mutex_lock(&g_mu);
@@ -357,6 +380,8 @@ static void *task_run(void *p) {
             snprintf(msg, sizeof(msg), "已登录 %s", cJSON_GetStringValue(cJSON_GetObjectItem(acc, "name")) ?: "");
             cJSON_Delete(acc);
         }
+    } else if (strcmp(t->method, "terracotta_prepare") == 0) {
+        ok = terracotta_prepare_run(&ctx, msg, sizeof(msg)) == 0;
     }
     if (!msg[0]) snprintf(msg, sizeof(msg), "%s", ok ? "任务完成" : (t->cancelled ? "已取消" : pymcl_error()));
     finish_task(t, ok && !t->cancelled, t->cancelled ? "已取消" : msg);
@@ -371,6 +396,8 @@ static cJSON *start_task(const char *title, const char *method, cJSON *args) {
     snprintf(t->id, sizeof(t->id), "task-%d", ++g_task_n);
     snprintf(t->title, sizeof(t->title), "%s", title);
     snprintf(t->method, sizeof(t->method), "%s", method);
+    if (!g_titles) g_titles = cJSON_CreateObject();
+    cJSON_AddStringToObject(g_titles, t->id, t->title);
     t->args = args ? cJSON_Duplicate(args, 1) : cJSON_CreateObject();
     g_tasks[g_ntasks++] = t;
     pthread_mutex_unlock(&g_mu);
@@ -390,11 +417,35 @@ static const char *ensure_inst(const char *name) {
     return config_str("default_instance", "default");
 }
 
+/* bridge/api.py instance_java_label：自动 → 「自动选择」；认得的 Java → 「Java 17」；否则文件名 */
+static cJSON *rpc_instance_java_label(const char *name) {
+    char ip[PYMCL_PATH], jp[PYMCL_PATH];
+    if (instance_open(name, ip, sizeof(ip)) != 0) return NULL;
+    instance_java_pref(name, jp, sizeof(jp));
+    if (strcmp(jp, PYMCL_JAVA_AUTO) == 0) return cJSON_CreateString(PYMCL_JAVA_AUTO);
+    cJSON *all = java_all();
+    cJSON *j;
+    cJSON_ArrayForEach(j, all) {
+        const char *exe = cJSON_GetStringValue(cJSON_GetObjectItem(j, "exe"));
+        if (exe && strcmp(exe, jp) == 0) {
+            cJSON *maj = cJSON_GetObjectItem(j, "major");
+            char label[64], ms[32] = "?";
+            if (py_truthy(maj)) py_str(maj, ms, sizeof(ms));
+            snprintf(label, sizeof(label), "Java %s", ms);
+            cJSON_Delete(all);
+            return cJSON_CreateString(label);
+        }
+    }
+    cJSON_Delete(all);
+    return cJSON_CreateString(pymcl_basename(jp));
+}
+
 static cJSON *rpc_get_instances(void) {
     cJSON *names = NULL;
     instance_list(&names);
     if (cJSON_GetArraySize(names) == 0) {
-        instance_create(config_str("default_instance", "default"), NULL);
+        const char *def = config_str("default_instance", "default");
+        instance_create(def[0] ? def : "default", NULL);
         cJSON_Delete(names);
         instance_list(&names);
     }
@@ -405,24 +456,30 @@ static cJSON *rpc_get_instances(void) {
         cJSON *ids = NULL;
         instance_installed_ids(nm, &ids);
         cJSON *meta = instance_meta(nm);
-        cJSON *pack = cJSON_GetObjectItem(meta, "modpack");
-        const char *packn = cJSON_IsObject(pack) ? cJSON_GetStringValue(cJSON_GetObjectItem(pack, "name")) : NULL;
-        const char *mc = packn ? packn : cJSON_GetStringValue(cJSON_GetObjectItem(meta, "mc_version"));
-        if (!mc && cJSON_GetArraySize(ids) > 0) mc = cJSON_GetArrayItem(ids, 0)->valuestring;
-        if (!mc) mc = "未安装版本";
+        cJSON *packv = cJSON_GetObjectItem(meta, "modpack");
+        cJSON *pack = cJSON_IsObject(packv) ? packv : NULL;
+        cJSON *pack_name = pack ? cJSON_GetObjectItem(pack, "name") : NULL;
+        cJSON *mcver = cJSON_GetObjectItem(meta, "mc_version");
+        char mc[512];
+        if (py_truthy(pack_name)) py_str(pack_name, mc, sizeof(mc));
+        else if (py_truthy(mcver)) py_str(mcver, mc, sizeof(mc));
+        else if (cJSON_GetArraySize(ids) > 0) snprintf(mc, sizeof(mc), "%s", cJSON_GetArrayItem(ids, 0)->valuestring);
+        else snprintf(mc, sizeof(mc), "%s", "未安装版本");
         char jp[PYMCL_PATH];
         instance_java_pref(nm, jp, sizeof(jp));
         cJSON *row = cJSON_CreateObject();
         cJSON_AddStringToObject(row, "name", nm);
         cJSON_AddNumberToObject(row, "versions", cJSON_GetArraySize(ids));
-        const char *mcver = cJSON_GetStringValue(cJSON_GetObjectItem(meta, "mc_version"));
-        const char *packver = cJSON_IsObject(pack) ? cJSON_GetStringValue(cJSON_GetObjectItem(pack, "version")) : NULL;
         cJSON_AddStringToObject(row, "mc", mc);
-        cJSON_AddStringToObject(row, "pack", packn ? packn : "");
-        cJSON_AddStringToObject(row, "mc_version", mcver ? mcver : "");
-        cJSON_AddStringToObject(row, "pack_version", packver ? packver : "");
+        cJSON_AddItemToObject(row, "pack", py_truthy(pack_name) ? cJSON_Duplicate(pack_name, 1) : cJSON_CreateString(""));
+        cJSON *pv = pack ? cJSON_GetObjectItem(pack, "version") : NULL;
+        cJSON_AddItemToObject(row, "pack_version", py_truthy(pv) ? cJSON_Duplicate(pv, 1) : cJSON_CreateString(""));
+        cJSON *pmc = pack ? cJSON_GetObjectItem(pack, "mc_version") : NULL;
+        cJSON_AddItemToObject(row, "mc_version", py_truthy(pmc) ? cJSON_Duplicate(pmc, 1)
+                              : py_truthy(mcver) ? cJSON_Duplicate(mcver, 1) : cJSON_CreateString(""));
         cJSON_AddStringToObject(row, "java", jp);
-        cJSON_AddStringToObject(row, "java_label", pymcl_ieq(jp, PYMCL_JAVA_AUTO) ? PYMCL_JAVA_AUTO : pymcl_basename(jp));
+        cJSON *label = rpc_instance_java_label(nm);
+        cJSON_AddItemToObject(row, "java_label", label ? label : cJSON_CreateString(pymcl_basename(jp)));
         cJSON_AddItemToArray(out, row);
         cJSON_Delete(ids);
         cJSON_Delete(meta);
@@ -487,32 +544,76 @@ void backend_shutdown(void) {
 
 cJSON *backend_call(const char *method, cJSON *params) {
     if (!method) return NULL;
-    if (strcmp(method, "get_settings") == 0) {
-        cJSON *o = cJSON_CreateObject();
-        cJSON_AddBoolToObject(o, "share_libraries", config_bool("shared_libraries", 0));
-        cJSON_AddBoolToObject(o, "share_assets", config_bool("shared_assets", 0));
-        cJSON_AddNumberToObject(o, "download_threads", config_int("download_threads", 8));
-        cJSON_AddNumberToObject(o, "default_memory_mb", config_int("memory_mb", 4096));
-        cJSON *res = cJSON_CreateArray();
-        cJSON_AddItemToArray(res, cJSON_CreateNumber(config_int("width", 854)));
-        cJSON_AddItemToArray(res, cJSON_CreateNumber(config_int("height", 480)));
-        cJSON_AddItemToObject(o, "default_resolution", res);
-        cJSON_AddStringToObject(o, "ms_client_id", config_str("microsoft_client_id", ""));
-        cJSON_AddStringToObject(o, "curseforge_api_key", config_str("curseforge_api_key", ""));
-        cJSON_AddStringToObject(o, "root", g_root);
-        cJSON_AddStringToObject(o, "default_instance", config_str("default_instance", "default"));
-        /* 界面偏好（ui_*：侧栏排法、布局方案、深浅色…）原样带出去。
-           这些键 Qt 版一直在写，前端拿不到就只能画一套写死的侧栏。 */
-        {
-            cJSON *cfg = config_obj();
-            cJSON *it;
-            cJSON_ArrayForEach(it, cfg) {
-                if (it->string && strncmp(it->string, "ui_", 3) == 0 && !cJSON_GetObjectItem(o, it->string))
-                    cJSON_AddItemToObject(o, it->string, cJSON_Duplicate(it, 1));
-            }
+    if (strcmp(method, "get_settings") == 0) return rpc_get_settings();
+    if (strcmp(method, "get_setting") == 0) {
+        cJSON *s = rpc_get_settings();
+        cJSON *v = cJSON_GetObjectItemCaseSensitive(s, pstr(params, "key", ""));
+        cJSON *def = cJSON_GetObjectItemCaseSensitive(params, "default");
+        cJSON *out = v ? cJSON_Duplicate(v, 1) : def ? cJSON_Duplicate(def, 1) : cJSON_CreateNull();
+        cJSON_Delete(s);
+        return out;
+    }
+    if (strcmp(method, "instance_java_label") == 0) return rpc_instance_java_label(pstr(params, "name", ""));
+
+    /* BackendAPI.task_title / list_tasks / wait_task / is_game_running */
+    if (strcmp(method, "task_title") == 0) {
+        const char *id = pstr(params, "task_id", "");
+        pthread_mutex_lock(&g_mu);
+        const char *t = g_titles ? cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(g_titles, id)) : NULL;
+        cJSON *r = cJSON_CreateString(t ? t : id);
+        pthread_mutex_unlock(&g_mu);
+        return r;
+    }
+    if (strcmp(method, "list_tasks") == 0) {
+        cJSON *o = cJSON_CreateObject(), *running = cJSON_CreateArray();
+        pthread_mutex_lock(&g_mu);
+        for (int i = 0; i < g_ntasks; i++) {
+            cJSON *r = cJSON_CreateObject();
+            cJSON_AddStringToObject(r, "task_id", g_tasks[i]->id);
+            cJSON_AddStringToObject(r, "title", g_tasks[i]->title);
+            cJSON_AddItemToArray(running, r);
         }
+        cJSON *finished = g_results ? cJSON_Duplicate(g_results, 1) : cJSON_CreateArray();
+        pthread_mutex_unlock(&g_mu);
+        cJSON_AddItemToObject(o, "running", running);
+        cJSON_AddItemToObject(o, "finished", finished);
         return o;
     }
+    if (strcmp(method, "wait_task") == 0) {
+        const char *id = pstr(params, "task_id", "");
+        cJSON *tv = cJSON_GetObjectItem(params, "timeout");
+        double timeout = cJSON_IsNumber(tv) ? tv->valuedouble : 1800;
+        ULONGLONG start = GetTickCount64();
+        for (;;) {
+            cJSON *hit = NULL;
+            pthread_mutex_lock(&g_mu);
+            cJSON *r;
+            cJSON_ArrayForEach(r, g_results) {
+                const char *rid = cJSON_GetStringValue(cJSON_GetObjectItem(r, "task_id"));
+                if (rid && strcmp(rid, id) == 0) hit = r;
+            }
+            cJSON *out = NULL;
+            if (hit) {
+                out = cJSON_CreateObject();
+                cJSON_AddBoolToObject(out, "ok", cJSON_IsTrue(cJSON_GetObjectItem(hit, "success")));
+                cJSON_AddStringToObject(out, "message", cJSON_GetStringValue(cJSON_GetObjectItem(hit, "message")));
+                cJSON_AddStringToObject(out, "task_id", id);
+            }
+            pthread_mutex_unlock(&g_mu);
+            if (out) return out;
+            if ((double)(GetTickCount64() - start) / 1000.0 > timeout) {
+                out = cJSON_CreateObject();
+                cJSON_AddFalseToObject(out, "ok");
+                cJSON_AddStringToObject(out, "message", tr("等待任务超时"));
+                cJSON_AddStringToObject(out, "task_id", id);
+                cJSON_AddTrueToObject(out, "timeout");
+                return out;
+            }
+            Sleep(300);
+        }
+    }
+    if (strcmp(method, "is_game_running") == 0)
+        return cJSON_CreateBool(g_game && WaitForSingleObject(g_game, 0) == WAIT_TIMEOUT);
     if (strcmp(method, "save_settings") == 0 || strcmp(method, "update_settings") == 0) {
         cJSON *d = params;
         cJSON *inner = cJSON_GetObjectItem(d, "data");
@@ -587,17 +688,17 @@ cJSON *backend_call(const char *method, cJSON *params) {
     if (strcmp(method, "create_instance") == 0) {
         if (instance_create(pstr(params, "name", ""), NULL) != 0) return NULL;
         emit("ui_changed", cJSON_CreateObject());
-        return cJSON_CreateTrue();
+        return cJSON_CreateNull();
     }
     if (strcmp(method, "delete_instance") == 0) {
         if (instance_delete(pstr(params, "name", "")) != 0) return NULL;
         emit("ui_changed", cJSON_CreateObject());
-        return cJSON_CreateTrue();
+        return cJSON_CreateNull();
     }
     if (strcmp(method, "rename_instance") == 0) {
         if (instance_rename(pstr(params, "name", ""), pstr(params, "new_name", "")) != 0) return NULL;
         emit("ui_changed", cJSON_CreateObject());
-        return cJSON_CreateTrue();
+        return cJSON_CreateNull();
     }
     if (strcmp(method, "open_instance_folder") == 0) {
         char ip[PYMCL_PATH];
@@ -629,9 +730,22 @@ cJSON *backend_call(const char *method, cJSON *params) {
     if (strcmp(method, "get_installed_versions") == 0) {
         const char *inst = pstr(params, "instance", "");
         if (inst[0]) {
+            char ip[PYMCL_PATH];
+            if (instance_open(inst, ip, sizeof(ip)) != 0) return NULL;
             cJSON *ids = NULL;
             instance_installed_ids(inst, &ids);
-            return ids;
+            if (py_truthy(cJSON_GetObjectItem(params, "include_hidden")) || config_bool("show_hidden_versions", 0))
+                return ids;
+            cJSON *shown = cJSON_CreateArray();
+            cJSON *v;
+            cJSON_ArrayForEach(v, ids) {
+                cJSON *vs = version_settings_load(inst, v->valuestring);
+                if (!py_truthy(cJSON_GetObjectItem(vs, "hidden")))
+                    cJSON_AddItemToArray(shown, cJSON_CreateString(v->valuestring));
+                cJSON_Delete(vs);
+            }
+            cJSON_Delete(ids);
+            return shown;
         }
         cJSON *names = NULL, *out = cJSON_CreateArray();
         instance_list(&names);
@@ -707,7 +821,8 @@ cJSON *backend_call(const char *method, cJSON *params) {
         return cJSON_CreateTrue();
     }
     if (strcmp(method, "get_instance_java") == 0) {
-        char jp[PYMCL_PATH];
+        char ip[PYMCL_PATH], jp[PYMCL_PATH];
+        if (instance_open(pstr(params, "name", ""), ip, sizeof(ip)) != 0) return NULL;
         instance_java_pref(pstr(params, "name", ""), jp, sizeof(jp));
         return cJSON_CreateString(jp);
     }
@@ -750,6 +865,10 @@ cJSON *backend_call(const char *method, cJSON *params) {
         return cJSON_CreateObject();
     }
     if (strcmp(method, "export_crash_report") == 0) {
+#ifdef PYMCL_NO_PY
+        pymcl_set_error("NOT_NATIVE: export_crash_report still runs python -m mclauncher.crash");
+        return NULL;
+#endif
         char py[PYMCL_PATH], jsonf[PYMCL_PATH], destf[PYMCL_PATH];
         const char *dest = pstr(params, "dest", "");
         find_python(py, sizeof(py));
@@ -806,6 +925,8 @@ cJSON *backend_call(const char *method, cJSON *params) {
         return start_task("启动游戏", method, params);
     if (strcmp(method, "start_microsoft_login") == 0)
         return start_task("微软登录", method, params);
+    if (strcmp(method, "terracotta_prepare") == 0)
+        return start_task("准备陶瓦联机", method, params);
 
     /* 启动页布局：原生实现，别为每一次拖拽起一个 python 进程 */
     {
@@ -814,10 +935,25 @@ cJSON *backend_call(const char *method, cJSON *params) {
         if (handled) return lay;
     }
 
+    /* 去 Python 化新移植的本地功能（docs/GOAL-c-bridge-no-python.md M1） */
+    {
+        int handled = 0;
+        cJSON *local = rpc_local_call(method, params, emit, &handled);
+        if (handled) return local;
+    }
+
+    /* 陶瓦联机（docs/GOAL-c-bridge-no-python.md M4） */
+    {
+        int handled = 0;
+        cJSON *tc = rpc_terracotta_call(method, params, emit, &handled);
+        if (handled) return tc;
+    }
+
     /* Align remaining RPC with Python bridge/api.py (native first, then py_rpc). */
     {
-        cJSON *aligned = rpc_align_call(method, params, emit);
-        if (aligned) return aligned;
+        int handled = 0;
+        cJSON *aligned = rpc_align_call(method, params, emit, &handled);
+        if (handled) return aligned;
     }
     {
         int handled = 0;

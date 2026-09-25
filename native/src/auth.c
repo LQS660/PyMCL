@@ -1,4 +1,5 @@
 #include "pymcl.h"
+#include <ctype.h>
 #include <wincrypt.h>
 
 #pragma comment(lib, "crypt32.lib")
@@ -31,15 +32,33 @@ void accounts_save(cJSON *root) {
     pymcl_write_json(p, root);
 }
 
-cJSON *account_offline(const char *username) {
-    const char *n = (username && username[0]) ? username : "Player";
+cJSON *account_offline_skin(const char *username, const char *skin) {
+    /* 同 Python auth.py offline_account：去空白、缺省 Player，皮肤决定 UUID */
+    char n[256];
+    snprintf(n, sizeof(n), "%s", username ? username : "");
+    char *s = n;
+    while (*s && isspace((unsigned char)*s)) s++;
+    size_t len = strlen(s);
+    while (len && isspace((unsigned char)s[len - 1])) s[--len] = 0;
+    if (!s[0]) snprintf(s, sizeof(n), "Player");
+    char sk[32];
+    snprintf(sk, sizeof(sk), "%s",
+             (skin && skin[0]) ? skin : config_str("offline_skin", "default"));
+    for (char *q = sk; *q; q++) *q = (char)tolower((unsigned char)*q);
     char uuid[40];
-    pymcl_offline_uuid(n, uuid);
+    if (strcmp(sk, "steve") == 0) snprintf(uuid, sizeof(uuid), "8667ba71-b85a-4004-af54-457a9734eed7");
+    else if (strcmp(sk, "alex") == 0) snprintf(uuid, sizeof(uuid), "ec561538-f3fd-461d-a7c9-7aa354f5bba9");
+    else pymcl_offline_uuid(s, uuid);
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "type", "offline");
-    cJSON_AddStringToObject(o, "name", n);
+    cJSON_AddStringToObject(o, "name", s);
     cJSON_AddStringToObject(o, "uuid", uuid);
+    cJSON_AddStringToObject(o, "skin", sk);
     return o;
+}
+
+cJSON *account_offline(const char *username) {
+    return account_offline_skin(username, NULL);
 }
 
 cJSON *account_launch_props(cJSON *acc) {
@@ -54,16 +73,37 @@ cJSON *account_launch_props(cJSON *acc) {
         cJSON_AddStringToObject(o, "token", cJSON_GetStringValue(cJSON_GetObjectItem(acc, "access_token")) ?: "0");
         cJSON_AddStringToObject(o, "user_type", "msa");
         cJSON_AddStringToObject(o, "xuid", cJSON_GetStringValue(cJSON_GetObjectItem(acc, "xuid")) ?: "");
-    } else {
+    } else if (type && strcmp(type, "authlib") == 0) {
         char uuid[40];
+        pymcl_dashed_uuid(cJSON_GetStringValue(cJSON_GetObjectItem(acc, "uuid")) ?: "", uuid);
+        cJSON_AddStringToObject(o, "name", name);
+        cJSON_AddStringToObject(o, "uuid", uuid);
+        cJSON_AddStringToObject(o, "token", cJSON_GetStringValue(cJSON_GetObjectItem(acc, "access_token")) ?: "0");
+        cJSON_AddStringToObject(o, "user_type", "mojang");
+        cJSON_AddStringToObject(o, "xuid", "");
+        cJSON_AddStringToObject(o, "authlib_api", cJSON_GetStringValue(cJSON_GetObjectItem(acc, "api")) ?: "");
+    } else if (type && strcmp(type, "nide8") == 0) {
+        char uuid[40];
+        pymcl_dashed_uuid(cJSON_GetStringValue(cJSON_GetObjectItem(acc, "uuid")) ?: "", uuid);
+        cJSON_AddStringToObject(o, "name", name);
+        cJSON_AddStringToObject(o, "uuid", uuid);
+        cJSON_AddStringToObject(o, "token", cJSON_GetStringValue(cJSON_GetObjectItem(acc, "access_token")) ?: "0");
+        cJSON_AddStringToObject(o, "user_type", "mojang");
+        cJSON_AddStringToObject(o, "xuid", "");
+        cJSON_AddStringToObject(o, "nide8_id", cJSON_GetStringValue(cJSON_GetObjectItem(acc, "server_id")) ?: "");
+    } else {
+        char uuid[40] = "";
         const char *u = cJSON_GetStringValue(cJSON_GetObjectItem(acc, "uuid"));
         if (u && u[0]) pymcl_dashed_uuid(u, uuid);
-        else pymcl_offline_uuid(name, uuid);
+        if (!uuid[0]) pymcl_offline_uuid(name, uuid);
         cJSON_AddStringToObject(o, "name", name);
         cJSON_AddStringToObject(o, "uuid", uuid);
         cJSON_AddStringToObject(o, "token", "0");
         cJSON_AddStringToObject(o, "user_type", "legacy");
         cJSON_AddStringToObject(o, "xuid", "");
+        /* 自定义皮肤要在启动时起一个本地 Yggdrasil 服务（launcher._offline_skin_api，C 端未移植） */
+        cJSON_AddStringToObject(o, "skin_file", cJSON_GetStringValue(cJSON_GetObjectItem(acc, "skin_file")) ?: "");
+        cJSON_AddStringToObject(o, "skin_model", cJSON_GetStringValue(cJSON_GetObjectItem(acc, "skin_model")) ?: "");
     }
     return o;
 }

@@ -94,6 +94,7 @@ int main(int argc, char **argv) {
     pymcl_set_root(root);
     free(root);
     config_init();
+    i18n_init(NULL);
     if (http_init() != 0) {
         fprintf(stderr, "curl init failed\n");
         SecureZeroMemory(token, strlen(token));

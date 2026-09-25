@@ -1,5 +1,11 @@
 #include "pymcl.h"
+#include <ctype.h>
 #include <pthread.h>
+
+static cJSON *load_parent_ud(const char *pid, void *ud) {
+    const char *inst = (const char *)ud;
+    return instance_version_json(inst, pid);
+}
 
 /* ---------- python one-shot RPC (full parity with bridge.api) ---------- */
 
@@ -26,8 +32,14 @@ cJSON *py_rpc_call(const char *method, cJSON *params) {
 }
 
 cJSON *py_rpc_call_ex(const char *method, cJSON *params, int *handled) {
-    char py[PYMCL_PATH], script[PYMCL_PATH], pin[PYMCL_PATH], pout[PYMCL_PATH], tmpdir[PYMCL_PATH];
     if (handled) *handled = 0;
+#ifdef PYMCL_NO_PY
+    /* 去 Python 化验收用的构建：不许悄悄回落到 Python。_c_rpc_coverage.py 认 NOT_NATIVE 这个前缀。 */
+    (void)params;
+    pymcl_set_error("NOT_NATIVE: %s is not implemented in the C bridge", method);
+    return NULL;
+#else
+    char py[PYMCL_PATH], script[PYMCL_PATH], pin[PYMCL_PATH], pout[PYMCL_PATH], tmpdir[PYMCL_PATH];
     find_python(py, sizeof(py));
     pymcl_path_join3(script, sizeof(script), g_root, "native\\tools", "py_rpc.py");
     if (!pymcl_file_exists(script)) {
@@ -104,6 +116,7 @@ cJSON *py_rpc_call_ex(const char *method, cJSON *params, int *handled) {
     if (!result) result = cJSON_CreateNull();
     if (handled) *handled = 1;
     return result;
+#endif
 }
 
 /* ---------- helpers ---------- */
@@ -114,11 +127,11 @@ static const char *pstr(cJSON *o, const char *k, const char *def) {
     return s ? s : def;
 }
 
-static void servers_path(const char *inst, char *out, size_t n) {
-    char ip[PYMCL_PATH];
-    instance_path(inst, ip, sizeof(ip));
-    pymcl_path_join(out, n, ip, "servers.json");
+static int pint(cJSON *o, const char *k, int def) {
+    cJSON *v = o ? cJSON_GetObjectItemCaseSensitive(o, k) : NULL;
+    return (v && cJSON_IsNumber(v)) ? (int)v->valuedouble : def;
 }
+
 
 static void playtime_path(char *out, size_t n) {
     pymcl_path_join(out, n, g_root, "playtime.json");
@@ -139,6 +152,37 @@ static cJSON *vs_defaults(void) {
         "\"auth_server_name\":\"\",\"nide8_id\":\"\",\"gc\":\"\",\"window_title\":\"\","
         "\"window_mode\":\"window\",\"window_width\":null,\"window_height\":null,"
         "\"skip_assets\":false,\"offline_skin\":\"default\"}");
+}
+
+/* mclauncher/version_settings.load：出厂值 + pymcl.json，隔离档位认不出就回 none */
+cJSON *version_settings_load(const char *inst, const char *ver) {
+    cJSON *data = vs_defaults();
+    char path[PYMCL_PATH];
+    version_settings_path(inst, ver, path, sizeof(path));
+    cJSON *stored = pymcl_read_json(path);
+    if (cJSON_IsObject(stored)) {
+        cJSON *it = stored->child;
+        while (it) {
+            cJSON *nx = it->next;
+            if (it->string) {
+                cJSON_DeleteItemFromObjectCaseSensitive(data, it->string);
+                cJSON_AddItemToObject(data, it->string, cJSON_Duplicate(it, 1));
+            }
+            it = nx;
+        }
+    }
+    cJSON_Delete(stored);
+    cJSON *iso = cJSON_GetObjectItemCaseSensitive(data, "isolation");
+    const char *s = NULL;
+    if (py_truthy(iso)) s = cJSON_GetStringValue(iso);
+    else if (py_truthy(config_get("default_isolation"))) s = cJSON_GetStringValue(config_get("default_isolation"));
+    else s = "none";
+    if (!s || (strcmp(s, "none") && strcmp(s, "saves") && strcmp(s, "mods") && strcmp(s, "all"))) s = "none";
+    char keep[16];
+    snprintf(keep, sizeof(keep), "%s", s);
+    if (iso) cJSON_ReplaceItemInObjectCaseSensitive(data, "isolation", cJSON_CreateString(keep));
+    else cJSON_AddStringToObject(data, "isolation", keep);
+    return data;
 }
 
 static int set_mod_enabled(const char *instance, const char *filename, int enabled) {
@@ -172,41 +216,183 @@ static int set_mod_enabled(const char *instance, const char *filename, int enabl
     return 0;
 }
 
-static cJSON *list_mod_entries(const char *instance) {
-    cJSON *names = list_instance_files(instance, "mods");
-    cJSON *out = cJSON_CreateArray();
+/* 同 Python 的 _is_offline_account：「离线模式」原文 / 译文 / 空串都算离线 */
+static int is_offline_account_str(const char *a) {
+    return !a || !a[0] || strcmp(a, "离线模式") == 0 || strcmp(a, tr("离线模式")) == 0;
+}
+/* 按名字找账号，找到返回拷贝 */
+static cJSON *accounts_find_name(const char *name) {
+    cJSON *root = accounts_load();
     cJSON *it;
-    cJSON_ArrayForEach(it, names) {
-        const char *fn = it->valuestring;
-        if (!fn) continue;
-        int enabled = !pymcl_endswith(fn, ".disabled");
-        char base[512];
-        snprintf(base, sizeof(base), "%s", fn);
-        if (!enabled) {
-            size_t n = strlen(base);
-            if (n > 9) base[n - 9] = 0;
+    cJSON_ArrayForEach(it, cJSON_GetObjectItem(root, "accounts")) {
+        const char *n = cJSON_GetStringValue(cJSON_GetObjectItem(it, "name"));
+        if (n && strcmp(n, name) == 0) {
+            cJSON *d = cJSON_Duplicate(it, 1);
+            cJSON_Delete(root);
+            return d;
         }
-        cJSON *row = cJSON_CreateObject();
-        cJSON_AddStringToObject(row, "filename", fn);
-        cJSON_AddStringToObject(row, "name", base);
-        cJSON_AddBoolToObject(row, "enabled", enabled);
-        cJSON_AddItemToArray(out, row);
     }
-    cJSON_Delete(names);
-    return out;
+    cJSON_Delete(root);
+    return NULL;
+}
+/* 账号参数解析（build_launch_command 用）：离线或指定账号，账号不存在要报错 */
+static cJSON *resolve_launch_account(const char *account, const char *user, const char *errkey) {
+    if (is_offline_account_str(account)) return account_offline(user);
+    cJSON *acc = accounts_find_name(account);
+    if (!acc) {
+        char msg[512];
+        tr_fmt0(msg, sizeof(msg), errkey, account);
+        pymcl_set_error("%s", msg);
+        return NULL;
+    }
+    cJSON *v = account_ensure_valid(acc);
+    cJSON_Delete(acc);
+    return v;   /* 刷新失败时 v 为 NULL，错误信息已由 ensure_valid 设置 */
+}
+/* version_settings 的 auth_server 注入 launch_props（bridge/api.py build_launch_command） */
+static void inject_auth_server(cJSON *props, const char *inst, const char *ver) {
+    cJSON *vs = version_settings_load(inst, ver);
+    char asrv[512];
+    snprintf(asrv, sizeof(asrv), "%s",
+             cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(vs, "auth_server")) ?: "");
+    cJSON_Delete(vs);
+    char *s = asrv;
+    while (*s && isspace((unsigned char)*s)) s++;
+    size_t len = strlen(s);
+    while (len && isspace((unsigned char)s[len - 1])) s[--len] = 0;
+    if (!s[0]) return;
+    const char *cur = cJSON_GetStringValue(cJSON_GetObjectItem(props, "authlib_api")) ?: "";
+    if (!cur[0]) cJSON_AddStringToObject(props, "authlib_api", s);
+}
+/* launch_flow.prepare：隔离目录 + 全局模组 + 服务器 / 全屏参数 + GC 预设 */
+static void launch_prepare(const char *inst, const char *ver, int mem_param,
+                           char *gdir, size_t gn, int *mem_out,
+                           char ***ega, int *n_ega, char ***ejv, int *n_ejv) {
+    cJSON *vs = version_settings_load(inst, ver);
+    version_apply_isolation(inst, ver, vs);
+    version_game_dir(inst, ver, vs, gdir, gn);
+    char mods[PYMCL_PATH];
+    pymcl_path_join(mods, sizeof(mods), gdir, "mods");
+    global_mods_apply(mods);
+    int base = mem_param;
+    if (!base) {
+        cJSON *cm = config_get("memory_mb");
+        base = cJSON_IsNumber(cm) ? (int)cm->valuedouble : 0;
+        if (!base) base = 4096;
+    }
+    cJSON *sm = cJSON_GetObjectItemCaseSensitive(vs, "memory_mb");
+    *mem_out = (sm && cJSON_IsNumber(sm) && sm->valuedouble != 0) ? (int)sm->valuedouble : base;
+    /* 额外游戏参数：game_args 拆分 + 服务器直连 + 全屏 */
+    char **ex = NULL;
+    int nex = 0;
+    {
+        char **parts = NULL;
+        int np = 0;
+        pymcl_split_args(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(vs, "game_args")) ?: "", &parts, &np);
+        for (int i = 0; i < np; i++) if (parts[i] && parts[i][0]) {
+            ex = (char **)realloc(ex, sizeof(char *) * (size_t)(nex + 1));
+            ex[nex++] = parts[i];
+        } else free(parts[i]);
+        free(parts);
+    }
+    const char *srv = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(vs, "server")) ?: "";
+    if (srv[0]) {
+        int has_server = 0;
+        for (int i = 0; i < nex && !has_server; i++) has_server = strcmp(ex[i], "--server") == 0;
+        if (!has_server) {
+            char port[32];
+            snprintf(port, sizeof(port), "%s",
+                     cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(vs, "port")) ?: "");
+            const char *pp = port[0] ? port : "25565";
+            ex = (char **)realloc(ex, sizeof(char *) * (size_t)(nex + 4));
+            ex[nex++] = pymcl_strdup("--server");
+            ex[nex++] = pymcl_strdup(srv);
+            ex[nex++] = pymcl_strdup("--port");
+            ex[nex++] = pymcl_strdup(pp);
+        }
+    }
+    char wm[32];
+    snprintf(wm, sizeof(wm), "%s",
+             cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(vs, "window_mode")) ?: "");
+    if (!wm[0]) snprintf(wm, sizeof(wm), "%s", config_str("window_mode", "window"));
+    if (!wm[0]) snprintf(wm, sizeof(wm), "window");
+    if (!strcmp(wm, "maximize") || !strcmp(wm, "fullscreen")) {
+        int has_fs = 0;
+        for (int i = 0; i < nex && !has_fs; i++) has_fs = strcmp(ex[i], "--fullscreen") == 0;
+        if (!has_fs) {
+            ex = (char **)realloc(ex, sizeof(char *) * (size_t)(nex + 1));
+            ex[nex++] = pymcl_strdup("--fullscreen");
+        }
+    }
+    *ega = ex;
+    *n_ega = nex;
+    /* 额外 JVM 参数：GC 预设接到版本 jvm_args 前面（gc.apply） */
+    char preset[32];
+    snprintf(preset, sizeof(preset), "%s",
+             cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(vs, "gc")) ?: "");
+    if (!preset[0]) snprintf(preset, sizeof(preset), "%s", config_str("gc_preset", "auto"));
+    if (!preset[0]) snprintf(preset, sizeof(preset), "auto");
+    char existing[2048];
+    snprintf(existing, sizeof(existing), "%s",
+             cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(vs, "jvm_args")) ?: "");
+    static const char *const GC_FLAGS[] = {
+        "-XX:+UseG1GC", "-XX:+UseZGC", "-XX:+UseShenandoahGC",
+        "-XX:+UseParallelGC", "-XX:+UseConcMarkSweepGC", "-XX:+UseSerialGC",
+    };
+    static const char *const GC_ARGS[] = {
+        /* auto */ "-XX:+UseG1GC -XX:+UnlockExperimentalVMOptions -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=50 -XX:G1HeapRegionSize=32M",
+        /* g1 */ "-XX:+UseG1GC",
+        /* g1_tuned */ "-XX:+UseG1GC -XX:+UnlockExperimentalVMOptions -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=50 -XX:G1HeapRegionSize=32M -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:+ParallelRefProcEnabled",
+        /* zgc */ "-XX:+UseZGC -XX:+UnlockExperimentalVMOptions",
+        /* none */ "",
+    };
+    char *pl = preset;
+    while (*pl && isspace((unsigned char)*pl)) pl++;
+    size_t plen = strlen(pl);
+    while (plen && isspace((unsigned char)pl[plen - 1])) pl[--plen] = 0;
+    for (char *q = pl; *q; q++) *q = (char)tolower((unsigned char)*q);
+    const char *extra_gc = GC_ARGS[0];
+    if (!strcmp(pl, "g1")) extra_gc = GC_ARGS[1];
+    else if (!strcmp(pl, "g1_tuned")) extra_gc = GC_ARGS[2];
+    else if (!strcmp(pl, "zgc")) extra_gc = GC_ARGS[3];
+    else if (!strcmp(pl, "none")) extra_gc = GC_ARGS[4];
+    int has_gc = 0;
+    {
+        char **bits = NULL;
+        int nb = 0;
+        pymcl_split_args(existing, &bits, &nb);
+        for (int i = 0; i < nb && !has_gc; i++) {
+            int in_flags = 0;
+            for (size_t f = 0; f < sizeof(GC_FLAGS) / sizeof(GC_FLAGS[0]); f++)
+                if (strcmp(bits[i], GC_FLAGS[f]) == 0) in_flags = 1;
+            if (in_flags || (pymcl_startswith(bits[i], "-XX:+Use") && strstr(bits[i], "GC"))) has_gc = 1;
+            free(bits[i]);
+        }
+        free(bits);
+    }
+    char combined[4096];
+    if (has_gc) snprintf(combined, sizeof(combined), "%s", existing);
+    else if (!extra_gc[0]) snprintf(combined, sizeof(combined), "%s", existing);
+    else if (!existing[0]) snprintf(combined, sizeof(combined), "%s", extra_gc);
+    else snprintf(combined, sizeof(combined), "%s %s", extra_gc, existing);
+    char *tail = combined;
+    while (*tail && isspace((unsigned char)*tail)) tail++;
+    size_t clen = strlen(tail);
+    while (clen && isspace((unsigned char)tail[clen - 1])) tail[--clen] = 0;
+    *ejv = NULL;
+    *n_ejv = 0;
+    pymcl_split_args(tail, ejv, n_ejv);
+    cJSON_Delete(vs);
 }
 
-static void format_playtime(long long sec, char *out, size_t n) {
-    if (sec < 0) sec = 0;
-    long long h = sec / 3600, m = (sec % 3600) / 60, s = sec % 60;
-    if (h > 0) snprintf(out, n, "%lld 小时 %lld 分", h, m);
-    else if (m > 0) snprintf(out, n, "%lld 分 %lld 秒", m, s);
-    else snprintf(out, n, "%lld 秒", s);
-}
-
-/* Prefer native; on failure or complexity, Python. */
-cJSON *rpc_align_call(const char *method, cJSON *params, sse_emit_fn emit) {
-    if (!method) return NULL;
+/* Prefer native; on failure or complexity, Python.
+   *handled 只在末尾「这里没有这个方法」时为 0：原生分支失败返回 NULL 也算处理过，
+   不能再让 backend_call 往下落到 Python 回落，把真正的错误盖成 unknown method。 */
+cJSON *rpc_align_call(const char *method, cJSON *params, sse_emit_fn emit, int *handled) {
+    int dummy;
+    if (!handled) handled = &dummy;
+    *handled = 1;
+    if (!method) { *handled = 0; return NULL; }
 
     /* ---- accounts ---- */
     if (strcmp(method, "get_account_rows") == 0) {
@@ -231,10 +417,8 @@ cJSON *rpc_align_call(const char *method, cJSON *params, sse_emit_fn emit) {
     }
     if (strcmp(method, "add_offline_account") == 0) {
         const char *user = pstr(params, "username", pstr(params, "name", "Player"));
-        cJSON *acc = account_offline(user);
-        /* optional skin */
         const char *skin = pstr(params, "skin", "");
-        if (skin[0]) cJSON_AddStringToObject(acc, "skin", skin);
+        cJSON *acc = account_offline_skin(user, skin);
         cJSON *root = accounts_load();
         cJSON *arr = cJSON_GetObjectItem(root, "accounts");
         if (!cJSON_IsArray(arr)) {
@@ -305,8 +489,6 @@ cJSON *rpc_align_call(const char *method, cJSON *params, sse_emit_fn emit) {
         if (emit) emit("ui_changed", cJSON_CreateObject());
         return cJSON_CreateString(pstr(params, "filename", ""));
     }
-    if (strcmp(method, "get_installed_mod_entries") == 0)
-        return list_mod_entries(pstr(params, "instance", "default"));
     if (strcmp(method, "open_global_mods") == 0) {
         char p[PYMCL_PATH];
         pymcl_path_join(p, sizeof(p), g_root, "global_mods");
@@ -315,95 +497,7 @@ cJSON *rpc_align_call(const char *method, cJSON *params, sse_emit_fn emit) {
         return cJSON_CreateTrue();
     }
 
-    /* ---- servers ---- */
-    if (strcmp(method, "list_servers") == 0) {
-        char path[PYMCL_PATH];
-        servers_path(pstr(params, "instance", "default"), path, sizeof(path));
-        cJSON *arr = pymcl_read_json(path);
-        if (!cJSON_IsArray(arr)) { cJSON_Delete(arr); arr = cJSON_CreateArray(); }
-        cJSON *out = cJSON_CreateArray();
-        int i = 0;
-        cJSON *it;
-        cJSON_ArrayForEach(it, arr) {
-            if (!cJSON_IsObject(it)) continue;
-            cJSON *row = cJSON_Duplicate(it, 1);
-            cJSON_AddNumberToObject(row, "index", i++);
-            if (!cJSON_GetObjectItem(row, "port")) cJSON_AddNumberToObject(row, "port", 25565);
-            if (!cJSON_GetObjectItem(row, "name"))
-                cJSON_AddStringToObject(row, "name", cJSON_GetStringValue(cJSON_GetObjectItem(row, "ip")) ?: "");
-            cJSON_AddItemToArray(out, row);
-        }
-        cJSON_Delete(arr);
-        return out;
-    }
-    if (strcmp(method, "add_server") == 0) {
-        const char *inst = pstr(params, "instance", "default");
-        char path[PYMCL_PATH];
-        servers_path(inst, path, sizeof(path));
-        cJSON *arr = pymcl_read_json(path);
-        if (!cJSON_IsArray(arr)) { cJSON_Delete(arr); arr = cJSON_CreateArray(); }
-        cJSON *e = cJSON_CreateObject();
-        const char *ip = pstr(params, "ip", pstr(params, "address", ""));
-        if (!ip[0]) { cJSON_Delete(arr); cJSON_Delete(e); pymcl_set_error("服务器地址不能为空"); return NULL; }
-        cJSON_AddStringToObject(e, "ip", ip);
-        cJSON_AddStringToObject(e, "name", pstr(params, "name", ip));
-        int port = 25565;
-        if (cJSON_IsNumber(cJSON_GetObjectItem(params, "port")))
-            port = (int)cJSON_GetObjectItem(params, "port")->valuedouble;
-        cJSON_AddNumberToObject(e, "port", port);
-        cJSON_AddStringToObject(e, "description", pstr(params, "description", ""));
-        cJSON_AddStringToObject(e, "icon", pstr(params, "icon", ""));
-        cJSON_AddBoolToObject(e, "hidden", 0);
-        cJSON_AddItemToArray(arr, e);
-        pymcl_write_json(path, arr);
-        cJSON *ret = cJSON_Duplicate(e, 1);
-        cJSON_Delete(arr);
-        if (emit) emit("ui_changed", cJSON_CreateObject());
-        return ret;
-    }
-    if (strcmp(method, "delete_server") == 0) {
-        const char *inst = pstr(params, "instance", "default");
-        int idx = cJSON_IsNumber(cJSON_GetObjectItem(params, "index"))
-                      ? (int)cJSON_GetObjectItem(params, "index")->valuedouble : -1;
-        char path[PYMCL_PATH];
-        servers_path(inst, path, sizeof(path));
-        cJSON *arr = pymcl_read_json(path);
-        if (!cJSON_IsArray(arr)) { cJSON_Delete(arr); return cJSON_CreateTrue(); }
-        cJSON *next = cJSON_CreateArray();
-        int i = 0;
-        cJSON *it;
-        cJSON_ArrayForEach(it, arr) {
-            if (i++ == idx) continue;
-            cJSON_AddItemToArray(next, cJSON_Duplicate(it, 1));
-        }
-        cJSON_Delete(arr);
-        pymcl_write_json(path, next);
-        cJSON_Delete(next);
-        if (emit) emit("ui_changed", cJSON_CreateObject());
-        return cJSON_CreateTrue();
-    }
-    if (strcmp(method, "update_server") == 0) {
-        cJSON *r = py_rpc_call(method, params);
-        if (r) return r;
-        return cJSON_CreateTrue();
-    }
-
     /* ---- playtime ---- */
-    if (strcmp(method, "get_all_playtime") == 0) {
-        char path[PYMCL_PATH];
-        playtime_path(path, sizeof(path));
-        cJSON *j = pymcl_read_json(path);
-        if (!j) j = cJSON_Parse("{\"instances\":{}}");
-        return j;
-    }
-    if (strcmp(method, "format_playtime") == 0) {
-        long long sec = 0;
-        if (cJSON_IsNumber(cJSON_GetObjectItem(params, "seconds")))
-            sec = (long long)cJSON_GetObjectItem(params, "seconds")->valuedouble;
-        char buf[64];
-        format_playtime(sec, buf, sizeof(buf));
-        return cJSON_CreateString(buf);
-    }
     if (strcmp(method, "clear_playtime") == 0) {
         const char *inst = pstr(params, "instance", "");
         char path[PYMCL_PATH];
@@ -425,21 +519,10 @@ cJSON *rpc_align_call(const char *method, cJSON *params, sse_emit_fn emit) {
 
     /* ---- version settings ---- */
     if (strcmp(method, "get_version_settings") == 0) {
-        char path[PYMCL_PATH];
-        version_settings_path(pstr(params, "instance", "default"), pstr(params, "version", ""), path, sizeof(path));
-        cJSON *def = vs_defaults();
-        cJSON *stored = pymcl_read_json(path);
-        if (cJSON_IsObject(stored)) {
-            cJSON *it = stored->child;
-            while (it) {
-                cJSON *n = it->next;
-                cJSON_DeleteItemFromObject(def, it->string);
-                cJSON_AddItemToObject(def, it->string, cJSON_Duplicate(it, 1));
-                it = n;
-            }
-        }
-        cJSON_Delete(stored);
-        return def;
+        char ip[PYMCL_PATH];
+        const char *inst = pstr(params, "instance", "");
+        if (instance_open(inst, ip, sizeof(ip)) != 0) return NULL;
+        return version_settings_load(inst, pstr(params, "version", ""));
     }
     if (strcmp(method, "save_version_settings") == 0) {
         const char *inst = pstr(params, "instance", "default");
@@ -477,6 +560,111 @@ cJSON *rpc_align_call(const char *method, cJSON *params, sse_emit_fn emit) {
         pymcl_write_json(path, cur);
         if (emit) emit("ui_changed", cJSON_CreateObject());
         return cur;
+    }
+
+    /* ---- 启动命令（docs/GOAL-c-bridge-no-python.md M1） ---- */
+    if (strcmp(method, "build_launch_command") == 0) {
+        const char *inst = pstr(params, "instance", "default");
+        const char *ver = pstr(params, "version", "");
+        const char *account = pstr(params, "account", "");
+        const char *user = pstr(params, "username", "");
+        int mem = pint(params, "memory_mb", 4096);
+        int w = pint(params, "width", 0);
+        int h = pint(params, "height", 0);
+        const char *java = pstr(params, "java", PYMCL_JAVA_AUTO);
+        if (!ver[0]) { pymcl_set_error("%s", tr("请先选择版本")); return NULL; }
+        cJSON *acc = resolve_launch_account(account, user, "账号不存在: {0}");
+        if (!acc) return NULL;
+        cJSON *props = account_launch_props(acc);
+        cJSON_Delete(acc);
+        inject_auth_server(props, inst, ver);
+        const char *jex = (!java[0] || strcmp(java, PYMCL_JAVA_AUTO) == 0) ? PYMCL_JAVA_AUTO : java;
+        char **cmdv = NULL;
+        int cmdc = 0;
+        int rc = build_launch_command(inst, ver, props, jex, mem, w, h, &cmdv, &cmdc, NULL, 0);
+        cJSON_Delete(props);
+        if (rc != 0) return NULL;
+        cJSON *arr = cJSON_CreateArray();
+        for (int i = 0; i < cmdc; i++) cJSON_AddItemToArray(arr, cJSON_CreateString(cmdv[i]));
+        for (int i = 0; i < cmdc; i++) free(cmdv[i]);
+        free(cmdv);
+        return arr;
+    }
+
+    if (strcmp(method, "get_launch_command") == 0) {
+        const char *inst = pstr(params, "instance", "default");
+        const char *ver = pstr(params, "version", "");
+        const char *account = pstr(params, "account", "");
+        const char *user = pstr(params, "username", "");
+        int mem = pint(params, "memory_mb", 0);
+        if (!ver[0]) { pymcl_set_error("%s", tr("请先选择版本")); return NULL; }
+        cJSON *vjson = instance_version_json(inst, ver);
+        if (!vjson) { pymcl_set_error("版本 %s 未安装，请先安装。", ver); return NULL; }
+        cJSON *resolved = manifest_resolve_inherits(vjson, load_parent_ud, (void *)inst);
+        cJSON *use = resolved ? resolved : vjson;
+        char *jexe = java_resolve_launch(use, NULL, NULL);
+        if (!jexe) {
+            cJSON_Delete(resolved);
+            cJSON_Delete(vjson);
+            pymcl_set_error("%s", tr("无法确定 Java 路径"));
+            return NULL;
+        }
+        /* 账号：空取活动账号，缺了就离线；指定但不存在也回退离线（同 bridge/api.py） */
+        cJSON *acc = NULL;
+        if (!account[0]) {
+            cJSON *root = accounts_load();
+            const char *act = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "active")) ?: "";
+            if (act[0]) acc = accounts_find_name(act);
+            cJSON_Delete(root);
+            if (!acc) acc = account_offline(user);
+        } else {
+            acc = accounts_find_name(account);
+            if (acc) {
+                cJSON *v = account_ensure_valid(acc);
+                cJSON_Delete(acc);
+                acc = v;
+            }
+            if (!acc) acc = account_offline(user);
+        }
+        cJSON *props = account_launch_props(acc);
+        cJSON_Delete(acc);
+        char gdir[PYMCL_PATH];
+        int prepmem = 0;
+        char **ega = NULL, **ejv = NULL;
+        int n_ega = 0, n_ejv = 0;
+        launch_prepare(inst, ver, mem, gdir, sizeof(gdir), &prepmem, &ega, &n_ega, &ejv, &n_ejv);
+        char **cmdv = NULL;
+        int cmdc = 0;
+        int rc = build_launch_command_ex(inst, ver, props, jexe, prepmem, 0, 0,
+                                         gdir, ega, n_ega, ejv, n_ejv,
+                                         &cmdv, &cmdc, NULL, 0);
+        for (int i = 0; i < n_ega; i++) free(ega[i]);
+        free(ega);
+        for (int i = 0; i < n_ejv; i++) free(ejv[i]);
+        free(ejv);
+        cJSON_Delete(props);
+        free(jexe);
+        cJSON_Delete(resolved);
+        if (vjson != use) cJSON_Delete(vjson);
+        if (rc != 0) return NULL;
+        /* Python 端 " ".join(cmd)：命令拼成一行文本返回 */
+        size_t cap = 1;
+        for (int i = 0; i < cmdc; i++) cap += strlen(cmdv[i]) + 1;
+        char *joined = (char *)malloc(cap);
+        joined[0] = 0;
+        size_t off = 0;
+        for (int i = 0; i < cmdc; i++) {
+            if (i) joined[off++] = ' ';
+            size_t L = strlen(cmdv[i]);
+            memcpy(joined + off, cmdv[i], L);
+            off += L;
+        }
+        joined[off] = 0;
+        for (int i = 0; i < cmdc; i++) free(cmdv[i]);
+        free(cmdv);
+        cJSON *out = cJSON_CreateString(joined);
+        free(joined);
+        return out;
     }
 
     /* ---- preflight / crash (python preferred, safe stub fallback) ---- */
@@ -529,64 +717,27 @@ cJSON *rpc_align_call(const char *method, cJSON *params, sse_emit_fn emit) {
         return o;
     }
 
-    /* ---- feedback / help / news / update / cleaner / AI / terracotta ---- */
-    if (strcmp(method, "submit_feedback") == 0 || strcmp(method, "help_articles") == 0
-        || strcmp(method, "help_article") == 0 || strcmp(method, "cached_news") == 0
-        || strcmp(method, "fetch_news") == 0 || strcmp(method, "check_update") == 0
-        || strcmp(method, "cleaner_preview") == 0 || strcmp(method, "cleaner_apply") == 0
-        || strcmp(method, "test_ai_connection") == 0 || strcmp(method, "ai_list_chats") == 0
-        || strcmp(method, "ai_new_chat") == 0 || strcmp(method, "ai_delete_chat") == 0
-        || strcmp(method, "ai_set_active") == 0 || strcmp(method, "ai_send") == 0
-        || strcmp(method, "ai_stop") == 0 || strcmp(method, "ai_confirm") == 0
-        || strcmp(method, "ai_answer") == 0 || strcmp(method, "terracotta_snapshot") == 0
-        || strcmp(method, "terracotta_host") == 0 || strcmp(method, "terracotta_join") == 0
-        || strcmp(method, "terracotta_idle") == 0 || strcmp(method, "terracotta_prepare") == 0
-        || strcmp(method, "terracotta_allow_firewall") == 0
-        || strcmp(method, "terracotta_open_firewall_settings") == 0
-        || strcmp(method, "terracotta_shutdown") == 0 || strcmp(method, "lan_hint") == 0
-        || strcmp(method, "list_loader_versions") == 0 || strcmp(method, "list_catalog_files") == 0
-        || strcmp(method, "search_worlds") == 0 || strcmp(method, "install_world") == 0
-        || strcmp(method, "repair_version") == 0 || strcmp(method, "export_modpack") == 0
-        || strcmp(method, "start_authlib_login") == 0 || strcmp(method, "start_nide8_login") == 0
-        || strcmp(method, "start_self_update") == 0 || strcmp(method, "start_mod_updates") == 0) {
+    /* ---- 尚未原生实现、仍转给 Python 的方法（去 Python 化进行中，见 docs/GOAL-c-bridge-no-python.md） ---- */
+    if (strcmp(method, "submit_feedback") == 0
+        || strcmp(method, "ai_send") == 0
+        || strcmp(method, "ai_stop") == 0
+        || strcmp(method, "ai_confirm") == 0
+        || strcmp(method, "ai_answer") == 0
+        || strcmp(method, "list_catalog_files") == 0
+        || strcmp(method, "search_worlds") == 0
+        || strcmp(method, "install_world") == 0
+        || strcmp(method, "repair_version") == 0
+        || strcmp(method, "export_modpack") == 0
+        || strcmp(method, "start_authlib_login") == 0
+        || strcmp(method, "start_nide8_login") == 0
+        || strcmp(method, "start_self_update") == 0
+        || strcmp(method, "start_mod_updates") == 0) {
         cJSON *r = py_rpc_call(method, params);
         if (r) return r;
-        /* graceful empty fallbacks so UI stays usable without Python */
-        if (strcmp(method, "help_articles") == 0 || strcmp(method, "cached_news") == 0
-            || strcmp(method, "fetch_news") == 0 || strcmp(method, "list_loader_versions") == 0
-            || strcmp(method, "list_catalog_files") == 0 || strcmp(method, "search_worlds") == 0)
-            return cJSON_CreateArray();
-        if (strcmp(method, "terracotta_snapshot") == 0) {
-            cJSON *o = cJSON_CreateObject();
-            cJSON_AddStringToObject(o, "state", "idle");
-            cJSON_AddStringToObject(o, "message", "陶瓦联机需要 Python 后端");
-            return o;
-        }
-        if (strcmp(method, "lan_hint") == 0)
-            return cJSON_CreateString("联机功能在纯 C 桥下有限，请安装 Python 环境以启用陶瓦。");
-        if (strcmp(method, "ai_list_chats") == 0 || strcmp(method, "ai_new_chat") == 0
-            || strcmp(method, "ai_delete_chat") == 0 || strcmp(method, "ai_set_active") == 0) {
-            cJSON *o = cJSON_CreateObject();
-            cJSON_AddItemToObject(o, "chats", cJSON_CreateArray());
-            cJSON_AddStringToObject(o, "active_id", "");
-            return o;
-        }
-        if (strcmp(method, "check_update") == 0) {
-            cJSON *o = cJSON_CreateObject();
-            cJSON_AddBoolToObject(o, "update", 0);
-            cJSON_AddStringToObject(o, "message", "当前为 C 桥；自更新需 Python");
-            return o;
-        }
-        if (strcmp(method, "test_ai_connection") == 0)
-            return cJSON_CreateString("AI 需要 Python 桥（未找到可用 Python）");
-        if (strcmp(method, "submit_feedback") == 0)
-            return cJSON_CreateTrue();
-        if (strcmp(method, "terracotta_allow_firewall") == 0)
-            return cJSON_CreateString("请手动放行防火墙，或安装 Python 后端");
-        /* async-looking methods: return fake task id string won't work — return error */
         pymcl_set_error("方法 %s 需要 Python 桥（设置 PYMCL_PYTHON）", method);
         return NULL;
     }
 
+    *handled = 0;
     return NULL; /* not handled here */
 }
