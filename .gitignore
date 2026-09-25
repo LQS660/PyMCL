@@ -131,6 +131,9 @@ config.json.bak*
 
 # 图标生成管线的中间产物（proc/raw，成品已内联进 icon_assets.py / LucideAssets.cs）
 /_gen_icons/
+/_appicon/
+/PyMCL.ico
+/PyMCL-icon-1024.png
 # AI 上游 SSE 抓包
 /_upstream_cap/
 # native 构建前的旁路 DLL 备份
