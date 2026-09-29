@@ -12,7 +12,7 @@ python _pack_pcl_ui.py
 
 产物：`dist\PyMCL.exe`
 
-- 界面：`wpf/PyMCL.Wpf`（侧栏 + 启动/实例/下载/设置）
+- 界面：`PyMCL.Wpf`（侧栏 + 启动/实例/下载/设置）——**独立仓** [LQS660/PyMCL.Wpf](https://github.com/LQS660/PyMCL.Wpf)，需与本仓并排克隆，或用 `PYMCL_WPF_SRC` 指定
 - 后端：`pymcl-bridge`（C）
 - 首次解压到 `%LOCALAPPDATA%\PyMCL\runtime\<ver>\`
 

@@ -1,12 +1,15 @@
 """WPF 界面多语言：硬编码中文全部走 L()，词表与 Qt 同源。
 
-WPF 端的界面文案通过 wpf/PyMCL.Wpf/Services/I18n.cs 的 L("中文") 取词，词表就是
+WPF 端的界面文案通过 PyMCL.Wpf/Services/I18n.cs 的 L("中文") 取词，词表就是
 mclauncher/locales/<lang>.json（key 是中文原文，语义同 mclauncher.i18n 的 _()）。
 这里守三件事：
 
 1. 源码里不再有没包 L() 的中文字面量（静态扫描 .cs，规则与 Shell/I18nCheck.cs 逐条一致）；
 2. L() 用到的每个 key 都在 zh_CN 词表里，en 也一个不缺，占位符两边对得上；
 3. 编好的 PyMCL.Wpf.exe --i18n-check 自己也报 0（exe 没编就跳过这一段，静态部分照常跑）。
+
+WPF 前端自 2026-09-29 起独立成仓，源码位置由 tests/_wpf_repo.py 解析；没克隆过来
+就整类跳过（词表本身仍在 mclauncher/locales/ 下，随本仓走）。
 
 跟 test_nav_parity.py 一样：不在这里替 WPF 编译。
 """
@@ -19,16 +22,12 @@ import sys
 import unittest
 from pathlib import Path
 
+from tests._wpf_repo import MISSING_HINT, SRC, WPF_EXE
+
 REPO = Path(__file__).resolve().parents[1]
-SRC = REPO / "wpf" / "PyMCL.Wpf"
 LOCALES = REPO / "mclauncher" / "locales"
-WPF_EXE = next(
-    (p for p in (
-        SRC / "bin" / "Debug" / "net8.0-windows" / "PyMCL.Wpf.exe",
-        SRC / "bin" / "Release" / "net8.0-windows" / "PyMCL.Wpf.exe",
-    ) if p.is_file()),
-    None,
-)
+
+requires_src = unittest.skipUnless(SRC, MISSING_HINT)
 
 _CJK = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\uff00-\uffef]")
 
@@ -251,6 +250,7 @@ def _placeholders(s: str) -> list[str]:
     return sorted(re.findall(r"\{(\d+)[^}]*\}", s))
 
 
+@requires_src
 class WpfI18nStaticTests(unittest.TestCase):
     """不需要编译：直接扫源码与词表。"""
 

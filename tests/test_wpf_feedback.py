@@ -8,6 +8,9 @@
   弹窗四句文案必须跟 Qt 一字不差地走 L()。状态机的真值表由 `PyMCL.Wpf.exe --consent-check`
   自己跑（exe 没编就跳过那一段，静态部分照常）。
 
+WPF 前端自 2026-09-29 起独立成仓，源码位置由 tests/_wpf_repo.py 解析；没克隆过来
+就整类跳过。
+
 跟 test_wpf_i18n.py 一样：不在这里替 WPF 编译。
 """
 from __future__ import annotations
@@ -20,17 +23,13 @@ import sys
 import unittest
 from pathlib import Path
 
+from tests._wpf_repo import MISSING_HINT, SRC, WPF_EXE
+
 REPO = Path(__file__).resolve().parents[1]
-SRC = REPO / "wpf" / "PyMCL.Wpf"
 HELP_PY = REPO / "mclauncher" / "help_content.py"
 WIDGETS_PY = REPO / "app" / "widgets.py"
-WPF_EXE = next(
-    (p for p in (
-        SRC / "bin" / "Debug" / "net8.0-windows" / "PyMCL.Wpf.exe",
-        SRC / "bin" / "Release" / "net8.0-windows" / "PyMCL.Wpf.exe",
-    ) if p.is_file()),
-    None,
-)
+
+requires_src = unittest.skipUnless(SRC, MISSING_HINT)
 
 
 def _cs(rel: str) -> str:
@@ -107,6 +106,7 @@ class HelpLibraryParityTests(unittest.TestCase):
         self.assertEqual(["multiplayer"], [r["id"] for r in bridge_api.BackendAPI.help_articles(None, "陶瓦")])
         self.assertIn("java", [r["id"] for r in bridge_api.BackendAPI.help_articles(None, "JAVA")])
 
+    @requires_src
     def test_wpf_feedback_page_uses_both_bridge_methods(self):
         page = _cs("Pages/FeedbackPage.cs")
         self.assertIn('"help_articles"', page, "反馈页没再调 help_articles，帮助库就空了")
@@ -118,6 +118,7 @@ class HelpLibraryParityTests(unittest.TestCase):
         self.assertIn("ToggleArticleAsync", page)
 
 
+@requires_src
 class ConsentPromptTests(unittest.TestCase):
     """启动后的同意提示：接在首次运行向导之后，四句文案与 Qt 同源，状态存 feedback_consent。"""
 

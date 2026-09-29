@@ -64,5 +64,15 @@
 
 - `default/` —— PYMCL_HOME 落在仓库根时生成的 `.minecraft`，5150 个文件 582 MB，已加进 `.gitignore`
 - `wpf-ui.json` —— WPF 前端的本地 UI 状态，同上
-- `wpf32/` —— 与 `wpf/` 同为 31 个源文件但早一天的副本，另含 1.6 MB 的 `bin/obj` 和一批截图。**未提交也未忽略**，留在 `git status` 里等人决定
-- `_rpc_crosscheck.py` —— 同上，一次性探针
+- `_rpc_crosscheck.py` —— 一次性探针
+
+## 5. WPF 前端已独立成仓（2026-09-29）
+
+`wpf/` 目录连同 21 笔历史迁出本仓，独立为 [LQS660/PyMCL.Wpf](https://github.com/LQS660/PyMCL.Wpf)
+（历史用 `git subtree split` 抽取，树哈希与迁出前一致）。本仓不再包含 WPF 源码。
+
+- 两个仓建议并排克隆（`PyMCL-main/` 与 `PyMCL.Wpf/`），`tests/_wpf_repo.py` 与
+  `_pack_common.wpf_src()` 会自动找到同级那份；也可以用 `PYMCL_WPF_SRC` 显式指定。
+- 找不到 WPF 源码时，跨端一致性测试（i18n 词表 / 反馈页文案 / 侧栏键表）整组跳过，
+  而不是报 FileNotFoundError。
+- 原先 `wpf32/` 那个悬空 gitlink 一并移除：它只记了一个本地 commit，从未有 remote。

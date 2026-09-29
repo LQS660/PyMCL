@@ -6,8 +6,11 @@
 
 这里把同一份配置同时喂给三边——Python 侧 app/main_window.py，TypeScript 侧
 eziapp/src/nav_model.ts（Node 直接跑 TS，见 eziapp/tests/nav_dump.ts），C# 侧
-wpf/PyMCL.Wpf/Shell/NavModel.cs（编好的 PyMCL.Wpf.exe --nav-dump，见 Shell/NavDump.cs）——
+PyMCL.Wpf/Shell/NavModel.cs（编好的 PyMCL.Wpf.exe --nav-dump，见 Shell/NavDump.cs）——
 逐条比条目序列、固定项、分区成员和取消固定的落点。
+
+WPF 前端自 2026-09-29 起独立成仓，源码位置由 tests/_wpf_repo.py 解析；没克隆过来
+就跳过 C# 那两组。
 """
 from __future__ import annotations
 
@@ -21,18 +24,11 @@ import unittest
 from pathlib import Path
 
 from mclauncher import config as config_mod
+from tests._wpf_repo import MISSING_HINT, SRC as _WPF_SRC, WPF_EXE
 
 REPO = Path(__file__).resolve().parents[1]
 DUMP = REPO / "eziapp" / "tests" / "nav_dump.ts"
 NODE = shutil.which("node")
-# WPF 那一边要先 dotnet build 过；没编就跳过，不在这里替它编
-WPF_EXE = next(
-    (p for p in (
-        REPO / "wpf" / "PyMCL.Wpf" / "bin" / "Debug" / "net8.0-windows" / "PyMCL.Wpf.exe",
-        REPO / "wpf" / "PyMCL.Wpf" / "bin" / "Release" / "net8.0-windows" / "PyMCL.Wpf.exe",
-    ) if p.is_file()),
-    None,
-)
 
 # 同一批配置喂给两边。unpin 那一项让 TS 侧额外算一次取消固定的落点。
 CASES: list[dict] = [
@@ -257,10 +253,11 @@ class NavKeyTableTests(unittest.TestCase):
                 self.assertIn(f"'{key}'", block, f"分组成员 {key} 两端不一致")
 
 
+@unittest.skipUnless(_WPF_SRC, MISSING_HINT)
 class WpfNavKeyTableTests(unittest.TestCase):
     """C# 那份键表也要对齐：WPF 少映射一个键，那一页在侧栏上就点不进去。"""
 
-    SRC = REPO / "wpf" / "PyMCL.Wpf" / "Shell" / "NavModel.cs"
+    SRC = _WPF_SRC / "Shell" / "NavModel.cs" if _WPF_SRC else None
 
     def _cs_source(self) -> str:
         return self.SRC.read_text(encoding="utf-8")

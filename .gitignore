@@ -70,6 +70,8 @@ accounts.json
 /0*.zip
 /0*.exe
 pymcl-feedback-client-src.zip
+# WPF 已独立成仓（github.com/LQS660/PyMCL.Wpf）；若把它的源码克隆回 wpf/ 下，
+# 这里的构建产物忽略仍然生效。
 wpf/**/bin/
 wpf/**/obj/
 /_shots/

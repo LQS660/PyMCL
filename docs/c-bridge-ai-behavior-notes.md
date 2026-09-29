@@ -13,7 +13,7 @@
 | 每回合只放一次 busy，锁内交还插话 | 是 | 同上 |
 | 读到的插话带 `steer_` id 导出、按原位置入库 | 是（内核 + 存储） | `mclauncher/ai/agent.py`、`bridge/api.py` `_turn_compact_and_trajectory` |
 | 撤回跳过插话 | 是 | `mclauncher/ai/rewind.py` |
-| 续发 `unsent`、后台任务回报、重试跳过插话 | 否（前端逻辑），但 C 桥要给出所需字段与事件 | `wpf/PyMCL.Wpf/Pages/AiPage.cs`、`AiFixWindow.cs` |
+| 续发 `unsent`、后台任务回报、重试跳过插话 | 否（前端逻辑），但 C 桥要给出所需字段与事件 | `PyMCL.Wpf/Pages/AiPage.cs`、`AiFixWindow.cs`（WPF 独立仓 [LQS660/PyMCL.Wpf](https://github.com/LQS660/PyMCL.Wpf)） |
 
 ## 1. 事件字段
 

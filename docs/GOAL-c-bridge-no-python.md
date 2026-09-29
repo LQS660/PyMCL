@@ -11,7 +11,7 @@
 
 ## 1. 背景与现状
 
-- 前端 `wpf/PyMCL.Wpf`（net48）通过 HTTP JSON-RPC（`POST /rpc`，带 token）+ SSE 事件流与桥通信。
+- 前端 `PyMCL.Wpf`（net48）通过 HTTP JSON-RPC（`POST /rpc`，带 token）+ SSE 事件流与桥通信。2026-09-29 起 WPF 独立成仓（[LQS660/PyMCL.Wpf](https://github.com/LQS660/PyMCL.Wpf)），本文里写的 `wpf/PyMCL.Wpf/...` 均指该仓内的对应路径。
 - C 桥：`native/src/*.c`，MinGW gcc 静态链接，运行时只依赖系统 DLL，当前 `pymcl-bridge.exe` 为 817,039 B；桌面 `PyMCL.exe` 为 2,331,618 B。
 - WPF 一共调用 **188** 个不同的 RPC 方法，其中：
   - **55 个**已由 C 原生实现；
