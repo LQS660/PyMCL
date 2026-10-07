@@ -7,8 +7,16 @@ static cJSON *load_parent_ud(const char *pid, void *ud) {
     return instance_version_json(inst, pid);
 }
 
-/* ---------- python one-shot RPC (full parity with bridge.api) ---------- */
+/* T3 残余（M1 收尾）：桌面快捷方式 / 账号皮肤 / 崩溃报告导出，实现在 rpc_misc.c */
+cJSON *rpc_misc_call(const char *method, cJSON *params, sse_emit_fn emit, int *handled);
 
+/* ---------- Python 回落（开发后端的参考实现） ---------- */
+/* 默认构建（开发后端）用；nopy 构建把整段 Python 回落编掉，只剩 NOT_NATIVE 那一支。
+   对外的入口统一叫 rpc_fallback_call（声明在 pymcl.h），真实现（find_python 与
+   native/tools/py_rpc.py 的调用）整段关在 #ifndef PYMCL_NO_PY 内：
+   `gcc -DPYMCL_NO_PY` 编出来的 .exe 里不含任何 Python 回落的符号，nm / strings 都查不到。 */
+
+#ifndef PYMCL_NO_PY
 static int find_python(char *out, size_t n) {
     const char *env = getenv("PYMCL_PYTHON");
     if (env && env[0] && GetFileAttributesA(env) != INVALID_FILE_ATTRIBUTES) {
@@ -26,16 +34,15 @@ static int find_python(char *out, size_t n) {
     snprintf(out, n, "python");
     return 0;
 }
+#endif
 
-cJSON *py_rpc_call(const char *method, cJSON *params) {
-    return py_rpc_call_ex(method, params, NULL);
-}
-
-cJSON *py_rpc_call_ex(const char *method, cJSON *params, int *handled) {
+cJSON *rpc_fallback_call(const char *method, cJSON *params, int *handled) {
     if (handled) *handled = 0;
 #ifdef PYMCL_NO_PY
-    /* 去 Python 化验收用的构建：不许悄悄回落到 Python。_c_rpc_coverage.py 认 NOT_NATIVE 这个前缀。 */
+    /* 去 Python 化验收用的构建：不许悄悄回落到 Python。_c_rpc_coverage.py 认 NOT_NATIVE 这个前缀。
+       handled 置 1：调用方（backend_call）看到它就不会再用 "unknown method" 盖掉这里的错误。 */
     (void)params;
+    if (handled) *handled = 1;
     pymcl_set_error("NOT_NATIVE: %s is not implemented in the C bridge", method);
     return NULL;
 #else
@@ -49,7 +56,7 @@ cJSON *py_rpc_call_ex(const char *method, cJSON *params, int *handled) {
         pymcl_set_error("py_rpc.py missing; method %s needs Python bridge", method);
         return NULL;
     }
-    GetTempPathA(sizeof(tmpdir), tmpdir);
+    pymcl_get_temp_u8(tmpdir, sizeof(tmpdir));
     /* 文件名必须一次调用一套。桥是多线程 HTTP 服务，只按进程 ID 取名的话，
        两个同时落到 Python 回落的请求会抢同一对 in/out 文件：后到的覆盖先到的
        入参，先返回的把对方的 out 文件删掉。表现出来就是随机的
@@ -394,6 +401,13 @@ cJSON *rpc_align_call(const char *method, cJSON *params, sse_emit_fn emit, int *
     *handled = 1;
     if (!method) { *handled = 0; return NULL; }
 
+    /* ---- T3 残余（M1 收尾）：快捷方式 / 账号皮肤 / 崩溃报告导出（rpc_misc.c） ---- */
+    {
+        int mhandled = 0;
+        cJSON *mres = rpc_misc_call(method, params, emit, &mhandled);
+        if (mhandled) return mres;
+    }
+
     /* ---- accounts ---- */
     if (strcmp(method, "get_account_rows") == 0) {
         cJSON *root = accounts_load();
@@ -669,34 +683,18 @@ cJSON *rpc_align_call(const char *method, cJSON *params, sse_emit_fn emit, int *
 
     /* ---- preflight / crash (python preferred, safe stub fallback) ---- */
     if (strcmp(method, "preflight_launch") == 0) {
-        cJSON *r = py_rpc_call(method, params);
-        if (r) return r;
-        /* C-only: basic existence check */
-        const char *inst = pstr(params, "instance", "default");
-        const char *ver = pstr(params, "version", "");
-        cJSON *out = cJSON_CreateObject();
-        cJSON *issues = cJSON_CreateArray();
-        if (!ver[0]) {
-            cJSON *iss = cJSON_CreateObject();
-            cJSON_AddStringToObject(iss, "level", "error");
-            cJSON_AddStringToObject(iss, "code", "no_version");
-            cJSON_AddStringToObject(iss, "message", "请先选择版本");
-            cJSON_AddItemToArray(issues, iss);
-        } else if (!instance_has_version(inst, ver)) {
-            cJSON *iss = cJSON_CreateObject();
-            cJSON_AddStringToObject(iss, "level", "error");
-            cJSON_AddStringToObject(iss, "code", "missing_version");
-            cJSON_AddStringToObject(iss, "message", "版本未安装");
-            cJSON_AddItemToArray(issues, iss);
-        }
-        cJSON_AddItemToObject(out, "issues", issues);
-        cJSON_AddBoolToObject(out, "ok", cJSON_GetArraySize(issues) == 0);
-        cJSON_AddBoolToObject(out, "can_launch", cJSON_GetArraySize(issues) == 0);
-        return out;
+        return preflight_check_launch(pstr(params, "instance", "default"),
+                                      pstr(params, "version", ""),
+                                      pint(params, "memory_mb", 0),
+                                      pstr(params, "java", ""));
     }
     if (strcmp(method, "apply_crash_action") == 0) {
-        cJSON *r = py_rpc_call(method, params);
+        cJSON *r = rpc_fallback_call(method, params, NULL);
         if (r) return r;
+        /* nopy 构建：rpc_fallback_call 已置 NOT_NATIVE，下面这些兜底动作直接跳过 */
+#ifdef PYMCL_NO_PY
+        return NULL;
+#else
         cJSON *action = cJSON_GetObjectItem(params, "action");
         const char *aid = pstr(action, "id", "");
         if (strcmp(aid, "open_mods_folder") == 0 || strcmp(aid, "open_crash_file") == 0) {
@@ -715,26 +713,30 @@ cJSON *rpc_align_call(const char *method, cJSON *params, sse_emit_fn emit, int *
         cJSON_AddBoolToObject(o, "ok", 0);
         cJSON_AddStringToObject(o, "message", "需要 Python 桥完成此修复动作");
         return o;
+#endif
     }
 
     /* ---- 尚未原生实现、仍转给 Python 的方法（去 Python 化进行中，见 docs/GOAL-c-bridge-no-python.md） ---- */
-    if (strcmp(method, "submit_feedback") == 0
-        || strcmp(method, "ai_send") == 0
+    /* search_worlds / install_world 已从这份名单移出：WPF 世界页（CatalogKind.World）
+       的 SearchMethod / InstallMethod 就是这两个方法，前端直接调用；打包版里没有
+       Python，留在名单里必然报「方法 X 需要 Python 桥」。原生实现见 mods.c 的
+       search_worlds / install_world，RPC 分发见 backend.c。 */
+    if (strcmp(method, "ai_send") == 0
         || strcmp(method, "ai_stop") == 0
         || strcmp(method, "ai_confirm") == 0
         || strcmp(method, "ai_answer") == 0
-        || strcmp(method, "list_catalog_files") == 0
-        || strcmp(method, "search_worlds") == 0
-        || strcmp(method, "install_world") == 0
-        || strcmp(method, "repair_version") == 0
-        || strcmp(method, "export_modpack") == 0
-        || strcmp(method, "start_authlib_login") == 0
-        || strcmp(method, "start_nide8_login") == 0
-        || strcmp(method, "start_self_update") == 0
-        || strcmp(method, "start_mod_updates") == 0) {
-        cJSON *r = py_rpc_call(method, params);
+) {
+        cJSON *r = rpc_fallback_call(method, params, NULL);
         if (r) return r;
+#ifdef PYMCL_NO_PY
+        /* nopy 构建：rpc_fallback_call 已经写了 NOT_NATIVE: <method> ...，别再盖掉它——
+           _c_rpc_coverage.py 认的就是那个前缀。 */
+        if (!pymcl_error()[0])
+            pymcl_set_error("NOT_NATIVE: %s is not implemented in the C bridge", method);
+#else
         pymcl_set_error("方法 %s 需要 Python 桥（设置 PYMCL_PYTHON）", method);
+#endif
+        *handled = 1;
         return NULL;
     }
 

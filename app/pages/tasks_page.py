@@ -246,13 +246,15 @@ class DownloadDock(SimpleCardWidget):
             self.log_edit.appendPlainText(text)
 
     def _finished(self, task_id, success, message):
+        if task_id not in self._active:
+            return
         self._active.pop(task_id, None)
         n = len(self._active)
         if message:
             self.log_edit.appendPlainText(message)
         if n <= 0:
             self.title.setText(tr("下载任务"))
-            self.status.setText(tr("✔ 全部完成") if success else (message or tr("已结束")))
+            self.status.setText(tr("✔ 全部完成") if success else (message or tr("✘ 失败")))
             self.speed.setText("")
             self.progress.setValue(100 if success else self.progress.value())
             parent = self.parent()

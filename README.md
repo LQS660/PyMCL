@@ -21,7 +21,7 @@
 - 🤖 **AI 助手**：对话里下游戏、装模组/光影/整合包、读崩溃日志、扫模组冲突、改模组配置；写操作会先弹确认。公益接口已内置（默认 `deepseek-v4-flash`），也可接自定义 NewAPI / 自建网关。
 - 🧩 **加载器**：Fabric / Quilt（官方 meta 版本 JSON）、Forge / NeoForge（官方安装器）。
 - 🪟 跨平台：Windows / macOS / Linux。
-- 📱 **Android**：仓库内有 `android/` Compose 骨架（`0.1.0-skeleton`），可编译浏览 UI；**尚不能**像桌面端 / PCL 一样完整装版与启动游戏，详见 `android/ANDROID.md`。
+- 📱 **Android**：仓库内有 `android/` Compose 应用（`0.2.0-runtime`），**已具备真实启动链**（FCLBridge JNI + GL4ES + 内置 JRE 17/21），可装版并启动游戏；仅出 `arm64-v8a`。**当前缺口**：无虚拟键盘 / 文字输入（游戏内聊天、命令打不了字），AI 工具 19 个（桌面 36），i18n 词表约 1037 条（桌面 2161）。编译需并排存在 FoldCraftLauncher 源码，详见 `android/ANDROID.md`。
 
 ## 📥 安装
 
@@ -196,4 +196,6 @@ PyMCL/                      ← 启动器主目录（可用环境变量 PYMCL_HO
 
 ---
 
-> 注：本目录下的 `mc_launcher.py` / `mclauncher.py` 等是早期版本的本地扫描式启动器，与本文档描述的新版（`main.py` + `mclauncher/` 包）相互独立。
+> 注：早期版本还有 `mc_launcher.py` / `mclauncher.py` 这样的本地扫描式启动器，
+> 与本版（`main.py` + `mclauncher/` 包）相互独立。这两个文件在当前仓库里**已不存在**，
+> 仅在此留存说明。`start.bat` 是 Windows 下双击启动的入口（等价于 `python main.py`）。

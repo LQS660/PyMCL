@@ -123,13 +123,22 @@ public sealed partial class LaunchPage : UserControl
         if (!string.IsNullOrEmpty(_taskId) && LaunchBtn is { IsEnabled: false })
             return;
         var insts = await AppServices.Client.CallAsync<List<InstanceInfo>>("get_instances") ?? new();
+        // 默认实例 / 默认内存 / 默认分辨率从设置读。以前这三个控件是 XAML 里写死的
+        // 4096 与 854×480，用户在设置页改完到启动页还是旧值，点启动也按旧值传下去。
+        SettingsDto? s = null;
+        try { s = await AppServices.Client.CallAsync<SettingsDto>("get_settings"); }
+        catch { }
         var cur = InstanceBox.SelectedItem as string;
         InstanceBox.SelectionChanged -= Instance_Changed;
         InstanceBox.Items.Clear();
         foreach (var i in insts) InstanceBox.Items.Add(i.Name);
         if (cur != null && insts.Any(x => x.Name == cur)) InstanceBox.SelectedItem = cur;
+        else if (!string.IsNullOrWhiteSpace(s?.DefaultInstance)
+                 && insts.Any(x => x.Name == s.DefaultInstance))
+            InstanceBox.SelectedItem = s.DefaultInstance;
         else if (InstanceBox.Items.Count > 0) InstanceBox.SelectedIndex = 0;
         InstanceBox.SelectionChanged += Instance_Changed;
+        ApplyDefaults(s);
 
         var acc = await AppServices.Client.CallAsync<List<string>>("get_accounts") ?? new();
         var curA = AccountBox.SelectedItem as string;
@@ -143,6 +152,23 @@ public sealed partial class LaunchPage : UserControl
         _ = ReloadJavaAsync(true);
         SyncBanner(insts);
         _ = LoadNews();
+    }
+
+    /// <summary>把设置页的「默认内存 / 默认分辨率」灌进控件（与 WPF LaunchPage 同口径）。</summary>
+    private void ApplyDefaults(SettingsDto? s)
+    {
+        if (s is null) return;
+        if (MemorySlider is not null && s.DefaultMemoryMb > 0)
+            MemorySlider.Value = Math.Clamp(s.DefaultMemoryMb, 512, 32768);
+        if (s.DefaultResolution is { Count: >= 2 })
+        {
+            if (WidthSpin is not null && s.DefaultResolution[0] > 0)
+                WidthSpin.Value = Math.Clamp(s.DefaultResolution[0], 320, 7680);
+            if (HeightSpin is not null && s.DefaultResolution[1] > 0)
+                HeightSpin.Value = Math.Clamp(s.DefaultResolution[1], 240, 4320);
+        }
+        if (MemoryLabel is not null)
+            MemoryLabel.Text = $"{(int)Math.Round(MemorySlider?.Value ?? 4096)} MB";
     }
 
     private async Task LoadNews()

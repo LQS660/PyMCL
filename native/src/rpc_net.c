@@ -543,5 +543,10 @@ cJSON *rpc_net_call(const char *method, cJSON *params, sse_emit_fn emit, int *ha
     if (!strcmp(method, "check_update")) return check_update();
     if (!strcmp(method, "list_loader_versions"))
         return list_loader_versions(pstr(params, "mc_version", ""), pstr(params, "loader", ""));
+    {
+        int ah = 0;
+        cJSON *ai = rpc_ai_agent_call(method, params, &ah);
+        if (ah) return ai;
+    }
     return rpc_ai_store_call(method, params, emit, handled);
 }

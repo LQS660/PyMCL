@@ -304,6 +304,7 @@ function renderShell() {
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
       if (frame) cancelAnimationFrame(frame);
       apply();
       // 本地覆盖层先记一份（离线也还原得回来），同时写回后端，
@@ -311,8 +312,15 @@ function renderShell() {
       store.setLocalPrefs({ ui_sidebar_width: width });
       void bridge.call('save_settings', { ui_sidebar_width: width }).catch(() => undefined);
     };
+    // 指针捕获：拖到窗口外松手时 pointerup 仍回本元素，不丢。触控板等
+    // 不支持的就退回 window 冒泡（dashboard.ts 整卡拖动同款兜底）。
+    try { (ev.currentTarget as HTMLElement).setPointerCapture(ev.pointerId); } catch { /* 不支持 */ }
     window.addEventListener('pointermove', move, { passive: true });
     window.addEventListener('pointerup', up);
+    // 触控设备把这次拖动判成滚动手势时发的是 pointercancel，pointerup
+    // 永远不来；不接这条，move 会永久留在 window 上，之后侧栏宽度跟着
+    // 鼠标横向位置乱跳，只能重开应用（坏宽度不落盘，重启看着"自己好了"）。
+    window.addEventListener('pointercancel', up);
   });
 
   // 内容滚下去时给顶栏加一道分隔阴影，滚回顶部再收掉
@@ -484,11 +492,19 @@ async function maybeClipboardHint() {
   } catch { /* clipboard may be denied */ }
 }
 
+/**
+ * 文件拖到没接收区的地方，Edge 默认会把它当网页打开，整个界面就没了。
+ *
+ * 提成具名函数而不是内联箭头：匿名函数解绑不了，将来 `init()` 一旦可重入
+ * （HMR / 重新初始化）就会叠加拦截器。这两条是全局 drag 的唯一闸门，
+ * 故意常驻整个进程生命周期，`init()` 只跑一次（文件末尾调用）。
+ */
+function blockDragOpen(e: DragEvent) { e.preventDefault(); }
+
 async function init() {
   renderShell();
-  // 文件拖到没接收区的地方，Edge 默认会把它当网页打开，整个界面就没了
-  window.addEventListener('dragover', (e) => e.preventDefault());
-  window.addEventListener('drop', (e) => e.preventDefault());
+  window.addEventListener('dragover', blockDragOpen);
+  window.addEventListener('drop', blockDragOpen);
   void renderPage(router.page);
   const bridgeConfigured = await initBridge();
   if (!bridgeConfigured) {

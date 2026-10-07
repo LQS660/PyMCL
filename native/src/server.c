@@ -10,6 +10,8 @@
 
 typedef struct sse_cli {
     SOCKET s;
+    int alive;          /* 0 = 已摘链 / 已判死，等 refs 归零就 free */
+    int refs;           /* in-flight 的 sse_emit 引用数 */
     struct sse_cli *next;
 } sse_cli;
 
@@ -22,16 +24,56 @@ static int g_port;
 static int send_all(SOCKET s, const char *p, int n);
 static void send_error(SOCKET s, int code, const char *message);
 
+/* Origin 只放行 loopback 页面。审计 2026-09-28 P2-3：旧实现是纯前缀匹配 ——
+     strncmp(origin, "http://localhost", 16) == 0
+   于是攻击者可控的 http://localhost.evil.com / http://127.0.0.1.evil.com 也放行
+   （前缀相同，后面的域名从没被看过）。这里改成解析出 authority 里的 host 再**精确**
+   比较，任何后缀都不认：
+     http://<host>[:port][/...]
+   · host 必须恰好是 127.0.0.1 / localhost / [::1]（host 大小写不敏感；裸 ::1 也收）
+   · 有端口时端口必须是纯数字（不校验范围：这一层只需确认它确实是端口，不是域名的一部分）
+   · authority 里不允许出现 '@'（http://localhost@evil.com 这类 userinfo 混淆）
+   · scheme 只认 http，与 Python 参考实现 bridge/server.py 的 _normalize_origin 一致
+     （旧实现同样只认 http，https://localhost 在改前改后都是拒绝）
+   注意：C 桥全程不发 Access-Control-Allow-Origin，所以这一层是纵深防御，
+   真正的跨域读仍被浏览器同源策略挡住。 */
 static int origin_is_loopback(const char *origin) {
     if (!origin || !*origin) return 0;
-    return strncmp(origin, "http://127.0.0.1", 15) == 0
-        || strncmp(origin, "http://localhost", 16) == 0
-        || strncmp(origin, "http://[::1]", 12) == 0;
+    const char *p = strstr(origin, "://");
+    if (!p) return 0;
+    if ((size_t)(p - origin) != 4 || _strnicmp(origin, "http", 4) != 0) return 0;
+    const char *auth = p + 3;
+    const char *end = auth;
+    while (*end && *end != '/' && *end != '?' && *end != '#') end++;
+    size_t alen = (size_t)(end - auth);
+    if (alen == 0) return 0;
+    if (memchr(auth, '@', alen)) return 0;                 /* userinfo 混淆一律拒绝 */
+    if (alen == 3 && memcmp(auth, "::1", 3) == 0) return 1; /* 裸 ::1（无端口形态） */
+    const char *host = auth, *host_end = auth;
+    if (*host == '[') {
+        const char *close = (const char *)memchr(host, ']', alen);
+        if (!close) return 0;
+        host_end = close + 1;                              /* host 含方括号：[::1] */
+        if (host_end < end && *host_end != ':') return 0;   /* ']' 之后只能是端口或结束 */
+    } else {
+        while (host_end < end && *host_end != ':') host_end++;
+    }
+    size_t hlen = (size_t)(host_end - host);
+    int host_ok = (hlen == 9 && _strnicmp(host, "127.0.0.1", 9) == 0)
+               || (hlen == 9 && _strnicmp(host, "localhost", 9) == 0)
+               || (hlen == 5 && memcmp(host, "[::1]", 5) == 0);
+    if (!host_ok) return 0;
+    if (host_end < end && *host_end == ':') {               /* 端口必须是纯数字 */
+        const char *d = host_end + 1;
+        if (d == end) return 0;                             /* "http://localhost:" 不是合法 origin */
+        for (; d < end; d++) if (*d < '0' || *d > '9') return 0;
+    }
+    return 1;
 }
 
 static const char *mime_for(const char *path) {
     const char *dot = strrchr(path, '.');
-    if (!dot) return "application/octet-stream";
+    if (!dot) return NULL;   /* 无后缀：不认，见 www_asset_ok */
     if (pymcl_ieq(dot, ".html") || pymcl_ieq(dot, ".htm")) return "text/html; charset=utf-8";
     if (pymcl_ieq(dot, ".js") || pymcl_ieq(dot, ".mjs")) return "application/javascript; charset=utf-8";
     if (pymcl_ieq(dot, ".css")) return "text/css; charset=utf-8";
@@ -39,20 +81,53 @@ static const char *mime_for(const char *path) {
     if (pymcl_ieq(dot, ".svg")) return "image/svg+xml";
     if (pymcl_ieq(dot, ".png")) return "image/png";
     if (pymcl_ieq(dot, ".jpg") || pymcl_ieq(dot, ".jpeg")) return "image/jpeg";
+    if (pymcl_ieq(dot, ".gif")) return "image/gif";
+    if (pymcl_ieq(dot, ".webp")) return "image/webp";
     if (pymcl_ieq(dot, ".ico")) return "image/x-icon";
     if (pymcl_ieq(dot, ".woff2")) return "font/woff2";
+    if (pymcl_ieq(dot, ".woff")) return "font/woff";
+    if (pymcl_ieq(dot, ".ttf")) return "font/ttf";
+    if (pymcl_ieq(dot, ".txt")) return "text/plain; charset=utf-8";
     if (pymcl_ieq(dot, ".map")) return "application/json";
-    return "application/octet-stream";
+    return NULL;
 }
 
+/* 静态资源只放行「UI 会用到的那几种后缀」：www/ 里除了前端产物本来也没有别的东西，
+   但这一层白名单让「万一有东西被写进 www/」也不会被原样吐出去。返回 0 = 不是 UI 资源。 */
+static int www_asset_ok(const char *rel) {
+    return mime_for(rel) != NULL;
+}
+
+/* url_path → www/ 下的相对路径。旧版只挡 ".." 和 "\"，盘符 / UNC 绝对路径能整体替换
+   调用方的 www 前缀（pymcl_path_join 见到 "C:/..." 就丢掉 a），实测
+   `GET /C:/Windows/win.ini` 把系统文件原样返回、且不需要 token。 */
 static int safe_rel_path(const char *url_path, char *out, size_t n) {
     if (!url_path || url_path[0] != '/') return -1;
     const char *p = url_path + 1;
     if (!*p || strcmp(p, "/") == 0) p = "index.html";
     if (strstr(p, "..") || strchr(p, '\\')) return -1;
+    if (p[0] == '/' || p[0] == '\\') return -1;                 /* 前导斜杠 / UNC */
+    if (strchr(p, ':')) return -1;                              /* 盘符或 NTFS 数据流 */
+    if (isalpha((unsigned char)p[0]) && p[1] == ':') return -1;
     snprintf(out, n, "%s", p);
     for (char *c = out; *c; c++) if (*c == '/') *c = '\\';
     return 0;
+}
+
+/* 规范化后确认 child 仍在 base 之下（纵深防御：rel 已经过滤过一遍，这里防 base 自身
+   含 .. 或符号链接的情况）。 */
+static int within_dir(const char *base, const char *child) {
+    wchar_t wb[PYMCL_PATH], wc[PYMCL_PATH];
+    wchar_t *ub = pymcl_u8_to_wide(base), *uc = pymcl_u8_to_wide(child);
+    if (!ub || !uc) { free(ub); free(uc); return 0; }
+    DWORD nb = GetFullPathNameW(ub, PYMCL_PATH, wb, NULL);
+    DWORD nc = GetFullPathNameW(uc, PYMCL_PATH, wc, NULL);
+    free(ub); free(uc);
+    if (!nb || nb >= PYMCL_PATH || !nc || nc >= PYMCL_PATH) return 0;
+    size_t lb = wcslen(wb);
+    while (lb > 0 && (wb[lb - 1] == L'\\' || wb[lb - 1] == L'/')) wb[--lb] = 0;
+    if (_wcsnicmp(wc, wb, lb) != 0) return 0;
+    return wc[lb] == L'\\' || wc[lb] == L'/';
 }
 
 static int send_file(SOCKET s, const char *fs_path, const char *mime) {
@@ -79,6 +154,7 @@ static int try_serve_www(SOCKET s, const char *url_path) {
     pymcl_path_join(www, sizeof(www), g_root, "www");
     if (!pymcl_dir_exists(www)) return -1;
     pymcl_path_join(full, sizeof(full), www, rel);
+    if (!within_dir(www, full)) return -1;
     if (!pymcl_file_exists(full)) {
         /* SPA fallback */
         if (strchr(rel, '.') == NULL) {
@@ -88,6 +164,7 @@ static int try_serve_www(SOCKET s, const char *url_path) {
         }
         return -1;
     }
+    if (!www_asset_ok(rel)) return -1;
     return send_file(s, full, mime_for(rel));
 }
 
@@ -95,20 +172,24 @@ static void sse_add(SOCKET s) {
     sse_cli *c = (sse_cli *)calloc(1, sizeof(*c));
     if (!c) return;
     c->s = s;
+    c->alive = 1;
     pthread_mutex_lock(&g_sse_mu);
     c->next = g_sse;
     g_sse = c;
     pthread_mutex_unlock(&g_sse_mu);
 }
 
+/* 客户端线程退出时调用：从链表摘掉并标记死亡。还有 in-flight 的 sse_emit 引用它
+   （refs > 0）就先留着，等那个 emit 释放最后一份引用时再 free。 */
 static void sse_remove(SOCKET s) {
     pthread_mutex_lock(&g_sse_mu);
     sse_cli **pp = &g_sse;
     while (*pp) {
         if ((*pp)->s == s) {
             sse_cli *d = *pp;
+            d->alive = 0;
             *pp = d->next;
-            free(d);
+            if (d->refs == 0) free(d);
             break;
         }
         pp = &(*pp)->next;
@@ -116,6 +197,10 @@ static void sse_remove(SOCKET s) {
     pthread_mutex_unlock(&g_sse_mu);
 }
 
+/* 事件广播。旧版在 g_sse_mu 里直接 send()，而 send 是阻塞的、全进程又没设过
+   SO_SNDTIMEO：一个连上 /events 却不读数据的客户端就能把锁一直占住，所有 emit
+   的线程（任务进度 / AI 事件 / finish_task）全部挂起。现在锁内只做引用计数快照，
+   send 全在锁外；socket 超时由 client_th 的 SO_SNDTIMEO 兜底，失败就标死。 */
 static void sse_emit(const char *event, cJSON *data) {
     char *js = cJSON_PrintUnformatted(data ? data : cJSON_CreateObject());
     size_t need = (js ? strlen(js) : 2) + 64;
@@ -123,9 +208,21 @@ static void sse_emit(const char *event, cJSON *data) {
     if (!buf) { cJSON_free(js); return; }
     int n = snprintf(buf, need, "event: %s\ndata: %s\n\n", event ? event : "message", js ? js : "{}");
     cJSON_free(js);
+    sse_cli *snap[64];
+    int ns = 0;
     pthread_mutex_lock(&g_sse_mu);
-    for (sse_cli *c = g_sse; c; c = c->next)
-        send(c->s, buf, n, 0);
+    for (sse_cli *c = g_sse; c && ns < 64; c = c->next) {
+        c->refs++;
+        snap[ns++] = c;
+    }
+    pthread_mutex_unlock(&g_sse_mu);
+    for (int i = 0; i < ns; i++) {
+        if (send(snap[i]->s, buf, n, 0) <= 0) snap[i]->alive = 0;
+    }
+    pthread_mutex_lock(&g_sse_mu);
+    for (int i = 0; i < ns; i++) {
+        if (--snap[i]->refs == 0 && !snap[i]->alive) free(snap[i]);
+    }
     pthread_mutex_unlock(&g_sse_mu);
     free(buf);
 }
@@ -340,6 +437,12 @@ static void handle_rpc(SOCKET s, const char *body) {
 
 static void *client_th(void *p) {
     SOCKET s = (SOCKET)(uintptr_t)p;
+    /* P1-5/P1-10：全进程此前没给任何 socket 设过超时，声明了 Content-Length 却不发
+       body 的连接、或者连上 /events 不读数据的客户端，都能把线程/锁无限占住。
+       读 30 秒、写 10 秒（SSE 的 keepalive 是 15 秒一次，10 秒足够判定死客户端）。 */
+    DWORD rcv_to = 30000, snd_to = 10000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&rcv_to, sizeof(rcv_to));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&snd_to, sizeof(snd_to));
     char *req = NULL; int n = 0;
     if (recv_req(s, &req, &n) != 0) { closesocket(s); return NULL; }
     char method[16] = {0}, target[256] = {0}, path[256] = {0};
@@ -364,11 +467,23 @@ static void *client_th(void *p) {
         send_json(s, 200, o);
         cJSON_Delete(o);
     } else if (strcmp(method, "GET") == 0 && strcmp(path, "/bridge-config.json") == 0) {
+        /* 这里**不再回 token**（审计 2026-09-28 P2-4）。此前它无鉴权就回 {"token": …}，
+           而它在 authenticated() 之前，于是同机任意进程一次 GET 就能拿到全部 RPC 权限。
+           token 是唯一凭据，不能再从 HTTP 漏出去。
+           前端怎么拿 token：由启动方注入，不经这个端点 ——
+             · WPF / wpf32 / WinUI3：BridgeHost 自己生成 256 位令牌，写进子进程的
+               PYMCL_BRIDGE_TOKEN 环境变量（见 Services/BridgeHost.cs）；
+             · slim 包（pack/stub.c）：stub 生成令牌 → --token 给桥 → 用 URL fragment
+               #pymcl_bridge=<b64 {rpc_url,token}> 交给网页端（fragment 不发往服务器，
+               eziapp/src/bridge.ts 读走后立刻 replaceState 抹掉）；
+             · eziapp_launcher.py：同样走 fragment（_with_runtime_config）。
+           这个端点只保留「问出 RPC 地址」的用途，返回的都是非敏感信息。 */
         cJSON *o = cJSON_CreateObject();
         char rpc[128];
         snprintf(rpc, sizeof(rpc), "http://127.0.0.1:%d", g_port);
         cJSON_AddStringToObject(o, "rpc_url", rpc);
-        cJSON_AddStringToObject(o, "token", g_token);
+        cJSON_AddNumberToObject(o, "port", g_port);
+        cJSON_AddStringToObject(o, "auth", "token");
         send_json(s, 200, o);
         cJSON_Delete(o);
     } else if (strcmp(method, "GET") == 0 && strcmp(path, "/rpc") != 0

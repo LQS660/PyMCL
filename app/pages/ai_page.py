@@ -5,14 +5,17 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
 import threading
+import time
 
-from PySide6.QtCore import Qt, QTimer, QThread, Signal
+from PySide6.QtCore import Qt, QSize, QTimer, QThread, Signal
 from PySide6.QtGui import QFont, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QFrame, QHBoxLayout, QHeaderView,
-    QListWidget, QListWidgetItem, QSizePolicy, QTableWidgetItem, QVBoxLayout, QWidget,
+    QLabel, QListWidget, QListWidgetItem, QSizePolicy, QTableWidgetItem, QVBoxLayout,
+    QWidget,
 )
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, CheckBox, ComboBox, FluentIcon as FIF, InfoBar,
@@ -212,12 +215,13 @@ class AgentThread(QThread):
     failed = Signal(str)
 
     def __init__(self, backend, settings, history, user_text, parent=None,
-                 queue_fn=None):
+                 queue_fn=None, images_list=None):
         super().__init__(parent)
         self.backend = backend
         self.settings = settings
         self.history = history
         self.user_text = user_text
+        self.images_list = list(images_list or [])
         self._queue_fn = queue_fn
         self._cancel = False
         self._http = HttpCancel()
@@ -281,6 +285,7 @@ class AgentThread(QThread):
                 on_delta=on_delta, on_status=on_status,
                 confirm_fn=confirm_fn, ask_fn=ask_fn, cancelled=cancelled,
                 http_cancel=self._http, drain_inputs_fn=drain_inputs_fn,
+                images_list=self.images_list,
             )
             if self._cancel:
                 self.failed.emit(tr("已停止"))
@@ -296,10 +301,11 @@ class AgentThread(QThread):
 
 
 class Bubble(QFrame):
-    def __init__(self, role: str, text: str = "", parent=None):
+    def __init__(self, role: str, text: str = "", parent=None, images_list=None):
         super().__init__(parent)
         self.role = role
         self._plain = text or ""
+        self._images = [p for p in (images_list or []) if p]
         self._live = False
         mine = role == "user"
         err = role == "error"
@@ -341,6 +347,29 @@ class Bubble(QFrame):
         self.body.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
         self.body.setOpenExternalLinks(True)
         lay.addWidget(self.body)
+        # 用户气泡里的图片缩略图：让「我发的这张图」在对话流里看得见，
+        # 而不是只显示一句话（否则用户无法确认到底发出去没有）
+        if self._images:
+            thumbs = QHBoxLayout()
+            thumbs.setSpacing(6)
+            from PySide6.QtGui import QPixmap
+            for path in self._images:
+                box = QLabel()
+                box.setFixedSize(96, 72)
+                box.setAlignment(Qt.AlignCenter)
+                pix = QPixmap(path)
+                if not pix.isNull():
+                    box.setPixmap(pix.scaled(QSize(92, 68), Qt.KeepAspectRatio,
+                                             Qt.SmoothTransformation))
+                else:
+                    box.setText(tr("图片"))
+                box.setToolTip(path)
+                box.setStyleSheet(
+                    f"QLabel {{ background: {Theme.card};"
+                    f" border: 1px solid {Theme.line}; border-radius: 6px; }}")
+                thumbs.addWidget(box)
+            thumbs.addStretch(1)
+            lay.addLayout(thumbs)
         self._apply_style()
         self.set_text(text)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
@@ -967,13 +996,20 @@ class PermissionDialog(MessageBoxBase):
 
 class ChatInput(PlainTextEdit):
     submitted = Signal(str)
+    images_pasted = Signal(list)   # 粘贴/拖入的图片路径
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setPlaceholderText(tr("问我要下什么、哪报错、模组怎么配…  Enter 发送，Shift+Enter 换行"))
         self.setFixedHeight(48)
         self._preedit = ""
+        self._images_ok = False     # 当前模型是否支持图片（由页面按能力设置）
+        self.setAcceptDrops(True)
         self.textChanged.connect(self._grow)
+
+    def set_images_ok(self, ok: bool):
+        """模型不支持图片时，粘贴/拖入的图片不落地，只提示（不静默吞掉）。"""
+        self._images_ok = bool(ok)
 
     def _grow(self):
         h = int(self.document().size().height()) + 20
@@ -982,6 +1018,43 @@ class ChatInput(PlainTextEdit):
     def inputMethodEvent(self, event):
         self._preedit = event.preeditString() or ""
         super().inputMethodEvent(event)
+
+    def insertFromMimeData(self, source):
+        """Ctrl+V：优先按图片处理（截图工具直接进剪贴板是常态）。"""
+        if source.hasImage() and self._images_ok:
+            paths = _save_clipboard_images(source)
+            if paths:
+                self.images_pasted.emit(paths)
+                return
+        if source.hasUrls() and self._images_ok:
+            paths = _image_paths_from_urls(source.urls())
+            if paths:
+                self.images_pasted.emit(paths)
+                return
+        super().insertFromMimeData(source)
+
+    def dragEnterEvent(self, e):
+        if self._images_ok and e.mimeData().hasImage():
+            e.acceptProposedAction()
+            return
+        if self._images_ok and _image_paths_from_urls(e.mimeData().urls()):
+            e.acceptProposedAction()
+            return
+        super().dragEnterEvent(e)
+
+    def dropEvent(self, e):
+        if self._images_ok:
+            md = e.mimeData()
+            paths = []
+            if md.hasImage():
+                paths = _save_clipboard_images(md)
+            if not paths and md.hasUrls():
+                paths = _image_paths_from_urls(md.urls())
+            if paths:
+                self.images_pasted.emit(paths)
+                e.acceptProposedAction()
+                return
+        super().dropEvent(e)
 
     def keyPressEvent(self, e):
         if e.key() in (Qt.Key_Return, Qt.Key_Enter) and not (e.modifiers() & Qt.ShiftModifier):
@@ -994,6 +1067,159 @@ class ChatInput(PlainTextEdit):
             e.accept()
             return
         super().keyPressEvent(e)
+
+
+_IMG_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+
+
+def _image_paths_from_urls(urls) -> list:
+    """从拖入的 URL 里挑出本地图片文件路径。"""
+    out = []
+    for u in urls or []:
+        try:
+            if not u.isLocalFile():
+                continue
+            path = u.toLocalFile()
+        except Exception:  # noqa: BLE001
+            continue
+        if path and path.lower().endswith(_IMG_SUFFIXES):
+            out.append(path)
+    return out
+
+
+def _save_clipboard_images(mime) -> list:
+    """把剪贴板/拖拽里的位图存成临时 PNG，返回路径。
+
+    截图工具的图片只在剪贴板里存在，没有磁盘路径可引用；存到临时目录才能
+    交给后续的编码与历史（历史里存的是路径，不能存 QImage 对象）。
+    """
+    try:
+        img = mime.imageData()
+    except Exception:  # noqa: BLE001
+        return []
+    if img is None:
+        return []
+    try:
+        from PySide6.QtGui import QImage
+        if isinstance(img, QImage):
+            qimg = img
+        else:
+            qimg = img.toImage() if hasattr(img, "toImage") else None
+        if qimg is None or qimg.isNull():
+            return []
+        import tempfile
+        from pathlib import Path
+        base = Path(tempfile.gettempdir()) / "pymcl_ai_paste"
+        base.mkdir(parents=True, exist_ok=True)
+        name = f"paste_{int(time.time() * 1000)}_{os.getpid()}.png"
+        path = base / name
+        if not qimg.save(str(path), "PNG"):
+            return []
+        return [str(path)]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+class AttachmentStrip(QFrame):
+    """输入框上方的图片预览条：缩略图 + 单张删除 + 张数上限提示。
+
+    没有图片时整体隐藏，不占版面——绝大多数对话是纯文字的。
+    """
+
+    changed = Signal(list)   # 当前图片路径列表
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._paths = []
+        self._thumbs = []
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 6, 10, 0)
+        lay.setSpacing(6)
+        self._row = lay
+        self._row.addStretch(1)
+        self.hide()
+
+    def paths(self) -> list:
+        return list(self._paths)
+
+    def clear(self):
+        self._paths = []
+        self._rebuild()
+        self.changed.emit([])
+
+    def add(self, paths) -> tuple:
+        """加入图片，返回 (已加入张数, 因超限被拒张数)。"""
+        from mclauncher.ai import images as _im
+        added = 0
+        rejected = 0
+        for p in paths or []:
+            if not p or p in self._paths:
+                continue
+            if len(self._paths) >= _im.MAX_PER_TURN:
+                rejected += 1
+                continue
+            self._paths.append(p)
+            added += 1
+        if added:
+            self._rebuild()
+            self.changed.emit(self.paths())
+        return added, rejected
+
+    def remove(self, path):
+        if path in self._paths:
+            self._paths.remove(path)
+            self._rebuild()
+            self.changed.emit(self.paths())
+
+    def _rebuild(self):
+        for w in self._thumbs:
+            w.setParent(None)
+            w.deleteLater()
+        self._thumbs = []
+        # 清掉除末尾 stretch 以外的所有项
+        while self._row.count() > 1:
+            item = self._row.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        for path in self._paths:
+            chip = self._make_chip(path)
+            self._row.insertWidget(self._row.count() - 1, chip)
+            self._thumbs.append(chip)
+        self.setVisible(bool(self._paths))
+
+    def _make_chip(self, path) -> QWidget:
+        from PySide6.QtGui import QPixmap
+        from PySide6.QtCore import QSize
+        box = QFrame(self)
+        box.setFixedSize(64, 64)
+        box.setStyleSheet(
+            f"QFrame {{ background: {Theme.card}; border: 1px solid {Theme.line};"
+            f" border-radius: 8px; }}")
+        inner = QVBoxLayout(box)
+        inner.setContentsMargins(2, 2, 2, 2)
+        inner.setSpacing(0)
+        thumb = QLabel(box)
+        thumb.setAlignment(Qt.AlignCenter)
+        pix = QPixmap(path)
+        if not pix.isNull():
+            thumb.setPixmap(pix.scaled(QSize(56, 48), Qt.KeepAspectRatio,
+                                       Qt.SmoothTransformation))
+        else:
+            thumb.setText(tr("无法预览"))
+        inner.addWidget(thumb, 1)
+        name = QLabel(os.path.basename(path)[:12], box)
+        name.setAlignment(Qt.AlignCenter)
+        name.setStyleSheet(f"color: {Theme.muted}; font-size: 9px;")
+        inner.addWidget(name)
+        box.setToolTip(f"{path}\n{tr('点击右上角 × 移除')}")
+        close = TransparentToolButton(FIF.CLOSE, box)
+        close.setFixedSize(18, 18)
+        close.move(46, 0)
+        close.setToolTip(tr("移除这张图"))
+        close.clicked.connect(lambda *_a, p=path: self.remove(p))
+        return box
 
 
 class AiPage(QWidget):
@@ -1014,6 +1240,7 @@ class AiPage(QWidget):
         self._task_lines = {}
         self._notes = []
         self._pending_user = None
+        self._pending_images = []
         self._flush_timer = QTimer(self)
         self._flush_timer.setSingleShot(True)
         self._flush_timer.setInterval(33)
@@ -1101,7 +1328,13 @@ class AiPage(QWidget):
         prestyle_page(self, self.scroll)
 
         self._input_box = QFrame()
-        row = QHBoxLayout(self._input_box)
+        input_col = QVBoxLayout(self._input_box)
+        input_col.setContentsMargins(0, 0, 0, 0)
+        input_col.setSpacing(0)
+        # 图片预览条：没图时隐藏，有图时贴在输入框上方
+        self.attach_strip = AttachmentStrip(self._input_box)
+        input_col.addWidget(self.attach_strip)
+        row = QHBoxLayout()
         row.setContentsMargins(10, 8, 10, 8)
         self.input = ChatInput()
         # 输入框旁的权限快捷区：下拉直接切档，齿轮开完整说明面板
@@ -1116,12 +1349,18 @@ class AiPage(QWidget):
         self.perm_btn.setFixedSize(34, 34)
         self.perm_btn.setToolTip(tr("点击管理 AI 权限"))
         self.perm_btn.clicked.connect(self._open_permissions)
+        # 图片上传入口：按当前模型能力自动启停（见 _refresh_vision_ui）
+        self.attach_btn = TransparentToolButton(getattr(FIF, "PHOTO", FIF.ADD))
+        self.attach_btn.setFixedSize(34, 34)
+        self.attach_btn.clicked.connect(self._pick_images)
         self.send_btn = PrimaryPushButton(getattr(FIF, "SEND", FIF.PLAY), tr("发送"))
         self.send_btn.setFixedHeight(34)
         row.addWidget(self.input, 1)
+        row.addWidget(self.attach_btn)
         row.addWidget(self.perm_combo)
         row.addWidget(self.perm_btn)
         row.addWidget(self.send_btn)
+        input_col.addLayout(row)
         main.addWidget(self._input_box)
 
         wrap = QWidget()
@@ -1130,6 +1369,7 @@ class AiPage(QWidget):
 
         self.send_btn.clicked.connect(lambda: self._send_text(self.input.toPlainText()))
         self.input.submitted.connect(self._send_text)
+        self.input.images_pasted.connect(self._on_images_pasted)
         self.stop_btn.clicked.connect(self._stop)
         self.retry_btn.clicked.connect(self._retry)
         self._esc = QShortcut(QKeySequence(Qt.Key_Escape), self)
@@ -1145,6 +1385,7 @@ class AiPage(QWidget):
     def reload(self):
         self._refresh_status()
         self._refresh_perm_ui()
+        self._refresh_vision_ui()
 
     def restyle(self):
         self._side.setStyleSheet(
@@ -1172,6 +1413,90 @@ class AiPage(QWidget):
         else:
             label = f"公益接口 · {DEFAULT_MODEL}"
         self.status.setText(label)
+
+    def _refresh_vision_ui(self):
+        """按当前模型能力开关图片上传入口。
+
+        判定完全自动：换模型（设置页改 ai_model 或切模式）后 reload() 会重新
+        查一遍能力表，支持图片就点亮入口、不支持就置灰并说明原因——用户不用
+        知道哪些模型是多模态的，选完模型界面自己变。
+        """
+        from mclauncher.ai import client as ai_client
+        from mclauncher.ai import images as ai_images
+        try:
+            s = self.backend.get_settings()
+            ok = ai_client.supports_image(s)
+            model = ai_client.current_model(s)
+        except Exception:  # noqa: BLE001
+            ok, model = False, ""
+        self.input.set_images_ok(ok)
+        self.attach_btn.setEnabled(ok)
+        if ok:
+            self.attach_btn.setToolTip(
+                tr("添加图片（也可以直接 Ctrl+V 粘贴截图，或把图片拖进来）")
+                + "\n" + ai_images.describe_limits())
+        else:
+            from mclauncher.ai import modelcaps as _mc
+            hint = "、".join(_mc.image_models(3))
+            self.attach_btn.setToolTip(
+                tr("当前模型 {m} 不支持图片输入，上传入口已关闭。").format(m=model or "?")
+                + (tr("\n支持图片的模型例如：{list}").format(list=hint) if hint else ""))
+            if self.attach_strip.paths():
+                # 切到不支持图片的模型时，把已挂的图撤掉并说明（不静默清空）
+                self.attach_strip.clear()
+                InfoBar.warning(
+                    tr("已撤下图片"),
+                    tr("当前模型不支持看图，图片已撤下。换成支持图片的模型后可重新添加。"),
+                    parent=self.window() or self,
+                    position=InfoBarPosition.TOP, duration=3000)
+        self._refresh_send_state()
+
+    def _refresh_send_state(self):
+        """只用于「忙」状态下不要被图片/文字变化解锁发送键。
+
+        发送键的可用性由 _busy 独占（空闲即可点，空内容按下是 no-op），
+        这里只在回合进行中把按钮压住，避免出现「忙但按钮亮着」。
+        """
+        if self._worker is not None:
+            self.send_btn.setEnabled(False)
+
+    def _pick_images(self):
+        from PySide6.QtWidgets import QFileDialog
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, tr("选择图片"), "",
+            tr("图片文件") + " (*.png *.jpg *.jpeg *.gif *.webp *.bmp)")
+        if paths:
+            self._on_images_pasted(paths)
+
+    def _on_images_pasted(self, paths):
+        from mclauncher.ai import images as ai_images
+        from mclauncher.ai import client as ai_client
+        try:
+            ok = ai_client.supports_image(self.backend.get_settings())
+        except Exception:  # noqa: BLE001
+            ok = False
+        if not ok:
+            model = ""
+            try:
+                model = ai_client.current_model(self.backend.get_settings())
+            except Exception:  # noqa: BLE001
+                pass
+            InfoBar.warning(
+                tr("这个模型看不了图"),
+                tr("当前模型 {m} 不支持图片输入。到「设置 → AI 助手」换成支持图片的模型"
+                   "（如 glm-4.6v、gpt-5.4、kimi-k3）再试。").format(m=model or "?"),
+                parent=self.window() or self,
+                position=InfoBarPosition.TOP, duration=4000)
+            return
+        added, rejected = self.attach_strip.add(paths)
+        if rejected:
+            InfoBar.warning(
+                tr("图片太多了"),
+                tr("单轮最多 {n} 张，多出的 {r} 张没有加上。").format(
+                    n=ai_images.MAX_PER_TURN, r=rejected),
+                parent=self.window() or self,
+                position=InfoBarPosition.TOP, duration=3000)
+        self._refresh_send_state()
 
     _PERM_LEVELS = ("default", "acceptEdits", "plan", "yolo", "custom")
 
@@ -1282,7 +1607,8 @@ class AiPage(QWidget):
                     note = str(m.get("note") or "")
                     if note and note not in text:
                         text = (text + "\n\n" + note).strip()
-                    self._add_bubble(role, text)
+                    # 图片路径跟着历史一起恢复：重开程序后还能看到当时发的图
+                    self._add_bubble(role, text, images_list=m.get("images"))
             # 3.4 恢复持久化的计划卡
             plan = (chat or {}).get("plan")
             if isinstance(plan, dict) and plan.get("items"):
@@ -1384,8 +1710,8 @@ class AiPage(QWidget):
         self._scroll_bottom()
         return wrap
 
-    def _add_bubble(self, role: str, text: str) -> Bubble:
-        b = Bubble(role, text)
+    def _add_bubble(self, role: str, text: str, images_list=None) -> Bubble:
+        b = Bubble(role, text, images_list=images_list)
         self._add_widget(b)
         return b
 
@@ -1419,6 +1745,9 @@ class AiPage(QWidget):
         self._scroll_bottom()
 
     def _busy(self, on: bool):
+        # 保持原有契约：空闲即恢复可点（空内容按下是 no-op，_send_text 里挡住）。
+        # 不按「有没有文字」禁用——那样会改掉既有行为，且用户打字打到一半时
+        # 按钮闪来闪去反而更烦。
         self.send_btn.setEnabled(not on)
         self.stop_btn.setEnabled(on)
         self.retry_btn.setEnabled(not on and bool(self._history))
@@ -1479,9 +1808,20 @@ class AiPage(QWidget):
 
     def _send_text(self, text: str):
         text = (text or "").strip()
-        if not text:
+        # 只挂了图没打字也允许发（「看这张图」本身就是完整诉求）
+        pending = self.attach_strip.paths()
+        if not text and not pending:
             return
         if self._worker:
+            # 插队只支持纯文字：图片是这一轮的用户输入，塞进正在跑的回合里
+            # 模型已经在处理上一批消息了，语义上无处安放
+            if pending:
+                InfoBar.info(
+                    tr("助手正忙"),
+                    tr("图片会等这一轮结束后再发；插队只支持纯文字。"),
+                    parent=self.window() or self,
+                    position=InfoBarPosition.TOP, duration=3000)
+                return
             self._queue.append(text)
             self.input.clear()
             # 这里已经把气泡贴出去了，出队时 _send 不能再贴一次
@@ -1491,7 +1831,8 @@ class AiPage(QWidget):
                          position=InfoBarPosition.TOP, duration=1800)
             return
         self.input.clear()
-        self._send(text)
+        self.attach_strip.clear()
+        self._send(text, images_list=pending)
 
     def _drain_queue(self):
         """steering：把排队的插话交给正在跑的 agent 回合（线程安全：pop 原子）。"""
@@ -1500,7 +1841,7 @@ class AiPage(QWidget):
             out.append(self._queue.pop(0))
         return out
 
-    def _send(self, text: str, *, echo: bool = True):
+    def _send(self, text: str, *, echo: bool = True, images_list=None):
         if self._worker:
             # 定时器续发（30/50ms 窗口）与用户手速发送撞车时排队给正在跑的
             # 回合（steering），绝不能再开第二个 worker——两路流式信号会串台
@@ -1509,7 +1850,7 @@ class AiPage(QWidget):
                 self._add_bubble("user", text)
             return
         if echo:
-            self._add_bubble("user", text)
+            self._add_bubble("user", text, images_list=images_list)
         self._stream = ""
         self._notes = []
         self._tool_lines = {}
@@ -1531,7 +1872,7 @@ class AiPage(QWidget):
         worker = AgentThread(
             self.backend, settings, chat_store.api_messages(
                 self._history[-chat_store.MAX_MESSAGES:]), text,
-            self, queue_fn=self._drain_queue)
+            self, queue_fn=self._drain_queue, images_list=images_list)
         self._worker = worker
         worker.delta.connect(self._on_delta, Qt.QueuedConnection)
         worker.status.connect(self._on_status, Qt.QueuedConnection)
@@ -1541,18 +1882,23 @@ class AiPage(QWidget):
         worker.failed.connect(self._on_fail, Qt.QueuedConnection)
         worker.finished.connect(worker.deleteLater)
         self._pending_user = text
+        self._pending_images = list(images_list or [])
         self._busy(True)
         worker.start()
 
     def _retry(self):
         last = None
+        last_images = None
         for m in reversed(self._history):
             if m.get("role") == "user" and (m.get("content") or "").strip() \
                     and not chat_store.is_steer_message(m):
                 last = m["content"]
+                last_images = m.get("images")
                 break
         if last and not self._worker:
-            self._send(last)
+            # 重试带上原图：否则「这张图哪里错了」重试一次图就没了，
+            # 模型看到的是一句没有指代对象的提问
+            self._send(last, images_list=last_images)
 
     def _on_delta(self, piece: str):
         if not piece:
@@ -1869,7 +2215,11 @@ class AiPage(QWidget):
                 if isinstance(m, dict) and m.get("role") == "user" \
                         and str(m.get("id") or "").startswith("compact_"):
                     self._history.append(dict(m))
-            self._history.append({"role": "user", "content": user})
+            pending_imgs = [p for p in (getattr(self, "_pending_images", None) or []) if p]
+            user_entry = {"role": "user", "content": user}
+            if pending_imgs:
+                user_entry["images"] = pending_imgs
+            self._history.append(user_entry)
             # 本回合的工具轨迹一并入库（W5-1）：重开程序模型才知道上次做到哪。
             # 只取 turn_messages（本回合新增那一段）：result.messages 是模型侧完整历史，
             # 里面还有上几轮的工具消息，照抄进来每轮都会把旧轨迹重复存一遍。
@@ -1904,6 +2254,7 @@ class AiPage(QWidget):
                 pass
             self._persist()
         self._pending_user = None
+        self._pending_images = []
         self._worker = None
         self._round_bubble = None
         self._round_text = ""

@@ -40,6 +40,31 @@ def apply_proxy_policy():
     _install_direct()
 
 
+def _install_replay():
+    """对拍录制回放（GOAL 4.B）：PYMCL_HTTP_REPLAY 指向回放服务器时，
+    全部出网请求改写到那里并带上 X-PyMCL-Replay-Url 原始地址头，
+    使 Python 桥与 C 桥的联网响应逐字节可比（与 native/src/http.c 同款钩子）。"""
+    import os
+    base = (os.environ.get("PYMCL_HTTP_REPLAY") or "").strip()
+    if not base:
+        return
+    import requests
+    if getattr(requests.Session.request, "_pymcl_replay", False):
+        return
+    orig_request = requests.Session.request
+
+    def request(self, method, url, **kwargs):
+        headers = dict(kwargs.pop("headers", None) or {})
+        headers["X-PyMCL-Replay-Url"] = str(url)
+        return orig_request(self, method, base.rstrip("/"), headers=headers, **kwargs)
+
+    request._pymcl_replay = True
+    requests.Session.request = request
+
+
+_install_replay()
+
+
 def _patch_requests():
     """把直连策略打进 requests.Session（幂等）。"""
     import requests

@@ -32,18 +32,20 @@ def _game_path(instance: Instance) -> Path:
 
 def _split_addr(ip: str, port=None) -> tuple[str, int]:
     text = str(ip or "").strip()
-    if port not in (None, ""):
-        try:
-            parsed = int(port)
-            if 1 <= parsed <= 65535:
-                return text, parsed
-        except (TypeError, ValueError):
-            pass
+    try:
+        parsed = int(port) if port not in (None, "") else 25565
+    except (TypeError, ValueError):
+        parsed = 25565
+    if not 1 <= parsed <= 65535:
+        parsed = 25565
+    # Only a single colon (or a bracketed IPv6 address) denotes a port.
+    # The default port passed by add_server must not mask a port in the address.
     if ":" in text:
         host, last = text.rsplit(":", 1)
-        if last.isdigit() and 1 <= int(last) <= 65535:
-            return host, int(last)
-    return text, 25565
+        if (host and (":" not in host or (host.startswith("[") and host.endswith("]")))
+                and last.isdigit() and 1 <= int(last) <= 65535):
+            return host, int(last) if parsed == 25565 else parsed
+    return text, parsed
 
 
 def _read_json_rows(instance: Instance) -> list[dict]:
@@ -54,7 +56,9 @@ def _read_json_rows(instance: Instance) -> list[dict]:
 def _read_servers(instance: Instance) -> list[dict]:
     dat_rows = terracotta_mod.read_game_servers(_game_path(instance))
     json_rows = _read_json_rows(instance)
-    if dat_rows:
+    # An existing but empty servers.dat means the player deleted every server
+    # in-game; falling back to stale JSON would resurrect them on the next write.
+    if dat_rows or _game_path(instance).is_file():
         extras = {}
         for row in json_rows:
             if not isinstance(row, dict):
@@ -79,20 +83,22 @@ def _read_servers(instance: Instance) -> list[dict]:
 
 def _write_servers(instance: Instance, servers: list[dict]):
     utils.ensure_dir(instance.path)
-    utils.write_json(_server_path(instance), servers)
     dat_rows = []
+    json_rows = []
     for row in servers:
         if not isinstance(row, dict):
             continue
         host, port = _split_addr(row.get("ip") or "", row.get("port"))
         if not host:
             continue
+        json_rows.append({**row, "ip": host, "port": port})
         dat_rows.append({
             "name": row.get("name") or host,
             "ip": host if port == 25565 else f"{host}:{port}",
             "hidden": 1 if row.get("hidden") else 0,
         })
     terracotta_mod.write_game_servers(_game_path(instance), dat_rows)
+    utils.write_json(_server_path(instance), json_rows)
 
 
 def list_servers(instance: Instance) -> list[dict]:

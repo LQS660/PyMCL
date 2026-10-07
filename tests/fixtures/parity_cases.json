@@ -1208,6 +1208,60 @@
   }
  },
  {
+  "method": "preflight_launch",
+  "params": {
+   "instance": ".minecraft",
+   "version": "1.20.1",
+   "memory_mb": 0,
+   "java": "C:\no\\such\\java.exe"
+  }
+ },
+ {
+  "method": "preflight_launch",
+  "params": {
+   "instance": ".minecraft",
+   "version": "fabric-loader-0.15.11-1.20.1",
+   "memory_mb": 0,
+   "java": "C:\no\\such\\java.exe"
+  }
+ },
+ {
+  "method": "preflight_launch",
+  "params": {
+   "instance": ".minecraft",
+   "version": "",
+   "memory_mb": 0,
+   "java": "C:\no\\such\\java.exe"
+  }
+ },
+ {
+  "method": "preflight_launch",
+  "params": {
+   "instance": "no-such-instance",
+   "version": "",
+   "memory_mb": 0,
+   "java": "C:\no\\such\\java.exe"
+  }
+ },
+ {
+  "method": "preflight_launch",
+  "params": {
+   "instance": ".minecraft",
+   "version": "9.9.9",
+   "memory_mb": 0,
+   "java": "C:\no\\such\\java.exe"
+  }
+ },
+ {
+  "method": "preflight_launch",
+  "params": {
+   "instance": ".minecraft",
+   "version": "1.20.1",
+   "memory_mb": 0,
+   "java": "C:\no\\such\\java.exe"
+  }
+ },
+ {
   "method": "terracotta_snapshot",
   "params": {}
  },
@@ -1330,5 +1384,268 @@
  {
   "method": "terracotta_snapshot",
   "params": {}
+ },
+ {
+  "method": "feedback_history",
+  "params": {}
+ },
+ {
+  "method": "submit_feedback",
+  "params": {
+   "category": "bug",
+   "title": "对拍测试",
+   "body": "内容",
+   "contact": "",
+   "include_sysinfo": false
+  },
+  "ignore": [
+   "*.ts"
+  ],
+  "file_ignore": [
+   "device_id",
+   "*.ts"
+  ]
+ },
+ {
+  "method": "submit_feedback",
+  "params": {
+   "category": "bug",
+   "title": "",
+   "body": "",
+   "include_sysinfo": false
+  }
+ },
+ {
+  "method": "submit_feedback",
+  "params": {
+   "category": "不存在的分类",
+   "title": "t",
+   "body": "b",
+   "include_sysinfo": false
+  },
+  "ignore": [
+   "*.ts"
+  ],
+  "file_ignore": [
+   "device_id",
+   "*.ts"
+  ]
+ },
+ {
+  "method": "submit_crash_feedback",
+  "params": {
+   "report": {
+    "headline": "游戏崩溃",
+    "summary": "摘要",
+    "detail": "详情"
+   },
+   "extra": "附注"
+  },
+  "ignore": [
+   "*.ts"
+  ],
+  "file_ignore": [
+   "device_id",
+   "*.ts"
+  ]
+ },
+ {
+  "method": "submit_crash_report",
+  "params": {}
+ },
+ {
+  "method": "check_mod_updates",
+  "params": {
+   "instance": "default"
+  }
+ },
+ {
+  "method": "check_mod_updates",
+  "params": {
+   "instance": "不存在的实例"
+  }
+ },
+ {
+  "method": "list_catalog_files",
+  "params": {
+   "extra": {
+    "slug": "sodium",
+    "kind": "mod",
+    "game_version": "1.21.1",
+    "loader": "fabric"
+   }
+  }
+ },
+ {
+  "method": "backup_save",
+  "params": {
+   "instance": "default",
+   "name": "Parity World"
+  },
+  "events": true,
+  "file_norm": [
+   [
+    "\\d{8}-\\d{6}",
+    "<TS>"
+   ]
+  ]
+ },
+ {
+  "method": "wait_task",
+  "params": {
+   "task_id": "task-1",
+   "timeout": 20
+  },
+  "file_norm": [
+   [
+    "\\d{8}-\\d{6}",
+    "<TS>"
+   ]
+  ]
+ },
+ {
+  "method": "export_modpack",
+  "params": {
+   "instance": "default"
+  },
+  "events": true
+ },
+ {
+  "method": "wait_task",
+  "params": {
+   "task_id": "task-2",
+   "timeout": 30
+  }
+ },
+ {
+  "method": "start_authlib_login",
+  "params": {
+   "api": "http://127.0.0.1:18772",
+   "username": "parity@x.com",
+   "password": "pw"
+  },
+  "events": true
+ },
+ {
+  "method": "wait_task",
+  "params": {
+   "task_id": "task-3",
+   "timeout": 30
+  }
+ },
+ {
+  "method": "start_nide8_login",
+  "params": {
+   "server_id": "",
+   "username": "a",
+   "password": "b"
+  },
+  "events": true
+ },
+ {
+  "method": "wait_task",
+  "params": {
+   "task_id": "task-4",
+   "timeout": 10
+  }
+ },
+ {
+  "method": "export_launch_script",
+  "params": {
+   "instance": "default",
+   "version": "1.20.1",
+   "dest": "<ROOT>\\_out\\launch-parity.bat"
+  },
+  "events": true
+ },
+ {
+  "method": "wait_task",
+  "params": {
+   "task_id": "task-5",
+   "timeout": 20
+  }
+ },
+ {
+  "method": "export_launch_script",
+  "params": {
+   "instance": "default",
+   "version": "9.9.9"
+  }
+ },
+ {
+  "method": "wait_task",
+  "params": {
+   "task_id": "task-6",
+   "timeout": 10
+  }
+ },
+ {
+  "method": "install_java",
+  "params": {
+   "vendor": "azul",
+   "major": 17
+  }
+ },
+ {
+  "method": "wait_task",
+  "params": {
+   "task_id": "task-7",
+   "timeout": 10
+  }
+ },
+ {
+  "method": "install_java",
+  "params": {
+   "vendor": "adoptium",
+   "major": 17
+  },
+  "events": true
+ },
+ {
+  "method": "wait_task",
+  "params": {
+   "task_id": "task-8",
+   "timeout": 20
+  }
+ },
+ {
+  "method": "start_mod_updates",
+  "params": {
+   "instance": "default"
+  },
+  "events": true
+ },
+ {
+  "method": "wait_task",
+  "params": {
+   "task_id": "task-9",
+   "timeout": 20
+  }
+ },
+ {
+  "method": "start_self_update",
+  "params": {},
+  "events": true
+ },
+ {
+  "method": "wait_task",
+  "params": {
+   "task_id": "task-10",
+   "timeout": 30
+  }
+ },
+ {
+  "method": "migrate_official_launcher",
+  "params": {
+   "instance": "parity-mig"
+  },
+  "events": true
+ },
+ {
+  "method": "wait_task",
+  "params": {
+   "task_id": "task-11",
+   "timeout": 30
+  }
  }
 ]

@@ -1,5 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """Slim onefile spec: Fluent UI + terracotta + AI, drop unused Qt stacks."""
+from fnmatch import fnmatchcase
+
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 _SKIP_SUBSTR = (
@@ -29,6 +31,9 @@ def _datas(pkg):
 datas = _datas("qfluentwidgets") + _datas("qframelesswindow")
 # 语言包是 JSON 数据文件，collect_submodules 带不进来
 datas += [("mclauncher/locales", "mclauncher/locales")]
+# 模型能力表（多模态判定）同样是数据文件：漏了它打包版就认不出哪些模型支持图片，
+# 上传入口会一直关着
+datas += [("mclauncher/ai/model_rules.json", "mclauncher/ai")]
 hiddenimports = (
     _hidden("app")
     + _hidden("mclauncher")
@@ -81,14 +86,25 @@ _DROP_IN_BUNDLE = (
 # plugins/multimedia 下的解码后端。少了 .pyd 那一件最阴：DLL 与插件都在包里，
 # `import PySide6.QtMultimedia` 照样 ImportError，壁纸只在 exe 里是死的。
 # QML 那一支（Qt6MultimediaQuick）照旧不要，它拖着整个 QtQuick。
-_KEEP_MULTIMEDIA = ("qtmultimedia.pyd", "qt6multimedia.dll", "multimedia/")
+# Linux/macOS use .so/.dylib or a framework instead of Windows .pyd/.dll.
+# Match only the core module/library; MultimediaWidgets/Quick stay excluded.
+_KEEP_MULTIMEDIA = (
+    "qtmultimedia.pyd", "qtmultimedia.*.pyd",
+    "qtmultimedia.so", "qtmultimedia.*.so",
+    "qt6multimedia.dll",
+    "libqt6multimedia.so", "libqt6multimedia.so.*",
+    "libqt6multimedia.dylib", "libqt6multimedia.*.dylib",
+)
 
 
 def _keep_bundle_path(dest):
     path = dest.replace("\\", "/").lower()
     if "translations/" in path and path.endswith(".qm"):
         return "zh_cn" in path or "zh_tw" in path
-    if any(token in path for token in _KEEP_MULTIMEDIA):
+    name = path.rsplit("/", 1)[-1]
+    if ("/multimedia/" in "/" + path
+            or "/qtmultimedia.framework/" in "/" + path
+            or any(fnmatchcase(name, pattern) for pattern in _KEEP_MULTIMEDIA)):
         return True
     return not any(token in path for token in _DROP_IN_BUNDLE)
 

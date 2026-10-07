@@ -2,11 +2,13 @@
 """存档 / 截图 / 崩溃报告 / 日志浏览 / 存档备份。"""
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import tempfile
 import time
 import zipfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from . import utils
 from . import version_settings as vs
@@ -14,7 +16,7 @@ from .crash import open_path
 from .instances import Instance
 
 BACKUP_DIR_NAME = "backups"
-_STAMP_RE = re.compile(r"-(\d{8}-\d{6})$")
+_STAMP_RE = re.compile(r"-(\d{8}-\d{6})(?:-\d+)?$")
 
 
 class SaveError(Exception):
@@ -76,7 +78,10 @@ def install_datapack_into_save(instance: Instance, filename: str, save_name: str
     root = (instance.path / "datapacks").resolve()
     if src.parent != root or not src.is_file():
         raise SaveError(f"数据包不存在: {filename}")
-    dest_dir = _game_dir(instance, version_id) / "saves" / save_name / "datapacks"
+    # 审计 #1 P1-3：save_name 以前直接拼路径，`../../X` 能把数据包写到 saves/ 之外
+    # （同函数的 filename 与 backup_save / restore_backup 早就走了 _safe_child）。
+    save_dir = _safe_child(_game_dir(instance, version_id) / "saves", save_name)
+    dest_dir = save_dir / "datapacks"
     utils.ensure_dir(dest_dir)
     dest = dest_dir / src.name
     shutil.copy2(src, dest)
@@ -181,37 +186,61 @@ def restore_backup(instance: Instance, backup_name: str, version_id: str = "",
     utils.ensure_dir(saves_root)
     origin = target_name or _STAMP_RE.sub("", archive.stem)
     dest = _safe_child(saves_root, origin)
-    if dest.exists():
-        if not overwrite:
-            n = 1
-            while dest.exists():
-                dest = _safe_child(saves_root, f"{origin}-还原{n if n > 1 else ''}")
-                n += 1
-        else:
-            utils.remove_tree(dest)
 
     try:
         zf = zipfile.ZipFile(archive)
     except zipfile.BadZipFile as exc:
         raise SaveError(f"备份文件损坏: {exc}") from exc
     with zf:
-        names = [n for n in zf.namelist() if not n.endswith("/")]
+        members = zf.infolist()
+        names = [m.filename for m in members
+                 if not m.filename.replace("\\", "/").endswith("/")]
         if not names:
             raise SaveError("备份是空的")
-        roots = {n.replace("\\", "/").split("/")[0] for n in names}
-        # 备份是我们自己打的，正常只有一个顶层目录；解到临时目录再挪，避免污染 saves/
-        staging = saves_root / f".restore-{int(time.time())}"
-        utils.remove_tree(staging)
-        utils.ensure_dir(staging)
+        # 目录条目也必须校验；同时拒绝在不同平台上含义不同的 Windows 路径。
+        for info in members:
+            member = info.filename
+            raw = member.replace("\\", "/")
+            if (Path(member).is_absolute() or ".." in Path(member).parts
+                    or raw.startswith("/") or ".." in raw.split("/")
+                    or PureWindowsPath(member).drive):
+                raise SaveError(f"备份包含非法路径: {member}")
+
+        # 同盘唯一目录，不清理同一秒另一项恢复的临时数据。
+        staging = Path(tempfile.mkdtemp(prefix=".restore-", dir=saves_root))
+        unpacked = staging / "unpacked"
+        keep_staging = False
         try:
-            for member in names:
-                if Path(member).is_absolute() or ".." in Path(member).parts:
-                    raise SaveError(f"备份包含非法路径: {member}")
-            zf.extractall(staging)
-            inner = staging / roots.pop() if len(roots) == 1 else staging
-            shutil.move(str(inner), str(dest))
+            utils.ensure_dir(unpacked)
+            zf.extractall(unpacked)
+            entries = list(unpacked.iterdir())
+            # 标准备份剥掉世界目录；平铺 ZIP（甚至只有 level.dat）仍恢复成目录。
+            inner = entries[0] if len(entries) == 1 and entries[0].is_dir() else unpacked
+            if not overwrite:
+                n = 1
+                while dest.exists():
+                    dest = _safe_child(saves_root, f"{origin}-还原{n if n > 1 else ''}")
+                    n += 1
+
+            # 校验、解压、CRC 检查全部成功后才动原存档；发布失败可原地回滚。
+            previous = None
+            if overwrite and dest.exists():
+                previous = staging / "previous"
+                os.replace(dest, previous)
+            try:
+                os.replace(inner, dest)
+            except OSError:
+                if previous is not None:
+                    try:
+                        os.replace(previous, dest)
+                    except OSError as exc:
+                        # 回滚也被文件锁挡住时保留旧数据，绝不随 staging 一起删掉。
+                        keep_staging = True
+                        raise SaveError(f"还原失败，原存档保留在 {previous}: {exc}") from exc
+                raise
         finally:
-            utils.remove_tree(staging)
+            if not keep_staging:
+                utils.remove_tree(staging)
     return {"name": dest.name, "path": str(dest), "from": archive.name}
 
 

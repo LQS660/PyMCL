@@ -346,9 +346,9 @@ def _prefer_to_exe(prefer):
     if not prefer:
         return None
     p = Path(prefer)
-    if p.is_file() or (p.parent / "bin").exists():
-        if p.is_file():
-            return str(p)
+    if p.is_file():
+        return str(p)
+    if p.is_dir():
         exe = utils.find_executable(p)
         if exe:
             return str(exe)

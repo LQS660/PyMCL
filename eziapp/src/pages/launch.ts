@@ -454,9 +454,20 @@ export function renderLaunchPage(container: HTMLElement) {
   const unsub = store.subscribe(paintTasks);
   paintTasks();
 
+  // 一次启动注册的 progress / log / finished / crash 四个订阅。正常路径在
+  // unsubFinished 里全解掉；这里兜底「页面卸载时那次启动还没结束」的情况，
+  // 否则订阅（连同闭包捕获的 DOM 引用）会挂在 bridge 上不走。
+  const launchUnsubs: (() => void)[] = [];
+  const dropLaunchUnsubs = () => {
+    while (launchUnsubs.length) {
+      try { launchUnsubs.pop()!(); } catch { /* ignore */ }
+    }
+  };
+
   registerPageCleanup(() => {
     attachLayoutEditor(null);
     unsub();
+    dropLaunchUnsubs();
     for (const fn of bodyCleanups.values()) { try { fn(); } catch { /* ignore */ } }
     bodyCleanups.clear();
     // 便签还在防抖 / 几何刚改完没来得及落盘：离开前补一次
@@ -532,6 +543,7 @@ export function renderLaunchPage(container: HTMLElement) {
     progressFill.style.width = '0%';
     progressText.textContent = '启动中...';
     let crashShown = false;
+    let unsubCrash: (() => void) | null = null;
     try {
       const taskId = await bridge.call<string>('launch_game', {
         instance, version, account, username, java,
@@ -556,7 +568,7 @@ export function renderLaunchPage(container: HTMLElement) {
         store.gameRunning = false;
         btnLaunch.style.display = '';
         btnStop.style.display = 'none';
-        unsubProgress(); unsubLog(); unsubFinished();
+        unsubProgress(); unsubLog(); unsubFinished(); unsubCrash?.();
         if (data.success) { toast('游戏已启动！', 'success'); return; }
         if (crashShown || data.crash) return;
         if (String(data.message || '') === '已取消') { toast('已停止', 'info'); return; }
@@ -568,11 +580,17 @@ export function renderLaunchPage(container: HTMLElement) {
           instance, version, task_id: taskId,
         }).then((relaunch) => { if (relaunch) btnLaunch.click(); });
       });
-      bridge.subscribe('crash', (data: any) => {
+      // 这个 unsub 必须存下来：launch 是单例页面（main.ts 缓存 Painter），
+      // 每次点「启动游戏」都新增一个 crash 订阅，不解就是每轮泄漏一个闭包
+      // （外加一个指向已 detach DOM 的 btnLaunch 引用）。同一次启动的另外
+      // 三个订阅都在 unsubFinished 里解了，只有这个漏了。
+      unsubCrash = bridge.subscribe('crash', (data: any) => {
         if (data.task_id !== taskId) return;
         crashShown = true;
         void crashDialog(data).then((relaunch) => { if (relaunch) btnLaunch.click(); });
       });
+      // 页面卸载兜底：还在跑的那次启动留下的订阅不能跟着页面一起漏
+      launchUnsubs.push(unsubProgress, unsubLog, unsubFinished, unsubCrash);
     } catch (e: any) {
       toast(e.message || '启动失败', 'error');
       btnLaunch.style.display = '';

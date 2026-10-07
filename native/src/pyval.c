@@ -1,4 +1,5 @@
 #include "pymcl.h"
+#include <errno.h>
 #include <math.h>
 
 /* Python 语义的小工具：bool(x)、int(x)、x or default、str(x)。
@@ -18,7 +19,9 @@ int py_int(const cJSON *v, long long *out) {
     if (cJSON_IsBool(v)) { *out = cJSON_IsTrue(v); return 1; }
     if (cJSON_IsNumber(v)) {
         double d = v->valuedouble;
-        if (d != d || isinf(d)) return 0;
+        /* LLONG_MAX rounds up to 2^63 as a double; that boundary is already
+           out of range. Reject before converting to avoid undefined behavior. */
+        if (!isfinite(d) || d < -0x1p63 || d >= 0x1p63) return 0;
         *out = (long long)trunc(d);
         return 1;
     }
@@ -26,8 +29,9 @@ int py_int(const cJSON *v, long long *out) {
         const char *s = v->valuestring;
         while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
         char *end = NULL;
+        errno = 0;
         long long x = strtoll(s, &end, 10);
-        if (!end || end == s) return 0;
+        if (errno == ERANGE || end == s) return 0;
         while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r') end++;
         if (*end) return 0;
         *out = x;

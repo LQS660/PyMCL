@@ -55,9 +55,12 @@ void sanitize_instance_name(const char *raw, char *out, size_t n) {
     char t[512], u[512];
     trim_copy(raw, t, sizeof(t));
     size_t o = 0;
+    /* 非法字符集在 Python 的 [\\/:*?"<>|\x00-\x1f] 之上补了 cmd.exe 元字符
+       & ^ ( ) % ! ——实例名会拼进目录名、也会出现在启动命令行附近，先掐掉，
+       纵深防御（见 native/src/rpc_versions.c 的 junction 不再走 cmd.exe）。 */
     for (const char *s = t; *s && o + 1 < sizeof(u); s++) {
         unsigned char c = (unsigned char)*s;
-        u[o++] = (c < 32 || strchr("\\/:*?\"<>|", c)) ? '-' : (char)c;
+        u[o++] = (c < 32 || strchr("\\/:*?\"<>|&^()%!", c)) ? '-' : (char)c;
     }
     u[o] = 0;
     /* re.sub(r"\s+", " ") 再 strip(" .") */

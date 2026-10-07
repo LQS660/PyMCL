@@ -9,7 +9,8 @@ namespace PyMCL.Services;
 public sealed class BridgeClient : IDisposable
 {
     public const string TokenHeader = "X-PyMCL-Bridge-Token";
-    private static readonly JsonSerializerOptions JsonOpt = new()
+    /// <summary>调用与事件共用同一套序列化约定。设置页保存后回读对账要按同一套键名比，故公开。</summary>
+    public static readonly JsonSerializerOptions JsonOpt = new()
     {
         PropertyNameCaseInsensitive = true,
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
@@ -168,6 +169,7 @@ public sealed class BridgeClient : IDisposable
             using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "{}" : json);
             var r = doc.RootElement;
             if (r.TryGetProperty("task_id", out var tid)) evt.TaskId = tid.GetString() ?? "";
+            if (r.TryGetProperty("chat_id", out var cid)) evt.ChatId = cid.GetString() ?? "";
             if (r.TryGetProperty("title", out var title)) evt.Title = title.GetString() ?? "";
             if (r.TryGetProperty("current", out var cur) && cur.TryGetInt32(out var ci)) evt.Current = ci;
             if (r.TryGetProperty("total", out var tot) && tot.TryGetInt32(out var ti)) evt.Total = ti;

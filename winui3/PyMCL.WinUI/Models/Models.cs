@@ -64,6 +64,8 @@ public sealed class SettingsDto
     public string Root { get; set; } = "";
     [JsonPropertyName("default_isolation")] public string DefaultIsolation { get; set; } = "none";
     [JsonPropertyName("default_jvm_args")] public string DefaultJvmArgs { get; set; } = "";
+    /// <summary>启动页预选的实例（native settings.c / bridge/api.py 都会返回该键）。</summary>
+    [JsonPropertyName("default_instance")] public string DefaultInstance { get; set; } = "";
     [JsonPropertyName("update_url")] public string UpdateUrl { get; set; } = "";
     [JsonPropertyName("download_source")] public string DownloadSource { get; set; } = "auto";
     [JsonPropertyName("launcher_visibility")] public string LauncherVisibility { get; set; } = "keep";
@@ -222,6 +224,9 @@ public sealed class BridgeEvent
 {
     public string Event { get; set; } = "";
     public string TaskId { get; set; } = "";
+    /// <summary>AI 事件的归属对话（后端 ai.delta / ai.done / ai.ask / ai.confirm 都带）。
+    /// 前端切了对话之后靠它把旧回合的事件分流掉，不写进正看着的那条。</summary>
+    public string ChatId { get; set; } = "";
     public string Title { get; set; } = "";
     public int Current { get; set; }
     public int Total { get; set; }

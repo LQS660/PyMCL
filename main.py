@@ -437,33 +437,39 @@ def build_parser():
     p = argparse.ArgumentParser(prog="pymcl", description=f"{APP_DISPLAY_NAME} v{APP_VERSION}")
     p.add_argument("--instance", "-i", dest="instance", help="实例名（版本隔离目录）")
     sub = p.add_subparsers(dest="command")
+    # 子命令后也接受全局实例参数；未显式传值时保留父级解析出的实例。
+    instance_options = argparse.ArgumentParser(add_help=False)
+    instance_options.add_argument(
+        "--instance", "-i", dest="instance", default=argparse.SUPPRESS,
+        help="实例名（版本隔离目录）",
+    )
 
-    sp = sub.add_parser("gui", help="打开图形界面")
+    sp = sub.add_parser("gui", help="打开图形界面", parents=[instance_options])
     sp.set_defaults(func=lambda a: gui_main())
 
-    sp = sub.add_parser("versions", help="列出可下载的 Minecraft 版本")
+    sp = sub.add_parser("versions", help="列出可下载的 Minecraft 版本", parents=[instance_options])
     sp.add_argument("filter", nargs="?", help="名称过滤关键字")
     sp.add_argument("--type", choices=["release", "snapshot", "old_beta", "old_alpha", "all"], default=None)
     sp.add_argument("--refresh", action="store_true", help="强制刷新清单")
     sp.set_defaults(func=cmd_versions)
 
-    sp = sub.add_parser("install", help="下载安装 Minecraft 版本")
+    sp = sub.add_parser("install", help="下载安装 Minecraft 版本", parents=[instance_options])
     sp.add_argument("version", help="版本号，如 1.21.4、1.8.9、b1.7.3")
     sp.add_argument("--force", action="store_true")
     sp.set_defaults(func=cmd_install)
 
     for kind, kw in (("fabric", "loader"), ("quilt", "loader"), ("forge", "version"), ("neoforge", "version")):
-        sp = sub.add_parser(f"install-{kind}", help=f"安装 {kind.capitalize()} 加载器")
+        sp = sub.add_parser(f"install-{kind}", help=f"安装 {kind.capitalize()} 加载器", parents=[instance_options])
         sp.add_argument("mc", help="Minecraft 版本")
         sp.add_argument(f"--{kw}", dest=kw, help=f"{kind} 版本（默认最新）")
         sp.add_argument("--force", action="store_true")
         sp.set_defaults(func=lambda a, k=kind: _install_loader_cmd(a, k))
 
-    sp = sub.add_parser("uninstall", help="卸载版本")
+    sp = sub.add_parser("uninstall", help="卸载版本", parents=[instance_options])
     sp.add_argument("version")
     sp.set_defaults(func=cmd_uninstall)
 
-    sp = sub.add_parser("launch", help="启动游戏")
+    sp = sub.add_parser("launch", help="启动游戏", parents=[instance_options])
     sp.add_argument("version", help="要启动的版本")
     sp.add_argument("--username", "-u", help="游戏内名字（离线模式）")
     sp.add_argument("--offline", action="store_true", help="强制离线模式")
@@ -474,56 +480,56 @@ def build_parser():
     sp.add_argument("--height", type=int, help="窗口高度")
     sp.set_defaults(func=cmd_launch)
 
-    sp = sub.add_parser("list", help="查看实例与已安装版本")
+    sp = sub.add_parser("list", help="查看实例与已安装版本", parents=[instance_options])
     sp.set_defaults(func=cmd_list)
 
-    sp = sub.add_parser("java", help="Java 管理")
+    sp = sub.add_parser("java", help="Java 管理", parents=[instance_options])
     sp.add_argument("java_cmd", choices=["list", "install"])
     sp.add_argument("major", nargs="?", help="大版本号，如 17")
     sp.set_defaults(func=cmd_java)
 
-    sp = sub.add_parser("login", help="微软正版登录")
+    sp = sub.add_parser("login", help="微软正版登录", parents=[instance_options])
     sp.add_argument("--client-id", help="自定义 OAuth 客户端 ID")
     sp.set_defaults(func=cmd_login)
 
-    sp = sub.add_parser("search", help="搜索整合包（Modrinth / CurseForge / 中文）")
+    sp = sub.add_parser("search", help="搜索整合包（Modrinth / CurseForge / 中文）", parents=[instance_options])
     sp.add_argument("query")
     sp.add_argument("--limit", type=int, default=25)
     sp.add_argument("--source", choices=["modrinth", "curseforge", "chinese"], default="modrinth",
                     help="搜索来源（默认 modrinth，chinese 支持中文别名查找）")
     sp.set_defaults(func=cmd_search)
 
-    sp = sub.add_parser("modpack", help="安装整合包（.mrpack / CurseForge zip / 直链）")
+    sp = sub.add_parser("modpack", help="安装整合包（.mrpack / CurseForge zip / 直链）", parents=[instance_options])
     sp.add_argument("source", help="本地文件路径或下载链接")
     sp.set_defaults(func=cmd_modpack)
 
-    sp = sub.add_parser("mods", help="模组管理（搜索/安装/列表）")
-    mods_sub = sp.add_subparsers(dest="mods_cmd")
-    sp1 = mods_sub.add_parser("search", help="搜索模组（Modrinth / CurseForge）")
+    sp = sub.add_parser("mods", help="模组管理（搜索/安装/列表）", parents=[instance_options])
+    mods_sub = sp.add_subparsers(dest="mods_cmd", required=True)
+    sp1 = mods_sub.add_parser("search", help="搜索模组（Modrinth / CurseForge）", parents=[instance_options])
     sp1.add_argument("query")
     sp1.add_argument("--limit", type=int, default=30)
     sp1.add_argument("--source", choices=["modrinth", "curseforge", "chinese"], default="modrinth",
                      help="搜索来源（默认 modrinth，chinese 支持中文别名查找）")
     sp1.set_defaults(func=cmd_mods)
-    sp2 = mods_sub.add_parser("install", help="安装模组（Modrinth slug/链接、CurseForge 链接、.jar 文件/直链）")
+    sp2 = mods_sub.add_parser("install", help="安装模组（Modrinth slug/链接、CurseForge 链接、.jar 文件/直链）", parents=[instance_options])
     sp2.add_argument("source")
     sp2.add_argument("--mc", help="MC 版本（默认自动检测实例版本）")
     sp2.add_argument("--loader", choices=["fabric", "forge", "neoforge", "quilt"], default=None,
                      help="加载器（默认自动检测）")
     sp2.set_defaults(func=cmd_mods)
-    sp3 = mods_sub.add_parser("list", help="列出实例中已安装的模组")
+    sp3 = mods_sub.add_parser("list", help="列出实例中已安装的模组", parents=[instance_options])
     sp3.set_defaults(func=cmd_mods)
 
-    sp = sub.add_parser("instance", help="实例管理（版本隔离）")
+    sp = sub.add_parser("instance", help="实例管理（版本隔离）", parents=[instance_options])
     sp.add_argument("inst_cmd", choices=["create", "delete", "rename", "list"])
     sp.add_argument("name", nargs="?", help="实例名")
     sp.add_argument("--new-name", help="重命名目标")
     sp.set_defaults(func=cmd_instance)
 
-    sp = sub.add_parser("sysinfo", help="打印本机配置（反馈系统会附带这些信息）")
+    sp = sub.add_parser("sysinfo", help="打印本机配置（反馈系统会附带这些信息）", parents=[instance_options])
     sp.set_defaults(func=cmd_sysinfo)
 
-    sp = sub.add_parser("feedback", help="向反馈中心提交一条反馈")
+    sp = sub.add_parser("feedback", help="向反馈中心提交一条反馈", parents=[instance_options])
     sp.add_argument("--category", default="other",
                     choices=["bug", "crash", "download", "multiplayer", "ai", "ui", "suggest", "other"])
     sp.add_argument("--title", default="")

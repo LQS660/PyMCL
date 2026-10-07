@@ -1,5 +1,6 @@
 #include "pymcl.h"
 #include <ctype.h>
+#include <limits.h>
 #include <wincrypt.h>
 
 #pragma comment(lib, "crypt32.lib")
@@ -20,15 +21,159 @@ static void accounts_path(char *out, size_t n) {
     pymcl_path_join(out, n, g_root, "accounts.json");
 }
 
+/* ---------- 账号令牌密封（逐字段对齐 mclauncher/auth.py） ----------
+   Python 的 seal_secret/open_secret 把 access_token / refresh_token 用 Windows
+   DPAPI 密封成 "dpapi:<b64>" 落盘（非 Windows 走 "keyring:<name>"）。C 桥读同一份
+   accounts.json，此前不认这个前缀，会把密文当合法令牌塞进 --accessToken 交给游戏，
+   表现是「登录态无效 / 进不了正版服务器」，很难归因。这里复现 Python 的编码口径：
+
+     · CryptProtectData 的 szDescription / pOptionalEntropy / pvReserved 全传 NULL、
+       dwFlags 传 0（auth.py 里就是 CryptProtectData(..., None, None, None, None, 0, ...)）；
+     · 密文走标准 base64（字母表与 '=' 填充同 Python base64.b64encode）；
+     · 解封后按 UTF-8 严格解码（Python 是 .decode("utf-8")，非法字节抛 ValueError）。
+
+   前缀语义也与 Python 一致：空值原样；已带 dpapi:/keyring:/unavailable: 的值在 seal
+   时原样保留（重复密封会变成 Python 解不开的垃圾）；keyring: 与 unavailable: 在 open
+   时给空串（C 侧没有系统凭据库可读），但**不能被 C 覆盖**，否则 Python 那边就再也
+   取不回令牌了。 */
+#define SECRET_DPAPI "dpapi:"
+#define SECRET_KEYRING "keyring:"
+#define SECRET_UNAVAILABLE "unavailable:"
+
+/* 已经是「落盘形态」的引用：C 侧拿不到明文，也不能当明文用 */
+static int secret_is_sealed(const char *v) {
+    return v && (pymcl_startswith(v, SECRET_DPAPI) || pymcl_startswith(v, SECRET_KEYRING)
+                 || pymcl_startswith(v, SECRET_UNAVAILABLE));
+}
+
+/* 这个值能不能直接当令牌用：空的、或还是个密封引用都不行。
+   对齐 Python open_secret 返回 "" 之后 `account.get(k) or "0"` 的口径。 */
+int account_secret_usable(const char *v) {
+    return v && v[0] && !secret_is_sealed(v);
+}
+
+static int utf8_is_valid(const char *s, size_t n) {
+    if (n == 0) return 1;
+    if (n > (size_t)INT_MAX) return 0;
+    return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, (int)n, NULL, 0) > 0;
+}
+
+/* 明文 → "dpapi:<b64>" 的 base64 部分；失败返回 NULL */
+static char *dpapi_seal_b64(const char *plain, size_t len) {
+    DATA_BLOB in, out;
+    in.pbData = (BYTE *)plain;
+    in.cbData = (DWORD)len;
+    out.pbData = NULL;
+    out.cbData = 0;
+    if (!CryptProtectData(&in, NULL, NULL, NULL, NULL, 0, &out)) return NULL;
+    char *b64 = pymcl_b64encode(out.pbData, out.cbData);
+    LocalFree(out.pbData);
+    return b64;
+}
+
+/* "dpapi:" 后面的 base64 → 明文；失败返回 NULL */
+static char *dpapi_open_b64(const char *b64) {
+    size_t raw_len = 0;
+    unsigned char *raw = pymcl_b64decode(b64, &raw_len);
+    if (!raw) return NULL;
+    DATA_BLOB in, out;
+    in.pbData = raw;
+    in.cbData = (DWORD)raw_len;
+    out.pbData = NULL;
+    out.cbData = 0;
+    char *plain = NULL;
+    if (CryptUnprotectData(&in, NULL, NULL, NULL, NULL, 0, &out)) {
+        if (utf8_is_valid((const char *)out.pbData, out.cbData)) {
+            plain = (char *)malloc((size_t)out.cbData + 1);
+            if (plain) {
+                memcpy(plain, out.pbData, out.cbData);
+                plain[out.cbData] = 0;
+            }
+        }
+        LocalFree(out.pbData);
+    }
+    free(raw);
+    return plain;
+}
+
+/* 明文 → 落盘形态。空值原样；已带前缀原样；DPAPI 不可用时给 "unavailable:" 哨兵
+   （绝不退回明文）。返回 malloc 串，调用方 free。 */
+char *account_seal_secret(const char *plain) {
+    if (!plain || !plain[0]) return pymcl_strdup(plain ? plain : "");
+    if (secret_is_sealed(plain)) return pymcl_strdup(plain);
+    char *b64 = dpapi_seal_b64(plain, strlen(plain));
+    if (!b64) return pymcl_strdup(SECRET_UNAVAILABLE);
+    size_t need = strlen(SECRET_DPAPI) + strlen(b64) + 1;
+    char *out = (char *)malloc(need);
+    if (!out) {
+        free(b64);
+        return pymcl_strdup(SECRET_UNAVAILABLE);
+    }
+    snprintf(out, need, "%s%s", SECRET_DPAPI, b64);
+    free(b64);
+    return out;
+}
+
+/* 落盘形态 → 明文。这是 Python open_secret 的对外口径：
+   unavailable: / keyring: 返回空串（C 侧读不到系统凭据库），无前缀的历史明文原样返回，
+   dpapi: 走 CryptUnprotectData（解不开也给空串，同 Python 的 except 分支）。 */
+char *account_open_secret(const char *value) {
+    if (!value || !value[0]) return pymcl_strdup(value ? value : "");
+    if (pymcl_startswith(value, SECRET_UNAVAILABLE)) return pymcl_strdup("");
+    if (pymcl_startswith(value, SECRET_KEYRING)) return pymcl_strdup("");
+    if (!pymcl_startswith(value, SECRET_DPAPI)) return pymcl_strdup(value);
+    char *plain = dpapi_open_b64(value + strlen(SECRET_DPAPI));
+    return plain ? plain : pymcl_strdup("");
+}
+
+/* 同 auth.py 的 _TOKEN_KEYS：client_token 不密封 */
+static const char *const k_secret_keys[] = {"access_token", "refresh_token"};
+
+/* 读盘时只把 dpapi: 解成明文；keyring: / unavailable: 原样留在树里。
+
+   为什么不一律走 account_open_secret：那两个前缀 C 侧解不开，解成空串后
+   accounts_save 会把空串写回磁盘，把 Python 的 keyring 引用整条抹掉——用户下次
+   在 Python 侧就读不到自己的令牌了。留在树里则「读 → 改别的键 → 写回」是无损的，
+   而「能不能当令牌用」由 account_secret_usable 单独回答。 */
+static char *accounts_load_transform(const char *v) {
+    if (pymcl_startswith(v, SECRET_DPAPI)) {
+        char *plain = dpapi_open_b64(v + strlen(SECRET_DPAPI));
+        if (plain) return plain;      /* 解不开就保留密文，等 Python 侧处理 */
+    }
+    return pymcl_strdup(v);
+}
+
+static void accounts_tree_apply(cJSON *root, char *(*fn)(const char *)) {
+    cJSON *acc;
+    cJSON_ArrayForEach(acc, cJSON_GetObjectItemCaseSensitive(root, "accounts")) {
+        for (size_t i = 0; i < sizeof(k_secret_keys) / sizeof(k_secret_keys[0]); i++) {
+            cJSON *it = cJSON_GetObjectItemCaseSensitive(acc, k_secret_keys[i]);
+            if (!cJSON_IsString(it) || !it->valuestring || !it->valuestring[0]) continue;
+            char *v = fn(it->valuestring);
+            if (!v) continue;
+            cJSON_ReplaceItemInObjectCaseSensitive(acc, k_secret_keys[i], cJSON_CreateString(v));
+            free(v);
+        }
+    }
+}
+
 cJSON *accounts_load(void) {
     char p[PYMCL_PATH];
     accounts_path(p, sizeof(p));
     cJSON *j = pymcl_read_json(p);
-    return j ? j : cJSON_Parse("{\"accounts\":[],\"active\":null}");
+    if (!j) return cJSON_Parse("{\"accounts\":[],\"active\":null}");
+    /* 读进来就把 dpapi: 解开：此后所有调用方（启动参数、令牌刷新、官方账号导入、
+       读改写回）看到的都是明文，与 Python AccountManager.load() 的 open_account 一致。 */
+    accounts_tree_apply(j, accounts_load_transform);
+    return j;
 }
 void accounts_save(cJSON *root) {
     char p[PYMCL_PATH];
     accounts_path(p, sizeof(p));
+    /* 落盘前密封回去，等价 Python AccountManager.save() 的 seal_account。
+       明文变 dpapi:，已带前缀的（含 keyring:）原样保留——重复密封会变成
+       Python 解不开的垃圾，覆盖 keyring: 引用则会丢令牌。 */
+    accounts_tree_apply(root, account_seal_secret);
     pymcl_write_json(p, root);
 }
 
@@ -61,6 +206,14 @@ cJSON *account_offline(const char *username) {
     return account_offline_skin(username, NULL);
 }
 
+/* 启动参数里的令牌：拿不到明文就退回 "0"（Python 是 `account.get("access_token") or "0"`）。
+   accounts_load 已经把 dpapi: 解开了；keyring:/unavailable: 会被解成空串，
+   这里再兜一层，保证不会把空串或密文塞进 --accessToken。 */
+static const char *account_token_or_zero(cJSON *acc) {
+    const char *tok = cJSON_GetStringValue(cJSON_GetObjectItem(acc, "access_token"));
+    return account_secret_usable(tok) ? tok : "0";
+}
+
 cJSON *account_launch_props(cJSON *acc) {
     cJSON *o = cJSON_CreateObject();
     const char *type = cJSON_GetStringValue(cJSON_GetObjectItem(acc, "type"));
@@ -70,7 +223,7 @@ cJSON *account_launch_props(cJSON *acc) {
         pymcl_dashed_uuid(cJSON_GetStringValue(cJSON_GetObjectItem(acc, "uuid")) ?: "", uuid);
         cJSON_AddStringToObject(o, "name", name);
         cJSON_AddStringToObject(o, "uuid", uuid);
-        cJSON_AddStringToObject(o, "token", cJSON_GetStringValue(cJSON_GetObjectItem(acc, "access_token")) ?: "0");
+        cJSON_AddStringToObject(o, "token", account_token_or_zero(acc));
         cJSON_AddStringToObject(o, "user_type", "msa");
         cJSON_AddStringToObject(o, "xuid", cJSON_GetStringValue(cJSON_GetObjectItem(acc, "xuid")) ?: "");
     } else if (type && strcmp(type, "authlib") == 0) {
@@ -78,7 +231,7 @@ cJSON *account_launch_props(cJSON *acc) {
         pymcl_dashed_uuid(cJSON_GetStringValue(cJSON_GetObjectItem(acc, "uuid")) ?: "", uuid);
         cJSON_AddStringToObject(o, "name", name);
         cJSON_AddStringToObject(o, "uuid", uuid);
-        cJSON_AddStringToObject(o, "token", cJSON_GetStringValue(cJSON_GetObjectItem(acc, "access_token")) ?: "0");
+        cJSON_AddStringToObject(o, "token", account_token_or_zero(acc));
         cJSON_AddStringToObject(o, "user_type", "mojang");
         cJSON_AddStringToObject(o, "xuid", "");
         cJSON_AddStringToObject(o, "authlib_api", cJSON_GetStringValue(cJSON_GetObjectItem(acc, "api")) ?: "");
@@ -87,7 +240,7 @@ cJSON *account_launch_props(cJSON *acc) {
         pymcl_dashed_uuid(cJSON_GetStringValue(cJSON_GetObjectItem(acc, "uuid")) ?: "", uuid);
         cJSON_AddStringToObject(o, "name", name);
         cJSON_AddStringToObject(o, "uuid", uuid);
-        cJSON_AddStringToObject(o, "token", cJSON_GetStringValue(cJSON_GetObjectItem(acc, "access_token")) ?: "0");
+        cJSON_AddStringToObject(o, "token", account_token_or_zero(acc));
         cJSON_AddStringToObject(o, "user_type", "mojang");
         cJSON_AddStringToObject(o, "xuid", "");
         cJSON_AddStringToObject(o, "nide8_id", cJSON_GetStringValue(cJSON_GetObjectItem(acc, "server_id")) ?: "");
@@ -110,7 +263,8 @@ cJSON *account_launch_props(cJSON *acc) {
 
 static int ms_refresh(cJSON *acc) {
     const char *rt = cJSON_GetStringValue(cJSON_GetObjectItem(acc, "refresh_token"));
-    if (!rt) { pymcl_set_error("缺少刷新令牌，需要重新登录。"); return -1; }
+    /* accounts_load 已解封；keyring:/unavailable: 会解成空串，这里和 Python 一样当缺失处理 */
+    if (!account_secret_usable(rt)) { pymcl_set_error("缺少刷新令牌，需要重新登录。"); return -1; }
     const char *cid = config_str("microsoft_client_id", PYMCL_MS_CLIENT_DEFAULT);
     char form[2048];
     snprintf(form, sizeof(form),
@@ -220,7 +374,7 @@ cJSON *account_ensure_valid(cJSON *acc) {
     if (!type || strcmp(type, "microsoft") != 0) return cJSON_Duplicate(acc, 1);
     double exp = cJSON_GetNumberValue(cJSON_GetObjectItem(acc, "expires_at"));
     const char *tok = cJSON_GetStringValue(cJSON_GetObjectItem(acc, "access_token"));
-    if (time(NULL) < exp && tok && tok[0]) return cJSON_Duplicate(acc, 1);
+    if (time(NULL) < exp && account_secret_usable(tok)) return cJSON_Duplicate(acc, 1);
     cJSON *copy = cJSON_Duplicate(acc, 1);
     if (ms_refresh(copy) != 0) { cJSON_Delete(copy); return NULL; }
     cJSON *root = accounts_load();

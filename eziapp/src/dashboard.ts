@@ -494,7 +494,13 @@ export class DashboardCanvas {
 
   fitToWindow() {
     this.pushHistory();
-    fitToWindow(this.doc, this.width, this.height);
+    if (!fitToWindow(this.doc, this.width, this.height)) {
+      // 画布塞不下这些卡片的最小尺寸：fitToWindow 原样返回，别落盘半成品
+      this.history.pop();          // 没改动就不该占掉一次撤销
+      this.syncToolbar();
+      toast('窗口太小，放不下这些卡片，先拉大窗口再适应。', 'warning');
+      return;
+    }
     this.rebuild();
     this.touch(true);
   }

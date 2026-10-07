@@ -2,7 +2,56 @@
 
 /* bridge/api.py BackendAPI.get_settings 的逐键移植（键的顺序、默认值、归一化都照抄）。 */
 
-#define DEFAULT_GATEWAY_URL ""
+/* 内置公益网关（开箱即用）。这是一个标准 NewAPI 服务，所以默认接入方式是把
+   ai_gateway_url 预填成 base（到 /v1 为止）、ai_api_key 预填成内置令牌。
+   地址与令牌做「中度」混淆：逐字节 XOR 掩码，运行时解码。这**不是**安全边界，
+   只为挡住 strings 顺手抄的小白；真正想白嫖的人反汇编照样能还原。 */
+#define BUILTIN_GW_MASK 0x5A
+static const unsigned char BUILTIN_GW_BYTES[] = {
+    50, 46, 46, 42, 41, 96, 117, 117, 52, 63, 45, 116,
+    105, 43, 116, 50, 59, 51, 40
+};  /* 解码后是内置网关根地址（勿把明文写回这里，混淆就白做了） */
+
+#define BUILTIN_KEY_MASK 0x37
+static const unsigned char BUILTIN_KEY_BYTES[] = {
+    68, 92, 26, 64, 116, 0, 7, 110, 86, 3, 125, 98, 98, 94, 100, 93, 71, 97, 123, 92,
+    121, 113, 113, 83, 120, 6, 97, 85, 99, 65, 91, 89, 123, 124, 85, 6, 88, 96, 94,
+    127, 125, 112, 69, 97, 96, 6, 0, 2, 127, 85, 66
+};  /* 解码后是内置令牌 */
+
+static void builtin_unmask(const unsigned char *data, size_t n, unsigned char mask,
+                           char *out, size_t cap) {
+    size_t i = 0;
+    for (; i < n && i + 1 < cap; i++) out[i] = (char)(data[i] ^ mask);
+    out[i] = 0;
+}
+
+/* 内置公益网关 base（带 /v1） */
+void builtin_gateway_base(char *out, size_t cap) {
+    char raw[128];
+    builtin_unmask(BUILTIN_GW_BYTES, sizeof(BUILTIN_GW_BYTES), BUILTIN_GW_MASK, raw, sizeof(raw));
+    snprintf(out, cap, "%s/v1", raw);
+}
+
+/* 内置公益网关令牌 */
+void builtin_gateway_key(char *out, size_t cap) {
+    builtin_unmask(BUILTIN_KEY_BYTES, sizeof(BUILTIN_KEY_BYTES), BUILTIN_KEY_MASK, out, cap);
+}
+
+static const char *builtin_gateway_base_default(void) {
+    static char cached[160];
+    if (!cached[0]) builtin_gateway_base(cached, sizeof(cached));
+    return cached;
+}
+
+static const char *builtin_gateway_key_default(void) {
+    static char cached[256];
+    if (!cached[0]) builtin_gateway_key(cached, sizeof(cached));
+    return cached;
+}
+
+#define DEFAULT_GATEWAY_URL builtin_gateway_base_default()
+#define DEFAULT_GATEWAY_KEY builtin_gateway_key_default()
 #define DEFAULT_MODEL "deepseek-v4-flash"
 #define DEFAULT_FEEDBACK_URL "http://114.66.28.184:53611"
 
@@ -140,10 +189,12 @@ cJSON *rpc_get_settings(void) {
     add(o, "default_resolution", res);
     add(o, "ms_client_id", cfg_or("microsoft_client_id", ""));
     add(o, "curseforge_api_key", cfg_or("curseforge_api_key", ""));
-    add(o, "ai_mode", cfg_or("ai_mode", "public"));
+    /* 内置网关是标准 NewAPI（仅 /v1/* 为真实接口），默认走 custom；public 留给自建 ai_gateway。 */
+    add(o, "ai_mode", cfg_or("ai_mode", "custom"));
+    /* 内置公益网关开箱即用：用户没填地址/令牌时回内置值（运行期解码），前端据此预填。 */
     add(o, "ai_gateway_url", py_or(config_get("ai_gateway_url"), cJSON_CreateString(DEFAULT_GATEWAY_URL)));
-    add(o, "ai_base_url", cfg_or("ai_base_url", ""));
-    add(o, "ai_api_key", cfg_or("ai_api_key", ""));
+    add(o, "ai_base_url", py_or(config_get("ai_base_url"), cJSON_CreateString(DEFAULT_GATEWAY_URL)));
+    add(o, "ai_api_key", py_or(config_get("ai_api_key"), cJSON_CreateString(DEFAULT_GATEWAY_KEY)));
     add(o, "ai_model", cfg_or("ai_model", DEFAULT_MODEL));
     int confirm = cfg_bool("ai_confirm_writes", 1);
     add(o, "ai_confirm_writes", cJSON_CreateBool(confirm));

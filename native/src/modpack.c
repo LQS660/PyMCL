@@ -8,7 +8,7 @@ static void emit(pymcl_ctx *ctx, const char *msg) {
 
 static int install_mrpack_file(const char *pack, const char *instance, pymcl_ctx *ctx) {
     char tmp[MAX_PATH], tdir[PYMCL_PATH];
-    GetTempPathA(MAX_PATH, tmp);
+    pymcl_get_temp_u8(tmp, sizeof(tmp));
     snprintf(tdir, sizeof(tdir), "%spymcl_mrpack_%lu", tmp, (unsigned long)GetTickCount());
     pymcl_ensure_dir(tdir);
     if (pymcl_extract_zip(pack, tdir) != 0) {
@@ -115,7 +115,7 @@ static int install_mrpack_file(const char *pack, const char *instance, pymcl_ctx
 
 static int install_cf_zip_file(const char *pack, const char *instance, pymcl_ctx *ctx) {
     char tmp[MAX_PATH], tdir[PYMCL_PATH];
-    GetTempPathA(MAX_PATH, tmp);
+    pymcl_get_temp_u8(tmp, sizeof(tmp));
     snprintf(tdir, sizeof(tdir), "%spymcl_cfpack_%lu", tmp, (unsigned long)GetTickCount());
     pymcl_ensure_dir(tdir);
     if (pymcl_extract_zip(pack, tdir) != 0) {
@@ -230,7 +230,7 @@ static int install_cf_modpack_id(long long addon, const char *instance, const ch
     const char *fn = cJSON_GetStringValue(cJSON_GetObjectItem(f, "fileName")) ?: "pack.zip";
     const char *du = cJSON_GetStringValue(cJSON_GetObjectItem(f, "downloadUrl"));
     char tmp[MAX_PATH], dest[PYMCL_PATH];
-    GetTempPathA(MAX_PATH, tmp);
+    pymcl_get_temp_u8(tmp, sizeof(tmp));
     snprintf(dest, sizeof(dest), "%spymcl_cfpack_%lld_%lld.zip", tmp, addon, fid);
     char u1[256], u2[256];
     snprintf(u1, sizeof(u1), "https://mediafilez.forgecdn.net/files/%lld/%lld/%s", fid / 1000, fid % 1000, fn);
@@ -261,7 +261,7 @@ static int install_mr_slug(const char *slug, const char *instance, pymcl_ctx *ct
             const char *u = cJSON_GetStringValue(cJSON_GetObjectItem(f, "url"));
             if (fn && pymcl_endswith(fn, ".mrpack") && u) {
                 char tmp[MAX_PATH], dest[PYMCL_PATH];
-                GetTempPathA(MAX_PATH, tmp);
+                pymcl_get_temp_u8(tmp, sizeof(tmp));
                 snprintf(dest, sizeof(dest), "%spymcl_%s.mrpack", tmp, slug);
                 char mir[1024];
                 snprintf(mir, sizeof(mir), "%s", u);

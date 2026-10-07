@@ -97,6 +97,19 @@ def _iter_files(path: Path) -> tuple[list[Path], bool]:
     return out, truncated
 
 
+def _iter_dirs(path: Path) -> list[Path]:
+    """列出 path（目录）下所有已存在的子目录（含空目录，不含 path 自己）。
+
+    审计 05 P1-2：回滚清扫的 `known_dirs` 原来只从「有 sha256 的文件」的父目录
+    推导，空目录永远进不了集合，于是「快照前就存在的空目录」被当成「快照后新增」
+    rmtree 掉（用户预留的 saves/、resourcepacks/、自己的笔记目录会静默消失）。
+    这里把目录项直接登记，回滚只删快照之后才出现的。
+    """
+    if not path.is_dir():
+        return []
+    return [p for p in sorted(path.rglob("*")) if p.is_dir()]
+
+
 def _store_blob(chat_id: str, data: bytes, sha: str) -> bool:
     """备份内容落盘（内容寻址去重）。失败返回 False。"""
     try:
@@ -125,6 +138,9 @@ def snapshot(chat_id: str, turn_id: str, paths: list) -> dict:
             ops = _load_journal(chat_id)
             files: list[dict] = []
             dir_bases: list[str] = []
+            # 审计 05 P1-2：快照时就存在的目录（含空目录）必须登记，回滚清扫
+            # 只删「快照后才出现的」目录；否则用户预留的空目录会被静默 rmtree。
+            known_dirs: list[str] = []
             total = 0
             for raw in paths or []:
                 try:
@@ -134,6 +150,9 @@ def snapshot(chat_id: str, turn_id: str, paths: list) -> dict:
                 is_dir = rp.is_dir()
                 if is_dir:
                     dir_bases.append(str(rp))
+                    known_dirs.append(str(rp))
+                    for d in _iter_dirs(rp):
+                        known_dirs.append(str(d))
                 if not is_dir and not rp.exists():
                     # 文件级快照也要登记「快照时不存在」：disable_mod 这类改名操作
                     # 会在快照后新建 .disabled 文件，回滚时必须删掉它
@@ -175,6 +194,8 @@ def snapshot(chat_id: str, turn_id: str, paths: list) -> dict:
                     "ts": datetime.datetime.now().isoformat(timespec="seconds"),
                     "files": files,
                     "dirs": dir_bases,
+                    # 快照时已存在的目录（含空目录）：回滚清扫的 known 集合
+                    "known_dirs": sorted(set(known_dirs)),
                     "bytes": total,
                 })
                 _save_journal(chat_id, ops)
@@ -235,7 +256,15 @@ def _apply_op(chat_id: str, op: dict) -> int:
     """恢复一个操作，返回失败条目数（ghost 删除失败 / blob 读写失败都算）。"""
     files = op.get("files") or []
     known_files = {f["path"] for f in files}
-    known_dirs = {str(Path(f["path"]).parent) for f in files if f.get("sha256")}
+    # 审计 05 P1-2：known_dirs 以快照时登记的目录清单为准（含空目录）。
+    # 旧 journal 没有这个键 → 退回「文件父目录」推导（保持向后兼容；老记录本来
+    # 就无法区分空目录，只能沿用旧口径）。
+    recorded = op.get("known_dirs")
+    if isinstance(recorded, list) and recorded:
+        known_dirs = {str(d) for d in recorded}
+    else:
+        known_dirs = {str(Path(f["path"]).parent) for f in files if f.get("sha256")}
+    known_dirs |= {str(Path(f["path"]).parent) for f in files if f.get("sha256")}
     failures = 0
     for d in op.get("dirs") or []:
         _sweep_new_entries(d, known_files, known_dirs)

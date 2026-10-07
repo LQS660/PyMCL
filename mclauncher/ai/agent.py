@@ -15,6 +15,7 @@ from mclauncher.i18n import tr
 from . import compact
 from . import checkpoint
 from . import hooks as hook_mod
+from . import images
 from . import mcp as mcp_mod
 from . import memory as memory_mod
 from . import permission
@@ -40,6 +41,21 @@ from .tools import (
 
 class AgentCancelled(Exception):
     pass
+
+
+# 子代理只读契约（审计 05 P0-2）：schema 层过滤只是「模型看不到」，执行层必须
+# 自己判。dispatch_subagent 的 TOOL_META 是 readonly，但子代理不许再派生。
+SUBAGENT_READONLY_REASON = "子代理只读：不能执行写操作"
+_SUBAGENT_FORBIDDEN = frozenset({"dispatch_subagent"})
+
+
+def subagent_allows(name: str) -> bool:
+    """子代理上下文里这个工具能不能执行：只读工具可以，其余一律不行。"""
+    if name in _SUBAGENT_FORBIDDEN:
+        return False
+    meta = TOOL_META.get(name)
+    # 未知工具（含 mcp_*，子代理本就不接 MCP）：不放行
+    return bool(meta is not None and meta.readonly)
 
 
 def _is_compact_msg(m) -> bool:
@@ -135,11 +151,16 @@ def _summary_input(slice_messages, limit: int = 60000) -> str:
 
     单条过长的内容先截，整体仍超限就从第二条起丢最早的（第一条通常是用户最初
     的诉求，摘要提示词要求保留它）。
+
+    图片块在这里先剥成文字：base64 一张图就是几百 KB，塞进摘要请求既烧 token
+    又毫无意义（摘要要的是语义，不是像素），而且必然触发下面的截断逻辑，
+    把真正有用的对话内容挤掉。
     """
     rows = []
     for m in slice_messages or []:
         if not isinstance(m, dict):
             continue
+        m = images.strip_message(m)
         row = {"role": m.get("role")}
         content = m.get("content")
         if isinstance(content, str) and len(content) > 4000:
@@ -314,7 +335,8 @@ def claims_action(reply: str) -> bool:
 
 def run_agent(backend, settings: dict, history: list, user_text: str,
               on_delta=None, on_status=None, confirm_fn=None, ask_fn=None,
-              cancelled=None, http_cancel=None, drain_inputs_fn=None):
+              cancelled=None, http_cancel=None, drain_inputs_fn=None,
+              images_list=None):
     """
     on_delta(text)
     on_status(kind, payload)
@@ -322,6 +344,8 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
     ask_fn(questions, title) -> dict | None
     cancelled() -> bool
     drain_inputs_fn() -> list[str]   运行中用户插话（steering），每轮开头取走
+    images_list: 本回合随消息一起发的图片 data URL 列表（可选）。
+                 当前模型不支持图片时由 client 层剥成文字说明，不会静默丢。
     返回 AgentResult（str 子类，可直接当文本用；额外带 stop_reason 等元数据）。
     """
     def _check():
@@ -369,7 +393,15 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
     # 只取这一段，别把裁剪过的旧历史再抄一遍进去
     base_len = len(messages)
     compacted = [False]
-    messages.append({"role": "user", "content": user_text})
+    # 带图片时把路径挂在消息上，由 client 层按模型能力决定「编码成内容块」
+    # 还是「剥成文字说明」——本回合和以后每轮走的是同一条路径，行为一致。
+    # 消息里只存路径不存 base64：ai_chats.json 存 200 条消息，每张图几百 KB
+    # base64 会把会话文件撑到几百 MB。
+    user_msg = {"role": "user", "content": user_text}
+    image_paths = [p for p in (images_list or []) if p]
+    if image_paths:
+        user_msg["images"] = list(image_paths)
+    messages.append(user_msg)
     state_base = messages[1]["content"] if len(messages) > 1 and \
         messages[1].get("role") == "system" else ""
 
@@ -496,10 +528,23 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
     steer_msgs: list[dict] = []
 
     def _persisted(m: dict) -> dict:
+        """导出给 UI 入库的形态。
+
+        图片只保留路径（``images: [...]``），不把 base64 内容块写进会话文件——
+        一回合 4 张图就是几 MB，200 条消息的会话文件会膨胀到几百 MB 且每次
+        读写都在拷 base64。下一轮 client 层会按当时的模型能力重新决定
+        「编码成块」还是「剥成文字」。
+        """
+        out = dict(m)
         for k, s in enumerate(steer_msgs):
             if m is s:
-                return dict(m, id=f"{chat_store.STEER_ID_PREFIX}{turn.id}_{k}")
-        return dict(m)
+                out["id"] = f"{chat_store.STEER_ID_PREFIX}{turn.id}_{k}"
+                break
+        if isinstance(out.get("content"), list):
+            # 理论上不该有（本回合 messages 里存的是路径不是块），
+            # 但兜一手：真出现内容块就剥成文字，别把 base64 漏进会话文件
+            out["content"] = images.strip_images(out["content"])
+        return out
 
     # ---- 6.2 回合埋点：停止原因/轮数/工具调用数/失败数/耗时 ----
     turn_started_at = time.monotonic()
@@ -578,7 +623,7 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                 # 从历史里读不到本回合做过什么（原来只落 [用户这句, 最终正文]，
                 # 压缩白做）。保留区里更早回合的旧消息不再抄一遍——UI 侧区分
                 # 不了新旧，抄进去就是重复入库。
-                turn_slice = [{"role": "user", "content": user_text}]
+                turn_slice = [dict(user_msg)]
                 turn_slice += [dict(m) for m in messages if _is_compact_msg(m)]
                 # 没被压进摘要的插话照样入库（被压掉的已经在摘要里了）
                 turn_slice += [_persisted(m) for m in messages
@@ -963,6 +1008,17 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                     decisions[obj.id] = ("ask", "")
                     needs_perm = True
                     continue
+                # 3.3 子代理只读硬约束（审计 05 P0-2）：schema 过滤挡不住模型幻觉，
+                # 执行层必须自己判。子代理上下文里任何非只读工具一律 DENY，与 plan
+                # 档同级、放在 permission.decide 之前——acceptEdits/edit/build/yolo
+                # 的档位默认会放行写操作，不能让它有机会生效。
+                if is_subagent and not subagent_allows(obj.name):
+                    decisions[obj.id] = ("deny", SUBAGENT_READONLY_REASON)
+                    turn.set_tool_status(obj.id, ToolCallStatus.DENIED,
+                                         result=f"[权限] 已拒绝：{SUBAGENT_READONLY_REASON}")
+                    trace.record("subagent_write_blocked", tool_name=obj.name,
+                                 round_=round_no[0])
+                    continue
                 meta = TOOL_META.get(obj.name)
                 res = permission.decide(meta, obj.args, mode, rules)
                 if res.decision == Decision.MODIFY and res.modified_input:
@@ -1054,6 +1110,18 @@ def run_agent(backend, settings: dict, history: list, user_text: str,
                                                  code=ToolErrorCode.BAD_ARGUMENTS)
                     turn.set_tool_status(obj.id, ToolCallStatus.FAILED,
                                          error=err, result=payload)
+                    return payload
+                # 子代理只读的第二道闸（审计 05 P0-2）：判权那层已经拦了，这里再判
+                # 一次是防「判权之后到执行之间」的任何路径（如调度器直接回调、
+                # 或将来有人改判权顺序）把写工具漏进来。执行层是最后一道。
+                if is_subagent and not subagent_allows(obj.name):
+                    trace.record("subagent_write_blocked", tool_name=obj.name,
+                                 round_=round_no[0], phase="execute")
+                    payload = tool_error_payload(
+                        PermissionError(SUBAGENT_READONLY_REASON), obj.name,
+                        code=ToolErrorCode.PERMISSION_DENIED)
+                    turn.set_tool_status(obj.id, ToolCallStatus.DENIED,
+                                         result=payload)
                     return payload
                 try:
                     _check()

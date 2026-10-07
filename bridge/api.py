@@ -863,9 +863,12 @@ class BackendAPI:
             time.sleep(0.3)
 
     def get_settings(self) -> dict:
-        from mclauncher.ai.defaults import DEFAULT_GATEWAY_URL, DEFAULT_MODEL
+        from mclauncher.ai.defaults import (
+            DEFAULT_API_BASE, DEFAULT_API_KEY, DEFAULT_GATEWAY_URL, DEFAULT_MODEL,
+        )
         from mclauncher.ai.permission import normalize_permission_mode
         from mclauncher.feedback_defaults import DEFAULT_FEEDBACK_URL
+        from mclauncher.config import _history_paths
         return {
             "share_libraries": bool(CONFIG.get("shared_libraries", False)),
             "share_assets": bool(CONFIG.get("shared_assets", False)),
@@ -875,9 +878,11 @@ class BackendAPI:
             "ms_client_id": CONFIG.get("microsoft_client_id") or "",
             "curseforge_api_key": CONFIG.get("curseforge_api_key") or "",
             "ai_mode": CONFIG.get("ai_mode") or "public",
-            "ai_gateway_url": CONFIG.get("ai_gateway_url") or DEFAULT_GATEWAY_URL or "",
-            "ai_base_url": CONFIG.get("ai_base_url") or "",
-            "ai_api_key": CONFIG.get("ai_api_key") or "",
+            # 内置公益网关开箱即用：用户没填地址/令牌时回内置值（中度混淆，运行期解码），
+            # 前端据此把输入框预填好；填过的用户值优先。
+            "ai_gateway_url": (CONFIG.get("ai_gateway_url") or "").strip() or DEFAULT_GATEWAY_URL or "",
+            "ai_base_url": (CONFIG.get("ai_base_url") or "").strip() or DEFAULT_API_BASE or "",
+            "ai_api_key": (CONFIG.get("ai_api_key") or "").strip() or DEFAULT_API_KEY or "",
             "ai_model": CONFIG.get("ai_model") or DEFAULT_MODEL,
             # AI 权限：词表与 app/backend.py 同一套（W-5）。get_settings 必须归一化——
             # 前端词表不一的历史遗留值（trusted / strict / readonly）在这里统一折回
@@ -923,7 +928,7 @@ class BackendAPI:
             "ui_background_shuffle": bool(CONFIG.get("ui_background_shuffle", False)),
             "ui_background_interval": _clamp_int(
                 CONFIG.get("ui_background_interval", 10), 1, 1440, 10),
-            "ui_background_history": list(CONFIG.get("ui_background_history") or []),
+            "ui_background_history": _history_paths(CONFIG.get("ui_background_history")),
             "ui_background_blur": _clamp_int(CONFIG.get("ui_background_blur", 0), 0, 40, 0),
             "ui_background_dim": _clamp_int(CONFIG.get("ui_background_dim", 0), 0, 80, 0),
             "ui_sidebar_opacity": _clamp_opacity(CONFIG.get("ui_sidebar_opacity", 100)),
@@ -1551,6 +1556,29 @@ class BackendAPI:
         self._inst_cache_at = now
         return [dict(r) for r in rows]
 
+    @staticmethod
+    def _project_url(hit: dict, kind: str = "mod") -> str:
+        """项目主页：优先上游给的 websiteUrl（CF 仅详情接口有），否则按 slug 拼。
+
+        CurseForge /mods/search 的响应不带 links 字段，搜索结果只能靠 slug 拼，
+        而 CF 的 slug 与真实项目页不一定一致——属于尽力而为的兜底，命中详情
+        （别名/detail）时才拿得到权威地址。
+        """
+        slug = hit.get("slug")
+        src = str(hit.get("source") or "").lower()
+        if src.startswith("curse"):
+            explicit = str(hit.get("website_url") or "")
+            if explicit:
+                return explicit
+            if not slug:
+                return ""
+            # CF 网页路径：模组是 mc-mods，整合包是 modpacks。
+            cf_path = "modpacks" if kind == "modpack" else "mc-mods"
+            return f"https://www.curseforge.com/minecraft/{cf_path}/{slug}"
+        if slug:
+            return f"https://modrinth.com/{kind}/{slug}"
+        return ""
+
     def _modpack_row(self, hit: dict, default_source: str = "") -> dict:
         src = (hit.get("source") or default_source or "").lower()
         return {
@@ -1561,6 +1589,8 @@ class BackendAPI:
             "slug": hit.get("slug"),
             "source": src or default_source,
             "description": hit.get("description") or "",
+            "icon_url": hit.get("icon_url") or "",
+            "project_url": self._project_url(hit, "modpack"),
         }
 
     def search_modpacks(self, query: str, source: str, extra: dict | None = None) -> list[dict]:
@@ -1660,6 +1690,20 @@ class BackendAPI:
         label = extra.get("category") or extra.get("type") or ""
         cats = category_facets(label)
         cf_cats = cf_category_tokens(label)
+        # 中文关键词先走别名目录（与整合包页 search_modpacks_chinese 对称）。
+        # 别名命中即返回；没命中或抛异常都静默落回原有英文多源搜索，不能让中文
+        # 逻辑把整次搜索带崩。
+        if q:
+            try:
+                zh_hits = mods_mod.search_mods_chinese(
+                    dm, q, limit=30, api_key=CONFIG.get("curseforge_api_key"))
+            except Exception as e:
+                utils.log.warning("中文别名搜索失败，回退英文搜索: %s", e)
+                zh_hits = []
+            if zh_hits and any(h.get("matched_alias") for h in zh_hits):
+                rows = [self._content_row(h, src) for h in zh_hits]
+                self._mod_cache = rows
+                return rows
         fetchers = []
         if src in ("all", "modrinth"):
             fetchers.append(("modrinth", lambda: mods_mod.search_mods(
@@ -1679,19 +1723,7 @@ class BackendAPI:
             hits = []
         if not q and not hits:
             return self._popular_mods_offline(src)
-        rows = []
-        for h in mods_mod.rank_hits(hits, q, "mod"):
-            rows.append({
-                "name": h.get("title") or h.get("name") or "?",
-                "author": h.get("author") or "?",
-                "downloads": int(h.get("downloads") or 0),
-                "id": h.get("id"),
-                "slug": h.get("slug"),
-                "source": h.get("source") or src,
-                "description": h.get("description") or h.get("summary") or "",
-                "tags": h.get("tags") or [],
-                "updated": h.get("updated") or "",
-            })
+        rows = [self._content_row(h, src) for h in mods_mod.rank_hits(hits, q, "mod")]
         self._mod_cache = rows
         return rows
 
@@ -1736,6 +1768,8 @@ class BackendAPI:
             "description": hit.get("description") or hit.get("summary") or "",
             "tags": hit.get("tags") or [],
             "updated": hit.get("updated") or "",
+            "icon_url": hit.get("icon_url") or "",
+            "project_url": self._project_url(hit, "mod"),
         }
 
     def _search_content(self, kind: str, query: str, source: str, extra: dict | None = None) -> list[dict]:
@@ -1927,6 +1961,7 @@ class BackendAPI:
         vid = extra.get("version_id")
         fid = extra.get("file_id")
         gv = extra.get("game_version") or extra.get("mc_version")
+        deps: list[str] = []
         if extra.get("path") or extra.get("url"):
             source = extra.get("path") or extra.get("url")
             log(f"安装模组: {source}")
@@ -1934,20 +1969,24 @@ class BackendAPI:
                                              version_id=vid)
         elif src_kind.startswith("curse") and extra.get("id"):
             log(f"从 CurseForge 安装模组 id={extra.get('id')}")
-            mods_mod.install_curseforge_mod(
+            meta = mods_mod.install_curseforge_mod(
                 dm, extra["id"], inst, mc_version=gv, on_progress=on_progress, file_id=fid)
+            deps = (meta or {}).get("dependencies") or []
         else:
             hit = extra if extra.get("slug") else self._lookup_mod(str(name), extra.get("source") or "Modrinth")
             if hit.get("id") and str(hit.get("source") or src_kind).lower().startswith("curse"):
                 log(f"从 CurseForge 安装模组 id={hit.get('id')}")
-                mods_mod.install_curseforge_mod(
+                meta = mods_mod.install_curseforge_mod(
                     dm, hit["id"], inst, mc_version=gv, on_progress=on_progress,
                     file_id=fid or extra.get("version_id"))
+                deps = (meta or {}).get("dependencies") or []
             else:
                 slug = hit.get("slug") or name
                 log(f"从 Modrinth 安装模组 {slug}")
                 mods_mod.install_mod_from_source(
                     dm, str(slug), inst, mc_version=gv, on_progress=on_progress, version_id=vid)
+        if deps:
+            log(tr("已随装前置：") + "、".join(deps))
         log(tr("模组安装完成"))
 
     def _install_content_impl(self, progress, log, kind, name, instance, extra=None):
@@ -2665,6 +2704,22 @@ class BackendAPI:
         """试连 AI。传 settings 就用它，让设置页能测「还没保存的值」而不必先落盘。"""
         from mclauncher.ai.client import test_connection
         return test_connection(settings if settings is not None else self.get_settings())
+
+    def ai_list_models(self, settings: dict | None = None) -> dict:
+        """拉取当前端点可用模型列表，供设置页下拉框填充。
+
+        传 settings 就用页面当前填的值（不必先保存）。失败不抛异常给前端逻辑：
+        返回 {"ok": False, "models": [], "error": "..."}，设置页据此提示并保留手填。
+        """
+        from mclauncher.ai.client import AIClientError, list_models
+        conf = settings if settings is not None else self.get_settings()
+        try:
+            models = list_models(conf)
+        except AIClientError as exc:
+            return {"ok": False, "models": [], "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "models": [], "error": f"拉取模型列表失败：{exc}"}
+        return {"ok": True, "models": models, "error": ""}
 
     def ai_list_chats(self) -> dict:
         from mclauncher.ai import store as chat_store

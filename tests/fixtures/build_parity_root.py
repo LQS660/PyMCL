@@ -84,7 +84,13 @@ def main() -> None:
         shutil.rmtree(OUT)
     game = OUT / ".minecraft"
 
-    write_json(OUT / "config.json", {"instances_dir": ".minecraft", "language": "zh_CN"})
+    write_json(OUT / "config.json", {"instances_dir": ".minecraft", "language": "zh_CN",
+        "feedback_consent": True,
+        "device_id": "parity-device-0000000000000000",
+        "update_url": "http://127.0.0.1:18773/update-no.json"})
+    # install_java 对拍用：两侧都认的「已装运行时」，短路免真实下载
+    (OUT / "java" / "adoptium-17-x64" / "bin").mkdir(parents=True, exist_ok=True)
+    (OUT / "java" / "adoptium-17-x64" / "bin" / "java.exe").write_bytes(b"")
     write_json(game / ".instance.json",
                {"name": ".minecraft", "mc_version": None, "modpack": None, "java": "自动选择"})
 

@@ -46,10 +46,15 @@ extern "C" {
 #define CF_CLASS_RESOURCEPACK 12
 #define CF_CLASS_SHADER 6552
 #define CF_CLASS_DATAPACK 6945
+/* 世界（地图存档）在 CurseForge 是独立分类，Python 侧叫 CF_CLASS_WORLD
+   （mclauncher/catalog_files.py:25）。世界没有 Modrinth 源。 */
+#define CF_CLASS_WORLD 17
 
 typedef void (*pymcl_progress_fn)(void *ud, const char *msg, long long done, long long total);
 typedef int (*pymcl_cancel_fn)(void *ud);
 typedef void (*pymcl_log_fn)(void *ud, const char *text);
+
+typedef void (*pymcl_event_fn)(void *ud, const char *ev, cJSON *data);
 
 typedef struct {
     pymcl_progress_fn on_progress;
@@ -57,6 +62,9 @@ typedef struct {
     pymcl_cancel_fn cancel;
     void *ud;
     int threads;
+    /* SSE 事件直发（update_staged 等非任务框架事件用；可为 NULL） */
+    pymcl_event_fn on_event;
+    void *event_ud;
 } pymcl_ctx;
 
 /* ---------- error / log ---------- */
@@ -78,6 +86,11 @@ int pymcl_icontains(const char *hay, const char *needle);
 void pymcl_replace_char(char *s, char a, char b);
 wchar_t *pymcl_u8_to_wide(const char *s);
 char *pymcl_wide_to_u8(const wchar_t *w);
+/* 系统临时目录，**UTF-8** 编码，尾部带反斜杠。
+   绝不要用 GetTempPathA：中文/非 ASCII 用户名下它按 ANSI 代码页转窄字符，
+   用户名字段会变成 '?'（如 C:\Users\????\AppData\...），后续 _wfopen 直接写不进去。
+   这里走 GetTempPathW -> UTF-8，与全项目 char* 路径一律 UTF-8 的约定一致。 */
+int pymcl_get_temp_u8(char *out, size_t n);
 int pymcl_ensure_dir(const char *path);
 int pymcl_file_exists(const char *path);
 int pymcl_dir_exists(const char *path);
@@ -111,6 +124,11 @@ const char *tr_lang(const char *key, const char *lang);
 const char *tr(const char *key);
 /* tr(key) 后把第一个 {0} 换成 arg，同 Python tr("…{0}…").format(arg) */
 void tr_fmt0(char *out, size_t n, const char *key, const char *arg);
+/* tr(key) 后把 {name} 命名占位符按 names/values（count 对）替换，同 Python
+   tr("…{name}…").format(name=…)。调用方没给的占位符原样保留，不丢字。
+   返回写入 out 的字节数（不含结尾 0）。 */
+int tr_fmt_named(char *out, size_t n, const char *key,
+                 const char **names, const char **values, int count);
 /* mclauncher/argsplit.split_args：shlex POSIX 风格切分（认引号），引号不配对时退回空白切分。
    返回段数，调用方负责 free(*out[i]) 与 *out */
 int pymcl_split_args(const char *text, char ***out, int *n);
@@ -120,9 +138,13 @@ int pymcl_sha512_file(const char *path, char hex[129]);
 void pymcl_sha1_bytes(const void *data, size_t n, char hex[41]);
 void pymcl_md5_bytes(const void *data, size_t n, unsigned char out[16]);
 int pymcl_file_matches(const char *path, const char *sha1, long long size);
+/* downloader.py:52 _looks_complete：无 sha1/size 时的兜底校验（非空 / 非 HTML 错误页 / jar、zip 必须 PK） */
+int pymcl_looks_complete(const char *path);
 int pymcl_extract_zip(const char *zip_path, const char *dest);
 int pymcl_extract_jar_natives(const char *jar, const char *dest, cJSON *exclude);
 int pymcl_zip_has(const char *zip_path, const char *inner);
+/* 压缩包内全部非目录条目名（数组，'/'-分隔）；读不出返回 NULL。 */
+cJSON *pymcl_zip_entries(const char *zip_path);
 char *pymcl_zip_read(const char *zip_path, const char *inner, size_t *len);
 int pymcl_zip_extract_one(const char *zip_path, const char *inner, const char *dest);
 int pymcl_open_folder(const char *path);
@@ -158,8 +180,41 @@ cJSON *py_list(const cJSON *v);
 long long py_clamp_int(const cJSON *v, long long lo, long long hi, long long fallback);
 cJSON *rpc_get_settings(void);
 cJSON *sysinfo_collect(int force, int scan_system_java, double max_age);
+
+/* M2 联网模块（rpc_feedback.c / rpc_mod_update.c / rpc_catalog.c） */
+cJSON *backend_last_crash(void);
+/* M3 后台任务（rpc_tasks.c） */
+int zip_create_store(const char **names, const char **paths, int n, const char *dest);
+int task_backup_save_run(pymcl_ctx *ctx, cJSON *args, char *msg, size_t msgn);
+int task_repair_version_run(pymcl_ctx *ctx, cJSON *args, char *msg, size_t msgn);
+int task_export_modpack_run(pymcl_ctx *ctx, cJSON *args, char *msg, size_t msgn);
+int task_authlib_login_run(pymcl_ctx *ctx, cJSON *args, char *msg, size_t msgn);
+int task_nide8_login_run(pymcl_ctx *ctx, cJSON *args, char *msg, size_t msgn);
+int pymcl_collect_file_tree(const char *root, const char *prefix, void *list);
+typedef struct { char rel[PYMCL_PATH]; char abs[PYMCL_PATH]; } pymcl_file_rec;
+typedef struct { pymcl_file_rec *v; int n, cap; } pymcl_file_list;
+int task_export_launch_script_run(pymcl_ctx *ctx, cJSON *args, char *msg, size_t msgn);
+int task_install_java_run(pymcl_ctx *ctx, cJSON *args, char *msg, size_t msgn);
+int task_start_mod_updates_run(pymcl_ctx *ctx, cJSON *args, char *msg, size_t msgn);
+int task_start_self_update_run(pymcl_ctx *ctx, cJSON *args, char *msg, size_t msgn);
+int task_migrate_official_run(pymcl_ctx *ctx, cJSON *args, char *msg, size_t msgn);
+cJSON *rpc_feedback_call(const char *method, cJSON *params, int *handled);
+cJSON *rpc_mod_update_call(const char *method, cJSON *params, int *handled);
+cJSON *rpc_catalog_call(const char *method, cJSON *params, int *handled);
+/* mods.c 导出 */
+cJSON *cf_get(const char *path, const char *query);
+cJSON *cf_post_json(const char *path, const char *json_body);
+cJSON *cf_items_of(cJSON *data);
+void mods_mirror_mr(const char *url, char *out, size_t n);
+const char *mods_detect_loader(const char *inst);
+char *mods_detect_mc(const char *inst);
+/* 只允许访问 dir 的直接子项（挡 ../ / 分隔符 / 盘符 / NTFS 流）；返回 0 时 out
+   里是拼好的路径。ai_agent.c 的 read_artifact 复用它做落点校验（审计 05 P1-5）。 */
+int mods_safe_child_path(const char *dir, const char *filename, char *out, size_t n);
 cJSON *sysinfo_smart_recommendation(void);
 char *sysinfo_format_text(cJSON *info);
+/* mclauncher/preflight.check_launch 原生移植 */
+cJSON *preflight_check_launch(const char *inst, const char *version, int memory_mb, const char *java_exe);
 cJSON *version_settings_load(const char *inst, const char *ver);
 /* version_settings.game_dir：隔离档位下游戏目录是版本目录本身 */
 void version_game_dir(const char *inst, const char *vid, cJSON *s, char *out, size_t n);
@@ -167,7 +222,10 @@ void version_game_dir(const char *inst, const char *vid, cJSON *s, char *out, si
 void version_apply_isolation(const char *inst, const char *vid, cJSON *s);
 /* global_mods.apply：把已启用的全局 jar 链接/复制进游戏 mods，返回处理数量 */
 int global_mods_apply(const char *game_mods_dir);
+/* config_obj 返回内部指针，读改写必须用 config_lock()/config_unlock() 圈住整段 */
 cJSON *config_obj(void);
+void config_lock(void);
+void config_unlock(void);
 cJSON *config_get(const char *key);
 void config_set(const char *key, cJSON *val);
 const char *config_str(const char *key, const char *def);
@@ -195,6 +253,10 @@ int http_get(const char *url, http_resp *r, const char *extra_hdr, int timeout);
 int http_get_query(const char *url, const char *query, http_resp *r, const char *extra_hdr, int timeout);
 int http_post_form(const char *url, const char *form, http_resp *r, int timeout);
 int http_post_json(const char *url, const char *json, http_resp *r, const char *extra_hdr, int timeout);
+/* SSE 流式 POST：sink 逐块收正文，4xx/5xx 也走传输成功，状态码经 out_status 回传。 */
+int http_post_json_stream(const char *url, const char *json, const char *extra_hdr, int timeout,
+                          int (*sink)(void *ud, const char *data, size_t n), void *sink_ud,
+                          int *out_status);
 cJSON *http_get_json(const char *url, int timeout);
 cJSON *http_get_json_hdr(const char *url, const char *extra_hdr, int timeout);
 int http_download_one(const char *url, const char *dest, pymcl_ctx *ctx,
@@ -290,6 +352,16 @@ void game_kill(HANDLE proc);
 /* ---------- auth ---------- */
 cJSON *accounts_load(void);
 void accounts_save(cJSON *root);
+/* 账号令牌的落盘密封，逐字段对齐 mclauncher/auth.py 的 seal_secret / open_secret：
+   access_token / refresh_token 存 "dpapi:<b64>"（CryptProtectData，entropy / 描述串
+   均为 NULL）。accounts_load / accounts_save 内部已自动解封 / 密封，只走这两条路径的
+   调用方不需要自己调用；单独处理令牌串（例如做校验）时才用下面两个。
+   两者都返回 malloc 串，调用方负责 free。 */
+char *account_seal_secret(const char *plain);
+char *account_open_secret(const char *value);
+/* 这个值能不能直接当令牌用（非空且不是 dpapi:/keyring:/unavailable: 引用）。
+   Python 侧等价口径是 open_secret(v) 之后 `v or "0"`。 */
+int account_secret_usable(const char *v);
 cJSON *account_offline(const char *username);
 cJSON *account_offline_skin(const char *username, const char *skin);
 cJSON *account_launch_props(cJSON *acc);
@@ -305,8 +377,15 @@ int catalog_lookup_pack(const char *q, char *slug, size_t ns, long long *cf, cha
 cJSON *search_mods(const char *query, const char *source);
 cJSON *search_modpacks(const char *query, const char *source);
 cJSON *search_content(const char *kind, const char *query, const char *source);
+/* 世界搜索：只有 CurseForge 一个源（classId=17），extra 里的 game_version /
+   category 参与筛选，与 mclauncher/worlds.py 的 search_worlds 对齐。 */
+cJSON *search_worlds(const char *query, const char *source, cJSON *extra);
 int install_mod(const char *instance, const char *name, cJSON *extra, pymcl_ctx *ctx);
 int install_content(const char *kind, const char *instance, const char *name, cJSON *extra, pymcl_ctx *ctx);
+/* 世界安装：本地 path / 直链 url / CurseForge id 三种来源，装进 saves/。
+   msg 回填任务完成文案（对齐 Python 的「已安装世界 {0}」）。 */
+int install_world(const char *instance, const char *name, cJSON *extra, pymcl_ctx *ctx,
+                  char *msg, size_t msgn);
 int install_modpack(const char *name, const char *source, cJSON *extra, pymcl_ctx *ctx);
 cJSON *list_instance_files(const char *instance, const char *subdir);
 int delete_instance_file(const char *instance, const char *subdir, const char *filename);
@@ -317,10 +396,12 @@ void backend_init(sse_emit_fn emit);
 cJSON *backend_call(const char *method, cJSON *params);
 void backend_shutdown(void);
 int server_run(const char *host, int port, const char *token);
-cJSON *py_rpc_call(const char *method, cJSON *params);
-/* 同上，另外回一位 handled：Python 端确实处理了这次调用（成功或抛错）。
+/* Python 回落的唯一入口（开发后端的参考实现，实现在 rpc_extra.c）。
+   默认构建会真起 python native/tools/py_rpc.py；nopy 构建（-DPYMCL_NO_PY）
+   里真实现整段编掉，只返回 NOT_NATIVE 错误——产物中不含 Python 回落的任何符号。
+   另外回一位 handled：确认这次调用归这条路径管（成功或抛错）。
    调用方靠它区分「方法不存在」和「方法跑了但失败了」。 */
-cJSON *py_rpc_call_ex(const char *method, cJSON *params, int *handled);
+cJSON *rpc_fallback_call(const char *method, cJSON *params, int *handled);
 cJSON *rpc_align_call(const char *method, cJSON *params, sse_emit_fn emit, int *handled);
 cJSON *rpc_local_call(const char *method, cJSON *params, sse_emit_fn emit, int *handled);
 cJSON *rpc_content_call(const char *method, cJSON *params, sse_emit_fn emit, int *handled);
@@ -330,6 +411,9 @@ cJSON *rpc_net_call(const char *method, cJSON *params, sse_emit_fn emit, int *ha
 cJSON *rpc_ai_store_call(const char *method, cJSON *params, sse_emit_fn emit, int *handled);
 
 /* ---------- AI（ai_store.c / ai_agent.c） ---------- */
+/* 内置公益网关 base（到 /v1 为止）与令牌：XOR 混淆常量，运行期解码（settings.c） */
+void builtin_gateway_base(char *out, size_t cap);
+void builtin_gateway_key(char *out, size_t cap);
 typedef struct {
     char url[1100];
     char models_url[1100];
@@ -352,6 +436,14 @@ int ai_resolve_endpoint(cJSON *settings, ai_endpoint *ep);
 void ai_err_text(int status, const char *body, char *out, size_t n);
 int ai_is_busy(void);
 cJSON *ai_pending_card(void);
+/* ---------- AI 回合内核（ai_agent.c，bridge/api.py _ai_run + mclauncher/ai/agent.py 原生移植） ---------- */
+cJSON *rpc_ai_agent_call(const char *method, cJSON *params, int *handled);
+/* 后台线程发 SSE 事件（与 backend.c 的 g_emit 同源，任务事件同通道）。 */
+void backend_emit(const char *event, cJSON *data);
+/* preflight.c 内部助手透出（AI 工具执行用）。 */
+int pf_sorted_names_public(const char *dir, char ***out);
+void pf_free_names_public(char **arr, int n);
+void pf_inspect_jar_public(const char *path, cJSON *info);
 /* 启动页布局（layout.c）。*handled = 1 表示方法属于这里，返回 NULL 即出错（pymcl_error 已置）。 */
 cJSON *rpc_layout_call(const char *method, cJSON *params, int *handled);
 

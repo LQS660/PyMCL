@@ -260,12 +260,18 @@ cJSON *rpc_layout_call(const char *method, cJSON *params, int *handled) {
 
     if (strcmp(method, "get_layout") == 0) {
         if (handled) *handled = 1;
-        return layout_state();
+        config_lock();
+        cJSON *st = layout_state();
+        config_unlock();
+        return st;
     }
     if (strcmp(method, "save_layout") == 0) {
         if (handled) *handled = 1;
         cJSON *parsed = parse_doc(cJSON_GetObjectItem(params, "doc"));
         if (!parsed) { pymcl_set_error("不是有效的布局文档"); return NULL; }
+        /* 「读-改-写」整段在 config 锁内：g_cfg 是共享树，出锁改它就会和
+           save_settings / 后台任务撞车（UAF / 撕裂的 config.json）。 */
+        config_lock();
         const char *name = active_profile();
         if (name && name[0]) {
             cJSON *profiles = ensure_profiles_obj();
@@ -276,8 +282,11 @@ cJSON *rpc_layout_call(const char *method, cJSON *params, int *handled) {
         }
         cfg_put("ui_layout", parsed);
         config_save();
+        char prof[256];
+        snprintf(prof, sizeof(prof), "%s", name ? name : "");
+        config_unlock();
         cJSON *o = cJSON_CreateObject();
-        cJSON_AddStringToObject(o, "profile", name ? name : "");
+        cJSON_AddStringToObject(o, "profile", prof);
         return o;
     }
     if (strcmp(method, "save_layout_profile") == 0) {
@@ -290,8 +299,9 @@ cJSON *rpc_layout_call(const char *method, cJSON *params, int *handled) {
         if (!raw || cJSON_IsNull(raw)) doc = load_active_doc();
         else {
             doc = parse_doc(raw);
-            if (!doc) { pymcl_set_error("不是有效的布局文档"); return NULL; }
+            if (!doc) { pymcl_set_error("不是有效的布局文件"); return NULL; }
         }
+        config_lock();
         cJSON *profiles = ensure_profiles_obj();
         if (profiles) {
             cJSON_DeleteItemFromObject(profiles, name);
@@ -300,12 +310,15 @@ cJSON *rpc_layout_call(const char *method, cJSON *params, int *handled) {
         cfg_put("ui_layout_profile", cJSON_CreateString(name));
         cfg_put("ui_layout", doc);
         config_save();
-        return layout_state();
+        cJSON *st = layout_state();
+        config_unlock();
+        return st;
     }
     if (strcmp(method, "activate_layout_profile") == 0) {
         if (handled) *handled = 1;
         char name[256];
         trim_copy(name, sizeof(name), jstr(params, "name", ""));
+        config_lock();
         cJSON *profiles = profiles_obj();
         cJSON *doc = (name[0] && profiles) ? cJSON_GetObjectItem(profiles, name) : NULL;
         if (!name[0] || !cJSON_IsObject(doc)) {
@@ -316,35 +329,47 @@ cJSON *rpc_layout_call(const char *method, cJSON *params, int *handled) {
             cfg_put("ui_layout_profile", cJSON_CreateString(name));
         }
         config_save();
-        return layout_state();
+        cJSON *st = layout_state();
+        config_unlock();
+        return st;
     }
     if (strcmp(method, "delete_layout_profile") == 0) {
         if (handled) *handled = 1;
         char name[256];
         trim_copy(name, sizeof(name), jstr(params, "name", ""));
+        config_lock();
         cJSON *profiles = profiles_obj();
         if (!profiles || !cJSON_GetObjectItem(profiles, name)) {
+            config_unlock();
             pymcl_set_error("布局方案「%s」不存在", name);
             return NULL;
         }
         cJSON_DeleteItemFromObject(profiles, name);
         if (strcmp(active_profile(), name) == 0) reset_active();
         config_save();
-        return layout_state();
+        cJSON *st = layout_state();
+        config_unlock();
+        return st;
     }
     if (strcmp(method, "reset_layout") == 0) {
         if (handled) *handled = 1;
+        config_lock();
         reset_active();
         config_save();
-        return layout_state();
+        cJSON *st = layout_state();
+        config_unlock();
+        return st;
     }
     if (strcmp(method, "import_layout") == 0) {
         if (handled) *handled = 1;
         cJSON *parsed = parse_doc(cJSON_GetObjectItem(params, "doc"));
         if (!parsed) { pymcl_set_error("不是有效的布局文件"); return NULL; }
+        config_lock();
         cfg_put("ui_layout", parsed);
         config_save();
-        return layout_state();
+        cJSON *st = layout_state();
+        config_unlock();
+        return st;
     }
     return NULL;
 }

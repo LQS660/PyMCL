@@ -218,47 +218,37 @@ def subst_native_key(key):
 
 
 def select_native_classifier(lib):
-    """选出当前平台的 natives 分类器名（已替换 ${arch}）。"""
+    """选出当前平台兼容的 natives 分类器名（已替换 ${arch}）。"""
     classifiers = (lib.get("downloads") or {}).get("classifiers") or {}
     natives_map = lib.get("natives") or {}
     wanted = subst_native_key(natives_map.get(utils.OS_NAME))
+    aliases = {"osx": ("osx", "macos"), "windows": ("windows",), "linux": ("linux",)}.get(utils.OS_NAME, ())
+    arch_suffixes = {
+        "x64": ("64", "x64", "x86_64", "amd64"),
+        "x86": ("32", "x86", "i386", "i686"),
+        "arm64": ("arm64", "aarch64"),
+    }.get(utils.ARCH, ())
 
-    if wanted:
-        if wanted in classifiers:
-            return wanted
-        for k in classifiers:
-            if subst_native_key(k) == wanted:
-                return subst_native_key(k)
-        if not classifiers:
-            return wanted
+    def rank(key):
+        for alias in aliases:
+            prefix = "natives-" + alias
+            if key == prefix:
+                # 旧式无架构后缀的 jar 可包含 x86/x64，不能据此推断支持 ARM。
+                return 1 if utils.ARCH in ("x86", "x64") else 0
+            if key.startswith(prefix + "-"):
+                return 2 if key[len(prefix) + 1:] in arch_suffixes else 0
+        return 0
 
-    keys = []
-    for k in classifiers:
-        sk = subst_native_key(k)
-        if sk.startswith("natives-"):
-            keys.append(sk)
-    if not keys:
+    # 只有旧 JSON 缺少 classifiers 元数据时，才按显式映射构造 Maven 路径。
+    if not classifiers:
+        return wanted if wanted and rank(wanted) else None
+
+    keys = [subst_native_key(k) for k in classifiers]
+    if wanted in keys and rank(wanted):
         return wanted
-
-    alias = {"osx": ("osx", "macos"), "windows": ("windows",), "linux": ("linux",)}[utils.OS_NAME]
-    arch = utils.ARCH
-    bits = native_arch_token()
-
-    def score(k):
-        rest = k[len("natives-"):] if k.startswith("natives-") else k
-        s = 0
-        if any(rest == a or rest.startswith(a + "-") for a in alias):
-            s += 2
-        if rest.endswith("-" + bits) or rest.endswith("-" + arch) or arch in rest.split("-"):
-            s += 3
-        elif rest.endswith("-32") or rest.endswith("-64") or rest.endswith("-x86"):
-            s -= 2
-        return s
-
-    keys.sort(key=score, reverse=True)
-    if score(keys[0]) <= 0 and wanted:
-        return wanted
-    return keys[0]
+    # OS/架构必须同时兼容；架构得分不得让其他 OS 的库胜出。
+    compatible = [key for key in keys if rank(key)]
+    return max(compatible, key=rank) if compatible else None
 
 
 def natives_jar_relpath(lib, nkey):

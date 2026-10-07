@@ -94,34 +94,38 @@ def _extract_world(archive: Path, dest_root: Path) -> dict:
         zf = zipfile.ZipFile(archive)
     except zipfile.BadZipFile as exc:
         raise WorldError(f"世界压缩包损坏: {exc}") from exc
-    names = [n.replace("\\", "/") for n in zf.namelist() if n and not n.endswith("/")]
-    if not names:
-        zf.close()
-        raise WorldError("空的世界压缩包")
-    top = set()
-    for n in names:
-        top.add(n.split("/")[0])
     try:
-        _extract_members(zf, dest_root)
+        names = [n.replace("\\", "/") for n in zf.namelist() if n and not n.endswith("/")]
+        if not names:
+            raise WorldError("空的世界压缩包")
+        # Some world zips contain level.dat at the archive root. Minecraft only
+        # recognises saves/<world>/level.dat, not saves/level.dat.
+        paths = [[p for p in n.split("/") if p not in ("", ".")] for n in names]
+        prefix = archive.stem if any(parts == ["level.dat"] for parts in paths) else ""
+        top = {prefix} if prefix else {parts[0] for parts in paths if parts}
+        _extract_members(zf, dest_root, prefix)
+        return {"files": sorted(top), "source": "zip"}
     finally:
         zf.close()
-    return {"files": sorted(top), "source": "zip"}
 
 
-def _extract_members(zf: zipfile.ZipFile, dest_root: Path):
-    """逐个成员解压并校验落点：`extractall` 会照搬 `../` 和绝对路径，
-    一个做过手脚的世界包能写到 saves/ 外面去。"""
+def _extract_members(zf: zipfile.ZipFile, dest_root: Path, prefix: str = ""):
+    """Validate all member paths before writing any files to saves/."""
     root = dest_root.resolve()
+    members = []
     for info in zf.infolist():
         raw = info.filename.replace("\\", "/")
         if not raw or raw.endswith("/"):
             continue
         parts = [p for p in raw.split("/") if p not in ("", ".")]
-        if any(p == ".." for p in parts) or Path(raw).is_absolute() or ":" in parts[0]:
+        if (not parts or any(p == ".." for p in parts)
+                or Path(raw).is_absolute() or ":" in parts[0]):
             raise WorldError(f"世界压缩包含非法路径: {info.filename}")
-        target = (root / Path(*parts)).resolve()
-        if target != root and root not in target.parents:
+        target = (root / prefix / Path(*parts)).resolve()
+        if target == root or root not in target.parents:
             raise WorldError(f"世界压缩包含非法路径: {info.filename}")
+        members.append((info, target))
+    for info, target in members:
         target.parent.mkdir(parents=True, exist_ok=True)
         with zf.open(info) as src, open(target, "wb") as dst:
             shutil.copyfileobj(src, dst)

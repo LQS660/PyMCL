@@ -1,0 +1,1 @@
+[{"tool_calls": [{"id": "call_1", "name": "no_such_tool", "arguments": "{}"}]}, {"deltas": ["工具不存在，我知道了"]}, {"deltas": ["（不该到这）"]}]

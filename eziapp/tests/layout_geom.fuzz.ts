@@ -22,7 +22,20 @@ import {
 // 贴边/取整允许的误差：resizeBy 走 Math.round，联动那侧也有一次取整
 const TOL = 2;
 const GRIDS = [0, 4, 8, 16, 24];
-const SIZES: [number, number][] = [[1400, 900], [1280, 820], [1180, 760], [1600, 1000]];
+/**
+ * 画布尺寸档位（这里是**画布**像素，不是窗口像素）：**必须下探到产品最小窗口**。
+ *
+ * ezi.config.ts 的 minSize 是 980×650，换算成画布约 740×560（宽 = 窗口 − 侧栏
+ * 196 − padding 44，高 = 窗口 − header 56 − 46，且有 .dash-host min-height
+ * 560 兜底）。以前最小只到 1180×760，而 `fitToWindow` 的缺陷区间是画布宽
+ * ≤ 1040 —— 采样完全落在区间外，所以「适应窗口 120 次全过」是假绿。下面把
+ * 1220~1260 的缺陷区间与 740×560 的产品下限都包进来。
+ */
+const SIZES: [number, number][] = [
+  [1400, 900], [1280, 820], [1180, 760], [1600, 1000],
+  [1060, 679], [1040, 667], [1020, 654],   // 窗口 1220~1260 对应的画布
+  [980, 628], [940, 612], [740, 560], [700, 540],
+];
 const ALL_TYPES = Object.keys(CARD_MIN_SIZE);
 
 interface Card { id: string; type: string; rect: Rect; min: [number, number] }
@@ -211,9 +224,16 @@ function fuzzDrag(rng: () => number, rounds: number) {
 }
 
 // ----------------------------------------------------------------------
-// 3. 适应窗口：铺满但不出界、不低于最小尺寸
+// 3. 适应窗口：铺满但不出界、不低于最小尺寸、**且不产生重叠**
+//
+//    重叠这条以前没查，`fitToWindow` 逐卡抬到最小尺寸却不动邻居，缺陷一直在
+//    而测试全绿：默认窗口排好的无重叠布局，窗口缩到 1260 点一次「适应窗口」
+//    就有 23% 变重叠，缩到 1220 时 100%。而它是持久化操作（dashboard.ts 的
+//    `touch(true)` 立即落盘），重叠版式会写进 ui_layout，Qt 打开也是同一份。
 // ----------------------------------------------------------------------
 function fuzzFit(rng: () => number, rounds: number) {
+  let applied = 0;
+  let refused = 0;
   for (let round = 0; round < rounds; round++) {
     const [cw, ch] = SIZES[Math.floor(rng() * SIZES.length)];
     const doc = defaultDoc();
@@ -223,11 +243,60 @@ function fuzzFit(rng: () => number, rounds: number) {
       it.w = 0.12 + rng() * 0.3;
       it.h = 0.12 + rng() * 0.3;
     }
-    fitToWindow(doc, cw, ch);
+    // 起手可以重叠（上面就是随机摆的）；约束只加在**适应窗口之后**
+    const snapshot = JSON.stringify(toDict(doc));
+    const ok = fitToWindow(doc, cw, ch);
     const cards = cardsFromDoc(doc, cw, ch);
+    if (ok) applied++;
+    else refused++;
     checkBoundsAndMin(cards, cw, ch, '适应窗口');
+    const seen = overlapPairs(cards);
+    check(seen.size === 0,
+      `适应窗口产生重叠：${[...seen].join(' ')}（${cw}×${ch}）`);
+    if (!ok) {
+      // 拒绝缩放时文档必须原样不动：否则调用方照样把半成品落盘
+      check(JSON.stringify(toDict(doc)) === snapshot,
+        `适应窗口返回 false 却改了文档（${cw}×${ch}）`);
+    }
   }
-  console.log(`  适应窗口 ${rounds} 次`);
+  console.log(`  适应窗口 ${rounds} 次（落盘 ${applied} / 拒绝 ${refused}）`);
+}
+
+/**
+ * 缺陷的原始触发路径（审计实测）：**在默认窗口上排好一份无重叠布局，把窗口
+ * 拖窄，再点「适应窗口」**。旧算法逐卡抬到最小尺寸却不动邻居，画布宽 ≤ 1040
+ * 就开始成片重叠（1260 → 23.1%，1220 → 100%），而它是持久化操作，重叠版式
+ * 直接落盘。这里复刻这条路径：先在 1080×692 上用 findFreeSpot 排出干净布局，
+ * 再逐档缩小画布各点一次。
+ */
+function fitAfterShrink(rng: () => number, rounds: number) {
+  let applied = 0;
+  let refused = 0;
+  for (let round = 0; round < rounds; round++) {
+    const src = makeLayout(rng, 1080, 692);
+    if (overlapPairs(src).size) continue;   // 起手必须干净，否则不是这条路径
+    for (const [cw, ch] of SIZES) {
+      const doc: LayoutDoc = { version: 1, grid: 8, items: src.map((c) => newItem(c.type, 0, 0, 0.1, 0.1, { id: c.id })) };
+      src.forEach((c, i) => setGeometryPx(doc.items[i], c.rect, 1080, 692));
+      const snapshot = JSON.stringify(toDict(doc));
+      const ok = fitToWindow(doc, cw, ch);
+      if (!ok) {
+        // 塞不下（卡片最小尺寸之和已超画布）：必须原样不动，不写半成品
+        refused++;
+        check(JSON.stringify(toDict(doc)) === snapshot,
+          `缩小后适应返回 false 却改了文档（${cw}×${ch}）`);
+        continue;
+      }
+      applied++;
+      const cards = cardsFromDoc(doc, cw, ch);
+      checkBoundsAndMin(cards, cw, ch, `缩小后适应 ${cw}×${ch}`);
+      const seen = overlapPairs(cards);
+      if (seen.size) {
+        fail(`缩小画布后适应窗口产生重叠：${[...seen].join(' ')}（${cw}×${ch}）`);
+      }
+    }
+  }
+  console.log(`  缩小画布后适应：落盘 ${applied} / 拒绝 ${refused}`);
 }
 
 // ----------------------------------------------------------------------
@@ -334,6 +403,7 @@ scenarios();
 fuzzResize(rng, rounds);
 fuzzDrag(rng, rounds);
 fuzzFit(rng, rounds);
+fitAfterShrink(rng, Math.max(20, rounds >> 2));
 historyInvariants(rng, rounds);
 
 console.log(`\n断言 ${checks} 条，失败 ${failures.length} 条`);

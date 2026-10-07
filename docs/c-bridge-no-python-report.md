@@ -137,3 +137,132 @@ GOAL 文档第 1 节的 55 / 37 / 96 是 M0 基线旧数，已在 GOAL 顶部加
 ## 打包记录（2026-09-26 01:26）
 
 `python _pack_net48.py`（publish 先行刷新，含启动命令弹窗修复）：桌面单文件 `PyMCL.exe` **1,073,144 B（1.02 MB，预算 2.8 MB）**，载荷 xz 0.86 MB / 解开 2.81 MB / 14 文件，尾部 MAGIC 与 zip 完整性校验通过。桌面副本 `PyMCL-20260926-0126.exe`（文件名注明打包时间，精确到分），与 dist 产物 md5 一致（e47503e3…）。载荷含 `native/tools/py_rpc.py` 一枚 .py 文件（Python 回落引导），按计划 M6 移除；`--smoke` 未执行。
+
+## 复基线（2026-09-26 12:05，协同组「02」接手后首扫）
+
+构建：`native\build.bat nopy` → `build\pymcl-bridge-nopy.exe`（静态，无旁路 DLL）。
+命令：`python _c_rpc_coverage.py --json _c_coverage_report.json`。
+
+**覆盖率：161/188 原生**（显式转发 14、隐式转发 13），与 09-26 00:15 复扫一致；工作区含未提交在途改动（`preflight.c`、`ai_agent.c`、`ai_store.c`、`http.c` 等，协同组各线进行中）。
+
+与 00:15 记录的差异（在途改动已生效的部分）：
+
+- `preflight_launch`：explicit_forward → **动态 ok**（`preflight.c` 半成品已接上）
+- `apply_crash_action`：explicit_forward → **动态 ok**
+
+仍未原生（27 个）：
+
+- M5 AI：`ai_answer` `ai_confirm` `ai_send` `ai_stop` `ai_steer`（explicit_forward，动态 not_native）；`ai_rewind`（unknown method）——`ai_agent.c` 主体在途
+- M2 联网：`list_catalog_files`（not_native）、`check_mod_updates` `feedback_history`（unknown method）；`submit_feedback` `submit_crash_feedback` `submit_crash_report` `apply_mod_update`（skipped，静态非原生）
+- M3 后台任务：`backup_save` `repair_version` `export_modpack` `start_authlib_login` `start_nide8_login` `start_mod_updates` `start_self_update` `install_java` `migrate_official_launcher` `export_launch_script`（全部 skipped/静态非原生）
+- M1 残留：`set_account_skin` `create_desktop_shortcut`（skipped，静态非原生）
+
+任务池（协同组 02）：T1 本基线 / T2 对拍框架 / T3 M1 收尾 / T4 M2 / T5+T6 M3 / T8+T9 M5 / T11 无 Python 运行器 / T12 报告维护 / T13 i18n / T4b 陶瓦 / T10 M6 收尾。
+
+## M2 联网功能（2026-09-26 13:40，协同组「02」指挥官完成）
+
+### 新增 C 模块
+
+| 文件 | 方法 |
+|---|---|
+| `native/src/rpc_feedback.c` | `submit_feedback` `submit_crash_feedback` `submit_crash_report` `feedback_history`（device_id 生成/持久化、consent 检查、分类归一、UTF-8 字符截断、历史 30 条滚动，均与 mclauncher/feedback.py 对齐） |
+| `native/src/rpc_mod_update.c` | `check_mod_updates` `apply_mod_update`（Modrinth sha1 → version_file/project 版本过滤；CurseForge murmur2 指纹 → fingerprints；落地校验后才删旧 jar） |
+| `native/src/rpc_catalog.c` | `list_catalog_files`（Modrinth slug+game_versions/loaders 过滤、空结果回退；CurseForge id/slug→files；_row 字段对齐） |
+
+### 录制回放基建（GOAL 4.B「联网方法必须可重复」的落地）
+
+- `native/src/http.c`：`PYMCL_HTTP_REPLAY` 环境变量门控，出网请求改写到回放服务器并带 `X-PyMCL-Replay-Url` 原始地址头
+- `mclauncher/net.py`：Python 桥同款钩子（patch `requests.Session.request`，全局生效）
+- `tests/fixtures/http_replay_server.py`：record（代发真实请求落库）/ play（查库回放）双模式，`tests/fixtures/http_replay_db.json` 为录制库（14 条，可入库复用）
+- 对拍时两侧桥同条件：`PYMCL_HTTP_REPLAY=http://127.0.0.1:18771 PYMCL_FEEDBACK_URL=http://127.0.0.1:18767`
+
+### 对拍结果（`python _c_py_parity.py`，录制与回放两轮一致）
+
+| 方法 | 用例 | 结果 |
+|---|---|---|
+| submit_feedback | 正常/空标题/非法分类 | 3/3 PASS |
+| submit_crash_feedback / submit_crash_report | 正常/无报告 | 2/2 PASS |
+| feedback_history | 空表 | 1/1 PASS |
+| check_mod_updates | 空mods/不存在实例 | 2/2 PASS |
+| list_catalog_files | sodium@1.21.1-fabric（22行逐字段） | 1/1 PASS |
+
+**M2 小计：9/9 用例、6/6 方法全过；回放模式完全离线可复现。** 用例表 219→228 条。
+
+### 顺手修掉的三个真 bug
+
+1. **WinHTTP 查询参数双重转义**：C 桥发 `%5B` 会被 WinHTTP 再转义成 `%255B`，服务端解码一次后拿到非法 JSON 静默忽略过滤参数（mods.c 的 facets 也潜在中招，未动）。新模块改传裸 JSON 数组让 WinHTTP 自行转义一次。
+2. **feedback History ts 粒度**：Python `time.time()` 毫秒 float vs C `time(NULL)` 整秒——用例 ignore 白名单处理（`*.ts`）。
+3. **catalog changelog 截断**：C 快速路径按字节≤4×chars 判断导致 ASCII 串不截断，已改为始终按 UTF-8 字符数截断。
+
+### 当前覆盖率
+
+`python _c_rpc_coverage.py`：**167/188 原生**（M2 全部落位；剩 M3 后台任务 10、M5 AI 6、M1 残留 2、export_crash_report 1）。
+
+## M3 后台任务A（2026-09-26 17:00，协同组「02」指挥官完成）
+
+### 新增模块
+
+| 文件 | 内容 |
+|---|---|
+| `native/src/rpc_tasks.c` | 5 个任务型方法 + 极简 zip 写入器（STORE+CRC32，backup/mrpack 用）：<br>**backup_save**（game_dir 版本隔离档位与 rpc_content.game_dir 同款、时间戳命名、逐文件 progress）<br>**repair_version**（复用 installer.install_version）<br>**export_modpack**（mods sha1→Modrinth version_file 进 index.files，未命中/其余目录进 overrides，modrinth.index.json 字段对齐 export_pack.py，默认文件名用实例规范名）<br>**start_authlib_login / start_nide8_login**（ensure 注入器 jar → Yggdrasil authenticate → dashed uuid 账号落库，执行顺序与 Python 一致：先 ensure 后校验） |
+
+### 对拍（录制+回放两轮一致）
+
+`PYMCL_HTTP_REPLAY=http://127.0.0.1:18771 PYMCL_FEEDBACK_URL=http://127.0.0.1:18767 python _c_py_parity.py --methods submit_feedback,submit_crash_feedback,submit_crash_report,feedback_history,check_mod_updates,list_catalog_files,backup_save,wait_task,export_modpack,start_authlib_login,start_nide8_login`
+
+**M2+M3 合并：18/18 用例、11/11 方法全过；回放（play）模式完全离线可复现。** 用例表 236 条。
+
+### 事件一致性（GOAL 4.C）
+
+对拍框架（`_c_rpc_coverage.py` Bridge + `_c_py_parity.py` run_case）新增 SSE 事件捕获：任务型用例比较两侧 `task_added → progress* → finished → task_count_changed` 事件名序列（折叠连续同名、忽略 log 文本事件），已纳入上述 18 用例。
+
+### 录制回放框架修正
+
+1. key 归一化：`method + unquote(url)`，去掉 body hash（POST 体含 device_id/sysinfo 等两侧必然不同的内容）；两侧桥编码习惯不同（requests 编码 `["…"]`，WinHTTP 原样发）由 unquote 归一。
+2. record 幂等：库中已有记录直接回放，两侧桥不因网络抖动产生差异。
+3. 镜像同步：Python fetch_json 有镜像回退（官方→MCIM），录制库把 MCIM 记录同步为官方同数据——同一上游数据的镜像本就应是同一份 mock 数据。
+4. 夹具 config 预置 `device_id`（两侧请求体一致，回放 key 可命中）。
+
+### 顺手修掉的 bug
+
+- `ensure_authlib_injector` 的 download_url 指针在 cJSON_Delete 后悬空（use-after-free）
+- ensure 误走 `download_file` 的安装校验语义（无校验信息=拒收），改为 http_get 直接落盘（与 Python `dm.download` 无校验语义一致）
+- 备份/mrpack 文件名拼接漏分隔符、export 默认名用传入实例名而非规范名（两处）
+
+## M3 后台任务B（2026-09-26 20:00，协同组「02」指挥官完成）
+
+### 新增模块
+
+| 文件 | 内容 |
+|---|---|
+| `native/src/rpc_tasks2.c` | 5 个任务型方法，尽量复用已原生实现：<br>**export_launch_script**（复用对前端暴露的 build_launch_command；按隔离档位解析游戏目录并调 global_mods_apply，对齐 Python prepare() 的全局模组落位副作用；空 dest 默认 exports/launch-<实例>-<版本>.bat，显式 dest 先 ensure 父目录）<br>**install_java**（仅 adoptium；已有运行时 `java/adoptium-<maj>-<arch>` 短路免下载；zulu/microsoft 报错文案与 Python DownloadError 一致、下载未实现）<br>**start_mod_updates**（复用 check_mod_updates；空列表返回「没有可更新的模组」）<br>**start_self_update**（backend check_update → 无更新返回 message；有更新 http_get 落盘 + BCrypt sha256 终检 + update_staged 事件，包名 PyMCL-<版本>.bin）<br>**migrate_official_launcher**（读真实 %APPDATA%\.minecraft：inheritsFrom 链、libraries/assets 复制、官方账号导入；空目录返回「无版本可导入」） |
+| `include/pymcl.h` | 新增 pymcl_file_rec / pymcl_file_list 共享类型（collect_file_tree 的调用方需要完整类型）；rpc_tasks.c 补 fl_walk 前向声明 |
+
+### 冒烟（5/5）
+
+- export_launch_script：带 version 写出 .bat（offline Player 路径）；无 version 报「请先选择版本」；版本未安装报「版本 9.9.9 未安装，请先安装。」（与 Python launcher.build_launch_command 文案一致）
+- install_java：zulu 路径报「未知的 Java 发行版: zulu」；adoptium 短路返回已有 java
+- start_mod_updates：空实例「没有可更新的模组」
+- start_self_update：无更新路径「已是最新版本」；has_update 完整下载路径实测（mock 清单 → 下载 → BCrypt sha256 终检通过 → staged 落盘，sha 与清单一致）
+- migrate_official_launcher：真实官方目录只有空 cache/runtime → ok「无版本可导入」
+
+### 对拍（录制+回放两轮一致）
+
+- `parity_cases.json` 236 → **250 条**：新增 14 条（5 方法成功/错误路径 + 配对 wait_task，task id task-5..task-11 按用例顺序，任务用例带 events）
+- 夹具：parity_root config 加 `update_url → :18773` 本地 mock；新增 `java/adoptium-17-x64/bin/java.exe` 哑运行时（两侧短路免真实下载）；`build_parity_root.py` 同步（顺带修了缺逗号的语法错误）
+- M2+M3 合并尾部 32 用例：record 轮 21/23 → play 轮 **23/23、10/10 方法全绿**（完全离线可复现）
+
+### 对拍框架修正
+
+1. backup_save 的秒级时间戳 zip 文件名跨秒必挂（两侧各取各自 now()）：run_case 新增 `case.file_norm`（regex 归一化错误文案/返回值与文件变化名再比），该用例与配套 wait_task 挂 `\d{8}-\d{6} → <TS>`。
+2. replay 库 13 → 16 条（self_update 清单等新增 3 条）。
+
+### 编译修复
+
+- build.bat 中 rpc_tasks.c 引号错位（ld 报 Invalid argument）
+- fl_walk 先用后定义、pymcl_file_list 文件私有类型对 rpc_tasks2.c 不可见（提类型入头文件 + 前向声明）
+- export 写出前 ensure 父目录（对齐 Python export_launch_bat 的 ensure_dir(dest.parent)）
+
+### 当前覆盖率
+
+`python _c_rpc_coverage.py`：**177/188 原生**。剩余 11：M5 AI 6（ai_send/ai_answer/ai_confirm/ai_rewind/ai_steer/ai_stop）、M1 残留 2（create_desktop_shortcut / set_account_skin）、显式转发 3（apply_crash_action / preflight_launch / list_catalog_files——C 已挂入口、深层走 Python）。

@@ -39,6 +39,14 @@ typedef struct {
     int is_dir;
 } zip_ent;
 
+/* 解压上限（P1-2 zip bomb）。单文件解压比上限 1000:1，整包解压总量上限 2 GiB——
+   正常 Java 包 / 整合包 / 存档都远在下面，恶意构造的 202 KB → 200 MB 会被挡住。 */
+#define ZIP_MAX_TOTAL_UNCOMP (2ULL * 1024 * 1024 * 1024)
+#define ZIP_MAX_RATIO 1000ULL
+/* 中央目录条目硬上限（P1-1）：EOCD 里的 nrec 是 uint16，最多 65535，一个条目至少 46 字节，
+   所以再按 cd_size/46 收紧，110 字节的 zip 最多算出 2 个条目，不再 calloc 257 MB。 */
+#define ZIP_MAX_ENTRIES 65535u
+
 static int find_eocd(FILE *f, uint32_t *cd_off, uint32_t *cd_size, uint16_t *nrec) {
     if (fseek(f, 0, SEEK_END) != 0) return -1;
     long sz = ftell(f);
@@ -66,18 +74,36 @@ static int read_central(FILE *f, zip_ent **out, int *nout) {
     uint32_t cd_off = 0, cd_size = 0;
     uint16_t nrec = 0;
     if (find_eocd(f, &cd_off, &cd_size, &nrec) != 0) return -1;
+    /* cd_off / cd_size 都是文件里读来的 32 位值，先夹到真实文件长度之内，否则下面
+       fread 会拿到短读、或者 fseek 到文件外。 */
+    if (fseek(f, 0, SEEK_END) != 0) return -1;
+    long fsz = ftell(f);
+    if (fsz < 22) return -1;
+    if ((long long)cd_off + (long long)cd_size > (long long)fsz) {
+        if ((long long)cd_off >= (long long)fsz) return -1;
+        cd_size = (uint32_t)((long long)fsz - (long long)cd_off);
+    }
     if (fseek(f, (long)cd_off, SEEK_SET) != 0) return -1;
     unsigned char *cd = (unsigned char *)malloc(cd_size ? cd_size : 1);
     if (!cd) return -1;
-    if (fread(cd, 1, cd_size, f) != cd_size) { free(cd); return -1; }
-    zip_ent *ents = (zip_ent *)calloc(nrec ? nrec : 1, sizeof(zip_ent));
+    if (cd_size && fread(cd, 1, cd_size, f) != cd_size) { free(cd); return -1; }
+    /* P1-1：条目数按「中央目录至少每个 46 字节」收紧，110 字节的 zip 只能声明 2 个条目。 */
+    uint32_t max_by_size = cd_size / 46u;
+    uint32_t cap = nrec;
+    if (cap > max_by_size) cap = max_by_size;
+    if (cap > ZIP_MAX_ENTRIES) cap = ZIP_MAX_ENTRIES;
+    zip_ent *ents = (zip_ent *)calloc(cap ? cap : 1, sizeof(zip_ent));
+    if (!ents) { free(cd); return -1; }
     int n = 0;
     size_t off = 0;
-    while (off + 46 <= cd_size && n < nrec) {
+    while (off + 46 <= cd_size && n < (int)cap) {
         if (ru32(cd + off) != 0x02014b50u) break;
         uint16_t nl = ru16(cd + off + 28);
         uint16_t el = ru16(cd + off + 30);
         uint16_t cl = ru16(cd + off + 32);
+        /* P0-3：nl/el/cl 全部来自文件内容，必须整体落在 cd_size 之内才能 memcpy，
+           否则越界读最多 4095 字节的堆数据（还会被当路径用）。 */
+        if ((uint64_t)off + 46u + (uint64_t)nl + (uint64_t)el + (uint64_t)cl > (uint64_t)cd_size) break;
         zip_ent *e = &ents[n];
         e->method = ru16(cd + off + 10);
         e->crc = ru32(cd + off + 16);
@@ -94,6 +120,7 @@ static int read_central(FILE *f, zip_ent **out, int *nout) {
         n++;
     }
     free(cd);
+    if (n == 0) { free(ents); return -1; }
     *out = ents;
     *nout = n;
     return 0;
@@ -111,7 +138,27 @@ static int extract_ent(FILE *f, const zip_ent *e, unsigned char **out, size_t *l
         comp = (unsigned char *)malloc(e->comp);
         if (!comp || fread(comp, 1, e->comp, f) != e->comp) { free(comp); return -1; }
     }
-    unsigned char *raw = (unsigned char *)malloc(e->uncomp + 1);
+    /* P0-2：e->uncomp 是文件里读来的 uint32，0xFFFFFFFF 时 (uint32)uncomp + 1 回绕成 0
+       → malloc(0) 返回非 NULL，紧接着 raw[0xFFFFFFFF] = 0 越界写 4 GB。
+       先按「单文件解压比 + 总量」上限校验，再用 size_t 参与算术。 */
+    if (e->uncomp == 0xFFFFFFFFu) {
+        pymcl_set_error("压缩包条目大小非法: %s", e->name);
+        free(comp);
+        return -1;
+    }
+    if (e->uncomp > ZIP_MAX_TOTAL_UNCOMP) {
+        pymcl_set_error("压缩包条目过大: %s (%u 字节)", e->name, e->uncomp);
+        free(comp);
+        return -1;
+    }
+    /* 解压比上限：只对压缩存储（method 8）判，stored 条目的 comp == uncomp 是正常的。 */
+    if (e->method == 8 && e->comp > 0 && (uint64_t)e->uncomp / (uint64_t)e->comp > ZIP_MAX_RATIO) {
+        pymcl_set_error("压缩包解压比异常: %s (%u → %u)", e->name, e->comp, e->uncomp);
+        free(comp);
+        return -1;
+    }
+    size_t need = (size_t)e->uncomp + 1;
+    unsigned char *raw = (unsigned char *)malloc(need);
     if (!raw) { free(comp); return -1; }
     raw[e->uncomp] = 0;
     int ok = -1;
@@ -128,6 +175,45 @@ static int extract_ent(FILE *f, const zip_ent *e, unsigned char **out, size_t *l
     *out = raw;
     *len = e->uncomp;
     return 0;
+}
+
+/* P0-4：条目名只挡 ".." 挡不住盘符 / UNC 绝对路径——pymcl_path_join 见到
+   "C:/..." 或 "//server/..." 会整体丢掉 dest，写到任意位置。这里对每个条目名做
+   三重校验：拒绝盘符、拒绝绝对路径（/ 或 \ 开头）、拒绝任何 ".." 分量。 */
+static int entry_name_safe(const char *name) {
+    if (!name || !name[0]) return 0;
+    if (name[0] == '/' || name[0] == '\\') return 0;
+    if (isalpha((unsigned char)name[0]) && name[1] == ':') return 0;
+    if (strchr(name, ':')) return 0;
+    const char *p = name;
+    while (*p) {
+        const char *seg = p;
+        while (*p && *p != '/') p++;
+        size_t n = (size_t)(p - seg);
+        if (n == 2 && seg[0] == '.' && seg[1] == '.') return 0;
+        if (*p) p++;
+    }
+    return 1;
+}
+
+/* 解压落点的最后一道闸：把拼出来的绝对路径规范化，确认它仍在 dest 之下。
+   条目名已经过滤过一遍，这里是纵深防御（dest 自身可能含 .. / 符号链接）。 */
+static int path_within(const char *base, const char *child) {
+    wchar_t wb[PYMCL_PATH], wc[PYMCL_PATH];
+    wchar_t fb[PYMCL_PATH], fc[PYMCL_PATH];
+    wchar_t *ub = pymcl_u8_to_wide(base), *uc = pymcl_u8_to_wide(child);
+    if (!ub || !uc) { free(ub); free(uc); return 0; }
+    DWORD nb = GetFullPathNameW(ub, PYMCL_PATH, fb, NULL);
+    DWORD nc = GetFullPathNameW(uc, PYMCL_PATH, fc, NULL);
+    free(ub); free(uc);
+    if (!nb || nb >= PYMCL_PATH || !nc || nc >= PYMCL_PATH) return 0;
+    wcsncpy(wb, fb, PYMCL_PATH - 1); wb[PYMCL_PATH - 1] = 0;
+    wcsncpy(wc, fc, PYMCL_PATH - 1); wc[PYMCL_PATH - 1] = 0;
+    size_t lb = wcslen(wb);
+    while (lb > 0 && (wb[lb - 1] == L'\\' || wb[lb - 1] == L'/')) wb[--lb] = 0;
+    if (_wcsnicmp(wc, wb, lb) != 0) return 0;
+    if (wc[lb] && wc[lb] != L'\\' && wc[lb] != L'/') return 0;
+    return 1;
 }
 
 static const zip_ent *find_ent(zip_ent *ents, int n, const char *inner) {
@@ -147,23 +233,50 @@ int pymcl_extract_zip(const char *zip_path, const char *dest) {
         return -1;
     }
     int rc = 0;
+    uint64_t total_out = 0;
     for (int i = 0; i < n; i++) {
-        if (strstr(ents[i].name, "..")) continue;
+        if (!entry_name_safe(ents[i].name)) {
+            pymcl_set_error("压缩包条目名非法: %s", ents[i].name);
+            rc = -1;
+            break;
+        }
         char name[PYMCL_PATH];
         snprintf(name, sizeof(name), "%s", ents[i].name);
         pymcl_replace_char(name, '/', '\\');
         char outp[PYMCL_PATH];
         pymcl_path_join(outp, sizeof(outp), dest, name);
+        if (!path_within(dest, outp)) {
+            pymcl_set_error("压缩包条目逃逸目标目录: %s", ents[i].name);
+            rc = -1;
+            break;
+        }
         if (ents[i].is_dir) { pymcl_ensure_dir(outp); continue; }
+        /* P0-2：0xFFFFFFFF 是回绕值（旧版 (uint32)uncomp + 1 == 0 → malloc(0) + 越界写），
+           单独判一下，别让它落进下面「总量超限」那条泛化的分支，诊断才说得清。 */
+        if (ents[i].uncomp == 0xFFFFFFFFu) {
+            pymcl_set_error("压缩包条目大小非法: %s", ents[i].name);
+            rc = -1;
+            break;
+        }
+        /* P1-2：整包解压总量上限，防多个条目逐个累加到磁盘/内存耗尽。 */
+        if (total_out + (uint64_t)ents[i].uncomp > ZIP_MAX_TOTAL_UNCOMP) {
+            pymcl_set_error("压缩包解压总量超限: %s", zip_path);
+            rc = -1;
+            break;
+        }
         char parent[PYMCL_PATH];
         pymcl_parent(outp, parent, sizeof(parent));
         pymcl_ensure_dir(parent);
         unsigned char *data = NULL; size_t len = 0;
+        pymcl_set_error("%s", "");   /* 清掉上一次调用留下的消息，下面按需重设 */
         if (extract_ent(f, &ents[i], &data, &len) != 0) {
-            pymcl_set_error("解压失败 %s", ents[i].name);
+            /* extract_ent 里的具体原因（解压比 / 条目过大 / 算法不支持）优先，
+               没设过才退回笼统的「解压失败」。 */
+            if (!pymcl_error()[0]) pymcl_set_error("解压失败 %s", ents[i].name);
             rc = -1;
             break;
         }
+        total_out += (uint64_t)len;
         if (pymcl_write_file(outp, data, len) != 0) { free(data); rc = -1; break; }
         free(data);
     }
@@ -179,7 +292,7 @@ int pymcl_extract_jar_natives(const char *jar, const char *dest, cJSON *exclude)
     zip_ent *ents = NULL; int n = 0;
     if (read_central(f, &ents, &n) != 0) { fclose(f); return -1; }
     for (int i = 0; i < n; i++) {
-        if (ents[i].is_dir || strstr(ents[i].name, "..")) continue;
+        if (ents[i].is_dir || !entry_name_safe(ents[i].name)) continue;
         int skip = 0;
         if (cJSON_IsArray(exclude)) {
             cJSON *e;
@@ -193,6 +306,7 @@ int pymcl_extract_jar_natives(const char *jar, const char *dest, cJSON *exclude)
         pymcl_replace_char(name, '/', '\\');
         char outp[PYMCL_PATH];
         pymcl_path_join(outp, sizeof(outp), dest, name);
+        if (!path_within(dest, outp)) continue;
         char parent[PYMCL_PATH];
         pymcl_parent(outp, parent, sizeof(parent));
         pymcl_ensure_dir(parent);
@@ -216,6 +330,26 @@ int pymcl_zip_has(const char *zip_path, const char *inner) {
     free(ents);
     fclose(f);
     return hit;
+}
+
+/* 列出压缩包内全部非目录条目名（'/'-分隔，原样保留大小写），失败返回 NULL。
+   世界安装用它判「level.dat 是不是在根」（Python worlds._extract_world:99-104
+   靠这个决定要不要套一层存档名），顺带取顶层目录名当返回的 files。
+   与 pymcl_extract_zip 同一套安全性口径：非法条目名直接跳过，不返回给调用方。 */
+cJSON *pymcl_zip_entries(const char *zip_path) {
+    FILE *f = fopen_rb(zip_path);
+    if (!f) return NULL;
+    zip_ent *ents = NULL; int n = 0;
+    if (read_central(f, &ents, &n) != 0) { fclose(f); return NULL; }
+    cJSON *out = cJSON_CreateArray();
+    for (int i = 0; i < n; i++) {
+        if (ents[i].is_dir) continue;
+        if (!entry_name_safe(ents[i].name)) continue;
+        cJSON_AddItemToArray(out, cJSON_CreateString(ents[i].name));
+    }
+    free(ents);
+    fclose(f);
+    return out;
 }
 
 char *pymcl_zip_read(const char *zip_path, const char *inner, size_t *len) {

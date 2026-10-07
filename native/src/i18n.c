@@ -149,3 +149,100 @@ void tr_fmt0(char *out, size_t n, const char *key, const char *arg) {
     if (!ph || !arg) { snprintf(out, n, "%s", t); return; }
     snprintf(out, n, "%.*s%s%s", (int)(ph - t), t, arg, ph + 3);
 }
+
+/* ---------------------------------------------------------------- 命名占位符
+
+   Python 侧的模板有两套占位符风格：`{0}` 数字式（tr("…{0}…").format(a)）与
+   `{name}` 命名式（tr("…{name}…").format(name=a)）。词表里两种都有（见
+   _fix-20260928/_out_05_i18n.json 的 named_zh/named_en），tr_fmt0 只认前者，
+   照抄一条命名式的 key 过来就会原样吐出带 {name} 的界面文案。
+
+   下面这两个函数补上命名式：调用方给出 name→value 对，函数按名字替换。 */
+
+/* {xxx} 里的名字最长认到 31 字符（词表里最长的是 filename，8 个字符） */
+#define TR_NAME_MAX 31
+
+/* 从 p 的 '{' 处解析一个 {name}；成功返回 '}' 之后的位置并把名字写进 name，
+   不是合法占位符（空名 / 超长 / 没有 '}' / 名字里有非法字符）返回 NULL。 */
+static const char *parse_named(const char *p, char *name) {
+    if (*p != '{') return NULL;
+    const char *q = p + 1;
+    size_t len = 0;
+    while (*q && *q != '}' && len < TR_NAME_MAX) {
+        char c = *q;
+        if (!(isalnum((unsigned char)c) || c == '_')) return NULL;
+        name[len++] = c;
+        q++;
+    }
+    if (*q != '}' || len == 0 || len >= TR_NAME_MAX) return NULL;
+    name[len] = 0;
+    return q + 1;
+}
+
+static const char *named_value(const char **names, const char **values, int count, const char *name) {
+    for (int i = 0; i < count; i++) {
+        if (names[i] && strcmp(names[i], name) == 0)
+            return values[i] ? values[i] : "";
+    }
+    return NULL;   /* 词表里有、调用方没给：原样留着，别悄悄吃掉 */
+}
+
+/* 一个 UTF-8 字符的字节数。非法首字节按 1 处理，免得把 w 卡住或越读。 */
+static size_t u8_seq_len(unsigned char c) {
+    if (c < 0x80) return 1;
+    if ((c & 0xE0) == 0xC0) return 2;
+    if ((c & 0xF0) == 0xE0) return 3;
+    if ((c & 0xF8) == 0xF0) return 4;
+    return 1;
+}
+
+/* 往 out[w..n-1] 追一个字符串，只写完整的 UTF-8 字符：
+   缓冲区放不下最后一个字符时留空位，宁可截短也不写半个字（否则界面出乱码）。
+   返回新的 w。 */
+static size_t append_u8(char *out, size_t n, size_t w, const char *s) {
+    if (!s) return w;
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        size_t len = u8_seq_len(*p);
+        if (w + len >= n) break;              /* 留给结尾 0 */
+        for (size_t i = 0; i < len && p[i]; i++) out[w++] = (char)p[i];
+        p += len;
+    }
+    return w;
+}
+
+int tr_fmt_named(char *out, size_t n, const char *key,
+                 const char **names, const char **values, int count) {
+    if (!out || n == 0) return 0;
+    const char *t = tr(key);
+    if (!t) { out[0] = 0; return 0; }
+    if (!names || count <= 0) {
+        size_t w = append_u8(out, n, 0, t);
+        out[w] = 0;
+        return (int)w;
+    }
+
+    size_t w = 0;
+    const char *p = t;
+    while (*p) {
+        char name[TR_NAME_MAX + 1];
+        const char *after = (*p == '{') ? parse_named(p, name) : NULL;
+        if (after) {
+            const char *v = named_value(names, values, count, name);
+            if (v) {
+                w = append_u8(out, n, w, v);
+                p = after;
+                continue;
+            }
+        }
+        /* 单字节照抄：多字节字符的续字节（0x80-0xBF）走这里，首字节也走这里，
+           整体仍是「按字符」推进，不会在字符中间停 —— append_u8 只在整字符
+           放不下时才截。 */
+        size_t len = u8_seq_len((unsigned char)*p);
+        if (w + len >= n) break;
+        for (size_t i = 0; i < len && p[i]; i++) out[w++] = p[i];
+        p += len;
+    }
+    out[w] = 0;
+    return (int)w;
+}

@@ -114,6 +114,31 @@ char *pymcl_wide_to_u8(const wchar_t *w) {
     return s;
 }
 
+int pymcl_get_temp_u8(char *out, size_t n) {
+    if (!out || n == 0) return -1;
+    out[0] = 0;
+    wchar_t wtmp[MAX_PATH + 1];
+    DWORD got = GetTempPathW(MAX_PATH, wtmp);   /* 宽字符版：保留中文用户名 */
+    if (got == 0 || got > MAX_PATH) {
+        DWORD need = GetTempPathW(0, NULL);     /* 路径过长时先问长度 */
+        wchar_t *big = (wchar_t *)malloc(((size_t)(need ? need : MAX_PATH) + 2) * sizeof(wchar_t));
+        if (!big) return -1;
+        got = GetTempPathW(need ? need : MAX_PATH, big);
+        if (got == 0) { free(big); return -1; }
+        char *u8 = pymcl_wide_to_u8(big);
+        free(big);
+        if (!u8) return -1;
+        snprintf(out, n, "%s", u8);
+        free(u8);
+        return out[0] ? 0 : -1;
+    }
+    char *u8 = pymcl_wide_to_u8(wtmp);
+    if (!u8) return -1;
+    snprintf(out, n, "%s", u8);
+    free(u8);
+    return out[0] ? 0 : -1;
+}
+
 static int mkdir_one(const char *p) {
     wchar_t *w = pymcl_u8_to_wide(p);
     if (!w) return -1;
@@ -593,6 +618,11 @@ void pymcl_md5_bytes(const void *data, size_t n, unsigned char out[16]) {
     BCryptDestroyHash(hH);
     BCryptCloseAlgorithmProvider(hA, 0);
 }
+/* 「文件是不是已经是对的」：有 sha1/size 就按它校验；两者都没有时只剩「文件在不在」
+   这一个事实——旧版这里返回 size>=0（恒 0），把「无法校验」当成了「校验失败」，
+   于是所有不带哈希的下载（CF 模组 / Adoptium Java / Forge 安装器 / 整合包 / 陶瓦）
+   下载完立刻被 http_download_one 判为校验失败并删掉 .part。无约束时视为匹配，
+   真正的「下完了没」由调用方用 pymcl_looks_complete() 兜底（见 http.c）。 */
 int pymcl_file_matches(const char *path, const char *sha1, long long size) {
     if (!pymcl_file_exists(path)) return 0;
     if (size >= 0 && pymcl_file_size(path) != size) return 0;
@@ -601,7 +631,62 @@ int pymcl_file_matches(const char *path, const char *sha1, long long size) {
         if (pymcl_sha1_file(path, hex) != 0) return 0;
         return _stricmp(hex, sha1) == 0;
     }
-    return size >= 0;
+    return 1;
+}
+
+/* path 以临时后缀（.part / .tmp / .downloading，大小写不敏感）结尾时返回该后缀长度，否则 0。 */
+static size_t tmp_suffix_len(const char *path, size_t len) {
+    static const char *tmp[] = {".part", ".tmp", ".downloading", NULL};
+    for (int k = 0; tmp[k]; k++) {
+        size_t tl = strlen(tmp[k]);
+        if (len >= tl && _stricmp(path + len - tl, tmp[k]) == 0) return tl;
+    }
+    return 0;
+}
+
+/* mclauncher/downloader.py:52 _looks_complete：无 sha1/size 时判断「看起来下完了」——
+   小于 16 字节的空壳、HTML 错误页都算失败，.jar/.zip 必须是 PK 头。
+   扩展名判断必须剥掉 .part/.tmp/.downloading 临时后缀：下载写的是 xxx.zip.part，
+   直接 strrchr(path,'.') 会取到 .part，于是损坏的 zip/jar 绕过 PK 头校验被当成功。
+   Python 参考实现 _looks_complete(part, dest) 用最终目标名 dest 判扩展名；此处按同样
+   语义在本地剥离临时后缀（不依赖 dest，因 http.c:477 也会用 dest 调本函数）。 */
+int pymcl_looks_complete(const char *path) {
+    if (!pymcl_file_exists(path)) return 0;
+    if (pymcl_file_size(path) < 16) return 0;
+    wchar_t *w = pymcl_u8_to_wide(path);
+    FILE *f = w ? _wfopen(w, L"rb") : NULL;
+    free(w);
+    if (!f) return 0;
+    unsigned char head[32];
+    size_t n = fread(head, 1, sizeof(head), f);
+    fclose(f);
+    size_t len = strlen(path);
+    size_t tl;
+    while ((tl = tmp_suffix_len(path, len)) != 0) {
+        len -= tl;
+        while (len > 0 && (path[len - 1] == '.' || path[len - 1] == '/' || path[len - 1] == '\\')) len--;
+    }
+    const char *dot = NULL;
+    for (size_t i = len; i > 0; i--)
+        if (path[i - 1] == '.') { dot = path + i - 1; break; }
+    /* 注意：dot 之后仍是完整路径（可能还有 .part 残留），不能用 _stricmp 直接比——
+       它比到 NUL，".zip.part" 不等于 ".zip"。必须限定在 [dot, path+len) 这段内比较。 */
+    size_t elen = dot ? len - (size_t)(dot - path) : 0;
+    if (dot && elen == 4 &&
+        (_strnicmp(dot, ".jar", 4) == 0 || _strnicmp(dot, ".zip", 4) == 0))
+        return n >= 2 && head[0] == 'P' && head[1] == 'K';
+    size_t i = 0;
+    while (i < n && isspace(head[i])) i++;
+    static const char *bad[] = {"<html", "<!doctype", "error", NULL};
+    for (int k = 0; bad[k]; k++) {
+        size_t bl = strlen(bad[k]);
+        if (n - i < bl) continue;
+        size_t j = 0;
+        for (; j < bl; j++)
+            if (tolower(head[i + j]) != (unsigned char)bad[k][j]) break;
+        if (j == bl) return 0;
+    }
+    return 1;
 }
 
 int pymcl_open_folder(const char *path) {

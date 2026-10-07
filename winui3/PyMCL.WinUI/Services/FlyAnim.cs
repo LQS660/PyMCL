@@ -12,9 +12,27 @@ namespace PyMCL.Services;
 /// <summary>下载飞入：源控件 → 任务导航项抛物线小球 + 落点涟漪。</summary>
 public static class FlyAnim
 {
-    private static readonly List<Storyboard> Jobs = new();
+    /// <summary>
+    /// 在飞的动画连同它的视觉元素。以前只存 <see cref="Storyboard"/>：淘汰时 <c>Stop()</c>
+    /// 不触发 <c>Completed</c>，挂在 Completed 上的「移除元素」就永远不执行，overlay 的
+    /// 子元素只增不减（Jobs 上限 2 挡不住它）。
+    /// </summary>
+    private sealed record Job(Storyboard Sb, UIElement El);
 
-    public static async void FlyTo(
+    private const int MaxFlies = 2;
+    private const int MaxRipples = 8;
+
+    private static readonly List<Job> Jobs = new();
+    private static readonly List<Job> Ripples = new();
+
+    /// <summary>停动画 + 摘元素。淘汰路径必须直接调它，不能等 Completed。</summary>
+    private static void Retire(Panel overlay, Job job)
+    {
+        try { job.Sb.Stop(); } catch { }
+        try { overlay.Children.Remove(job.El); } catch { }
+    }
+
+    public static async Task FlyTo(
         Panel overlay,
         FrameworkElement? source,
         FrameworkElement target,
@@ -30,11 +48,11 @@ public static class FlyAnim
         var end = CenterIn(overlay, target);
         var control = ClampControl(start, end, overlay.ActualWidth, overlay.ActualHeight);
 
-        while (Jobs.Count >= 2)
+        while (Jobs.Count >= MaxFlies)
         {
             var old = Jobs[0];
             Jobs.RemoveAt(0);
-            try { old.Stop(); } catch { }
+            Retire(overlay, old);
         }
 
         var ball = new Border
@@ -98,14 +116,18 @@ public static class FlyAnim
         sb.Children.Add(sAnim);
         sb.Children.Add(sAnimY2);
         sb.Children.Add(oAnim);
-        Jobs.Add(sb);
+
+        var job = new Job(sb, ball);
+        Jobs.Add(job);
 
         var tcs = new TaskCompletionSource();
         sb.Completed += (_, _) => tcs.TrySetResult();
         sb.Begin();
         await tcs.Task;
-        Jobs.Remove(sb);
-        overlay.Children.Remove(ball);
+        // 正常走完：Completed 已触发，但淘汰路径可能先把 job 摘掉了（Stop 后 Completed 不会来，
+        // 这里也不该重复摘）。用 Remove 的返回值判断是不是自己收的尾。
+        if (Jobs.Remove(job))
+            overlay.Children.Remove(ball);
         SpawnRipple(overlay, end, color);
         onLanded?.Invoke();
         _ = Motion.PulseOnceAsync(target);
@@ -127,6 +149,13 @@ public static class FlyAnim
         var tx = new CompositeTransform { TranslateX = center.X - 6, TranslateY = center.Y - 6, ScaleX = 1, ScaleY = 1 };
         ring.RenderTransform = tx;
         Canvas.SetZIndex(ring, 9998);
+        // 涟漪同样登记并设上限：清理挂在 Completed 上，Stop() 后就漏删，反复触发会累积。
+        while (Ripples.Count >= MaxRipples)
+        {
+            var old = Ripples[0];
+            Ripples.RemoveAt(0);
+            Retire(overlay, old);
+        }
         overlay.Children.Add(ring);
         var sb = new Storyboard();
         var dur = new Duration(TimeSpan.FromMilliseconds(420));
@@ -143,7 +172,14 @@ public static class FlyAnim
         sb.Children.Add(sc);
         sb.Children.Add(scY);
         sb.Children.Add(op);
-        sb.Completed += (_, _) => overlay.Children.Remove(ring);
+        var job = new Job(sb, ring);
+        Ripples.Add(job);
+        sb.Completed += (_, _) =>
+        {
+            // 只有还在册的才由这里摘（被上限淘汰过的已经 Retire 掉了）
+            if (Ripples.Remove(job))
+                overlay.Children.Remove(ring);
+        };
         sb.Begin();
     }
 

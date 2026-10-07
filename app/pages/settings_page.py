@@ -7,8 +7,9 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, ComboBox, FluentIcon as FIF, InfoBar, InfoBarPosition,
-    LineEdit, PasswordLineEdit, PrimaryPushButton, PushButton, ScrollArea, SettingCard,
-    SettingCardGroup, Slider, SpinBox, SubtitleLabel, SwitchButton,
+    LineEdit, MessageBoxBase, PasswordLineEdit, PlainTextEdit, PrimaryPushButton,
+    PushButton, ScrollArea, SettingCard, SettingCardGroup, Slider, SpinBox,
+    SubtitleLabel, SwitchButton,
 )
 from mclauncher.i18n import tr
 from ..background import IMAGE_GLOBS, VIDEO_GLOBS
@@ -73,6 +74,23 @@ def _line_card(icon, title, desc, password=False, placeholder=""):
     card.hBoxLayout.addWidget(edit, 0, Qt.AlignRight)
     card.hBoxLayout.addSpacing(16)
     return card, edit
+
+
+# 单个会话日志文件的读取上限：超了只读尾部（最近记录在文件末尾）。
+# 「用量明细」只展示最近 30 条，没必要把整个几十 MB 的文件吞进内存。
+_USAGE_FILE_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _read_tail(path, limit: int) -> str:
+    """读文件末尾 limit 字节；丢掉第一段不完整的行。"""
+    with open(path, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        fh.seek(max(0, size - limit))
+        raw = fh.read(limit)
+    if size > limit:
+        _, _, raw = raw.partition(b"\n")
+    return raw.decode("utf-8", errors="replace")
 
 
 class SettingsPage(QWidget):
@@ -506,9 +524,9 @@ class SettingsPage(QWidget):
         ai_group = SettingCardGroup(tr("AI 助手"), host)
         mode_card = SettingCard(getattr(FIF, "CHAT", None) or FIF.HELP, tr("接入方式"), tr("公益接口已内置，小白不用填密钥"))
         self.ai_mode = ComboBox(mode_card)
-        self.ai_mode.addItems([tr("公益接口"), tr("自定义 NewAPI")])
+        self.ai_mode.addItems([tr("公益接口"), tr("自定义 OpenAI 兼容端点")])
         self.ai_mode.setCurrentText(
-            tr("自定义 NewAPI") if settings.get("ai_mode") == "custom" else tr("公益接口"))
+            tr("自定义 OpenAI 兼容端点") if settings.get("ai_mode") == "custom" else tr("公益接口"))
         self.ai_mode.setFixedWidth(180)
         mode_card.hBoxLayout.addWidget(self.ai_mode, 0, Qt.AlignRight)
         mode_card.hBoxLayout.addSpacing(16)
@@ -516,14 +534,22 @@ class SettingsPage(QWidget):
             FIF.CLOUD_DOWNLOAD, tr("自建网关（可选）"), tr("一般留空，走内置公益接口"))
         self.ai_gateway.setText(settings.get("ai_gateway_url") or "")
         self.base_card, self.ai_base = _line_card(
-            FIF.VIEW, "NewAPI Base URL", tr("自定义模式：填到 /v1 为止"))
+            FIF.VIEW, "OpenAI 兼容端点 Base URL", tr("自定义模式：填到 /v1 为止"))
         self.ai_base.setText(settings.get("ai_base_url") or "")
         self.key_card, self.ai_key = _line_card(
-            FIF.VPN, tr("NewAPI 令牌"), tr("只在自定义模式使用，不要用站长无限额令牌"), password=True)
+            FIF.VPN, tr("OpenAI 兼容端点令牌"), tr("只在自定义模式使用，不要用站长无限额令牌"), password=True)
         self.ai_key.setText(settings.get("ai_api_key") or "")
         self.model_card, self.ai_model = _line_card(
             FIF.EDIT, tr("模型名"), tr("公益模式锁定 deepseek-v4-flash；自定义才改得了"))
         self.ai_model.setText(settings.get("ai_model") or "deepseek-v4-flash")
+        # 模型能力徽章：改模型名即时刷新，让用户知道这个模型收不收图片
+        self.caps_card = SettingCard(
+            getattr(FIF, "PHOTO", FIF.EDIT), tr("模型能力"),
+            tr("自动识别：支持图片输入的模型才会在 AI 助手页开放上传入口"))
+        self.caps_label = CaptionLabel("")
+        self.caps_card.hBoxLayout.addWidget(self.caps_label, 0, Qt.AlignRight)
+        self.caps_card.hBoxLayout.addSpacing(16)
+        self.ai_model.textChanged.connect(lambda *_a: self._refresh_caps())
         self.ctx_card, self.ai_ctx = _line_card(
             FIF.CALENDAR, tr("上下文窗口（token）"),
             tr("模型真实窗口未知时按 128k 保守压缩；实测后可改大"))
@@ -537,6 +563,7 @@ class SettingsPage(QWidget):
         ai_group.addSettingCard(self.base_card)
         ai_group.addSettingCard(self.key_card)
         ai_group.addSettingCard(self.model_card)
+        ai_group.addSettingCard(self.caps_card)
         ai_group.addSettingCard(self.ctx_card)
         ai_group.addSettingCard(self.fb_model_card)
         self.usage_btn = PushButton(tr("用量明细"))
@@ -619,43 +646,100 @@ class SettingsPage(QWidget):
         self.multi_sw.setChecked(bool(settings.get("allow_multi_instance", False)))
 
     def _sync_ai_mode(self, _text=""):
-        custom = self.ai_mode.currentText() == tr("自定义 NewAPI")
+        custom = self.ai_mode.currentText() == tr("自定义 OpenAI 兼容端点")
         self.gw_card.setVisible(not custom)
         self.base_card.setVisible(custom)
         self.key_card.setVisible(custom)
         self.model_card.setVisible(custom)
+        # 能力徽章跟模型名一起显示（公益模式锁定的模型同样有值可看）
+        self.caps_card.setVisible(True)
+        self._refresh_caps()
+
+    def _refresh_caps(self):
+        """模型能力徽章：查内置能力表，自动显示是否支持图片。
+
+        公益模式下模型由网关锁定，这里按 builtin.public_model() 显示，
+        跟 AI 助手页的门控用的是同一份判定（client.supports_image）。
+        """
+        try:
+            from mclauncher.ai import client as ai_client
+            from mclauncher.ai import modelcaps as _mc
+            custom = self.ai_mode.currentText() == tr("自定义 OpenAI 兼容端点")
+            model = (self.ai_model.text().strip() or "deepseek-v4-flash") \
+                if custom else ""
+            if not model:
+                from mclauncher.ai.builtin import public_model
+                model = public_model() or "deepseek-v4-flash"
+            text = _mc.describe(model)
+            if not _mc.supports_image(model):
+                text += "（不支持看图，上传入口已关闭）"
+            self.caps_label.setText(text)
+            self.caps_label.setStyleSheet("")
+        except Exception:  # noqa: BLE001
+            self.caps_label.setText("")
 
     def _show_usage_detail(self):
-        """6.1 设置页用量明细：最近 30 条带真实 usage 的请求（本地日志，不上云）。"""
-        import json as _json
-        from pathlib import Path as _Path
-        from mclauncher import utils as _utils
-        rows = []
-        sessions = _Path(_utils.ROOT) / "cache" / "ai_sessions"
-        try:
-            for f in sorted(sessions.glob("*.jsonl")):
-                for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+        """6.1 设置页用量明细：最近 30 条带真实 usage 的请求（本地日志，不上云）。
+
+        整目录 `read_text` + 逐行 `json.loads` 以前全在槽里同步跑：会话日志
+        累积到几十 MB 时点一下整窗卡死（无进度反馈）。读取走 backend.call_async
+        丢到后台线程，弹窗在回调里开；读取量本身也有上限（只留最近 30 条，
+        且单个文件超过 `_USAGE_FILE_MAX_BYTES` 就只读尾部）。
+        """
+        self.usage_btn.setEnabled(False)
+        self.usage_btn.setText(tr("读取中…"))
+
+        def work():
+            import json as _json
+            from pathlib import Path as _Path
+            from mclauncher import utils as _utils
+            rows = []
+            sessions = _Path(_utils.ROOT) / "cache" / "ai_sessions"
+            try:
+                for f in sorted(sessions.glob("*.jsonl")):
                     try:
-                        e = _json.loads(line)
-                    except ValueError:
+                        if f.stat().st_size > _USAGE_FILE_MAX_BYTES:
+                            text = _read_tail(f, _USAGE_FILE_MAX_BYTES)
+                        else:
+                            text = f.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
                         continue
-                    if e.get("event") == "Usage":
-                        rows.append(e)
-        except OSError:
-            pass
-        rows = rows[-30:][::-1]
-        lines = ([f"{r.get('ts', '')}  输入 {r.get('prompt_tokens', 0)} / "
-                  f"输出 {r.get('completion_tokens', 0)} / 缓存命中 {r.get('cached_tokens', 0)}"]
-                 for r in rows)
-        text = chr(10).join(lines) or tr("暂无用量记录")
-        box = PlainTextEdit()
-        box.setReadOnly(True)
-        box.setPlainText(text)
-        w = MessageBoxBase(self.window() or self)
-        w.viewLayout.addWidget(box)
-        box.setFixedHeight(320)
-        w.titleLabel.setText(tr("最近请求用量"))
-        w.exec()
+                    for line in text.splitlines():
+                        try:
+                            e = _json.loads(line)
+                        except ValueError:
+                            continue
+                        if e.get("event") == "Usage":
+                            rows.append(e)
+            except OSError:
+                pass
+            return rows[-30:][::-1]
+
+        def done(rows):
+            self.usage_btn.setEnabled(True)
+            self.usage_btn.setText(tr("用量明细"))
+            # 注意这里是**生成器**不是生成器套列表：写成 `([...] for r in rows)`
+            # 时方括号把两段相邻 f-string 拼成了一个单元素列表，`chr(10).join()`
+            # 直接 TypeError: sequence item 0: expected str instance, list found
+            # —— 这条以前被更早的 NameError 盖住，点了按钮只看到崩溃框。
+            lines = (f"{r.get('ts', '')}  输入 {r.get('prompt_tokens', 0)} / "
+                     f"输出 {r.get('completion_tokens', 0)} / 缓存命中 {r.get('cached_tokens', 0)}"
+                     for r in rows)
+            text = chr(10).join(lines) or tr("暂无用量记录")
+            box = PlainTextEdit()
+            box.setReadOnly(True)
+            box.setPlainText(text)
+            w = MessageBoxBase(self.window() or self)
+            w.viewLayout.addWidget(box)
+            box.setFixedHeight(320)
+            w.titleLabel.setText(tr("最近请求用量"))
+            w.exec()
+
+        def failed(_message):
+            self.usage_btn.setEnabled(True)
+            self.usage_btn.setText(tr("用量明细"))
+
+        self.backend.call_async(work, done, failed)
 
     def _collect_ctx_window(self) -> int:
         """上下文窗口输入：非法/越界回退 128k 保守默认，别让手滑炸掉保存。"""
@@ -1280,7 +1364,7 @@ class SettingsPage(QWidget):
             "default_resolution": [self.width_spin.value(), self.height_spin.value()],
             "ms_client_id": self.ms_client_edit.text().strip(),
             "curseforge_api_key": self.curse_key_edit.text().strip(),
-            "ai_mode": "custom" if self.ai_mode.currentText() == tr("自定义 NewAPI") else "public",
+            "ai_mode": "custom" if self.ai_mode.currentText() == tr("自定义 OpenAI 兼容端点") else "public",
             "ai_gateway_url": self.ai_gateway.text().strip(),
             "ai_base_url": self.ai_base.text().strip(),
             "ai_api_key": self.ai_key.text().strip(),

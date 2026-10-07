@@ -55,6 +55,8 @@ ICoreWebView2Controller *g_controller = nullptr;
 ICoreWebView2 *g_webview = nullptr;
 int g_exit_code = 0;
 int g_dpi = 96;
+// WM_CLOSE 里已经调过 controller->Close()（要在父窗口销毁之前）；收尾时别再关一次。
+bool g_controller_closed = false;
 
 int dp(int px) { return MulDiv(px, g_dpi, 96); }
 
@@ -247,6 +249,12 @@ LRESULT CALLBACK wnd_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_CLOSE:
+        // WebView2 的 Close() 要在父窗口销毁**之前**调（官方建议；窗口先没
+        // 了再 Close 是反过来的顺序）。WM_DESTROY 里只剩 Release。
+        if (g_controller && !g_controller_closed) {
+            g_controller->Close();
+            g_controller_closed = true;
+        }
         DestroyWindow(w);
         return 0;
     case WM_DESTROY:
@@ -278,23 +286,46 @@ void init_dpi() {
 }
 
 std::wstring exe_dir() {
-    wchar_t buf[MAX_PATH];
-    DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
-    std::wstring p(buf, n);
-    size_t slash = p.find_last_of(L'\\');
-    return slash == std::wstring::npos ? L"." : p.substr(0, slash);
+    // MAX_PATH 定长缓冲在长路径下会被静默截断：GetModuleFileNameW 路径 ≥ 260
+    // 时返回 260 且**不设** ERROR_INSUFFICIENT_BUFFER（Win32 历史行为），
+    // 截断出来的目录会让后面 LoadLibraryW(exe_dir() + "\WebView2Loader.dll")
+    // 找不到 DLL，报成「缺少 WebView2Loader.dll」。所以按返回值判断截断并扩容重试。
+    std::wstring buf(MAX_PATH, L'\0');
+    for (;;) {
+        DWORD n = GetModuleFileNameW(nullptr, buf.data(), (DWORD)buf.size());
+        if (n == 0) return L".";                     // 拿不到路径，退回当前目录
+        if (n < buf.size()) { buf.resize(n); break; }
+        buf.resize(buf.size() * 2);                  // 被截断：扩容重试
+    }
+    size_t slash = buf.find_last_of(L'\\');
+    return slash == std::wstring::npos ? L"." : buf.substr(0, slash);
+}
+
+/** 读环境变量到 wstring；变量不存在或值比缓冲区还长（返回值 ≥ cap）都算失败。 */
+bool read_env(const wchar_t *name, std::wstring &out) {
+    DWORD need = GetEnvironmentVariableW(name, nullptr, 0);
+    if (need == 0) return false;                     // 不存在或读不到
+    std::wstring buf(need, L'\0');
+    DWORD n = GetEnvironmentVariableW(name, buf.data(), need);
+    if (n == 0 || n >= need) return false;           // 期间被改短/改长，别用半截值
+    buf.resize(n);
+    out.swap(buf);
+    return true;
 }
 
 /** 默认的浏览器数据目录：exe 旁边 webview-data，不可写就退到 %LOCALAPPDATA%。 */
 std::wstring default_user_data() {
     std::wstring here = exe_dir() + L"\\webview-data";
     if (CreateDirectoryW(here.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS) return here;
-    wchar_t local[MAX_PATH];
-    if (GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH)) {
-        std::wstring p = std::wstring(local) + L"\\PyMCL\\webview-data";
-        wchar_t parent[MAX_PATH];
-        _snwprintf(parent, MAX_PATH, L"%s\\PyMCL", local);
-        CreateDirectoryW(parent, nullptr);
+    std::wstring local;
+    if (read_env(L"LOCALAPPDATA", local) && !local.empty()) {
+        std::wstring p = local + L"\\PyMCL\\webview-data";
+        // 用 std::wstring 拼接，不再走 _snwprintf：MinGW 下它映射到 UCRT 的
+        // snwprintf，宽字符格式化里 %s 是**窄**串、%ls 才是宽串，原来的
+        // L"%s\\PyMCL" + wchar_t* 是格式串与实参类型不匹配（UB）。MSVC 的
+        // _snwprintf 把 %s 当宽串，所以这行"看起来能跑"，但依赖实现细节。
+        std::wstring parent = local + L"\\PyMCL";
+        CreateDirectoryW(parent.c_str(), nullptr);
         CreateDirectoryW(p.c_str(), nullptr);
         return p;
     }
@@ -345,6 +376,16 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show) {
 
     init_dpi();
     HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(co)) {
+        // 宿主进程可能已被某个 shell 扩展/loader 以 COINIT_MULTITHREADED
+        // 初始化过（返回 RPC_E_CHANGED_MODE）。继续往下走的话，后面
+        // CreateCoreWebView2EnvironmentWithOptions 的 COM 回调可能在错误的
+        // apartment 上派发。这里直接报错退出，别装作没事。
+        MessageBoxW(nullptr,
+                    L"COM 初始化失败（进程可能已被以其他 apartment 模型初始化），界面无法显示。",
+                    L"PyMCL", MB_ICONERROR);
+        return 1;
+    }
 
     WNDCLASSW wc;
     memset(&wc, 0, sizeof(wc));
@@ -410,15 +451,24 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show) {
         return 2;
     }
 
+    // GetMessageW 返回 -1 是错误（不是「没有消息」）：循环条件为假会静默退出，
+    // 而失败时它**不写** msg，接着 `return msg.wParam` 返回的就是栈上垃圾值。
+    // eziapp_launcher.py 用 window.wait() 取退出码，垃圾值会让退出码不可靠。
     MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+    memset(&msg, 0, sizeof(msg));
+    BOOL gm;
+    while ((gm = GetMessageW(&msg, nullptr, 0, 0)) > 0) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
+    }
+    if (gm == -1) {
+        if (!g_exit_code) g_exit_code = 1;
+        msg.wParam = 0;                              // 失败时 msg 未被填充，别读它
     }
 
     if (g_webview) g_webview->Release();
     if (g_controller) {
-        g_controller->Close();
+        if (!g_controller_closed) g_controller->Close();   // WM_CLOSE 里通常已经关过
         g_controller->Release();
     }
     if (SUCCEEDED(co)) CoUninitialize();

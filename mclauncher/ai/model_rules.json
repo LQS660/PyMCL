@@ -1,0 +1,1796 @@
+{
+ "schemaVersion": 1,
+ "source": "ZCode resources/config/provider/zcode-builtin.json (schemaVersion 1, revision 30)",
+ "modelRules": [
+  {
+   "modelMatch": ".*",
+   "config": {
+    "enabled": true,
+    "properties": {
+     "contextWindow": 200000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": false,
+      "supportsVideo": false,
+      "supportsAudio": false,
+      "supportsPdf": false
+     },
+     "outputFormat": {
+      "supportsText": true
+     },
+     "supportsToolCall": true,
+     "supportsJsonSchemaOutput": false,
+     "supportsNativeWebSearch": false,
+     "supportsMidConversationSystem": false
+    }
+   }
+  },
+  {
+   "modelMatch": ".*\\[1m\\]",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000
+    }
+   }
+  },
+  {
+   "modelMatch": ".*(?:ox-alpha|glm-x-preview-f|x-preview-f-free).*"
+  },
+  {
+   "modelMatch": ".*glm-5(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 200000,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*GLM-5\\.2(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*GLM-5-Turbo(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 200000,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-5\\.3(?:-flash)?(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-5\\.3-flash(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true,
+      "supportsPdf": true
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-5\\.1(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 200000,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-5\\.1-highspeed(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 200000,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-5v-turbo(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 200000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-4\\.7(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 200000,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-4\\.7-flashx(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 200000,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-4\\.7-flash(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 200000,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-4\\.6(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 200000,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-4\\.5(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 131072,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-4\\.5-air(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 131072,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-4\\.6v(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 131072,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-4\\.6v-flash(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 131072,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-4\\.6v-flashx(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 131072,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-4\\.1v-thinking-flashx(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 65536,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-4\\.1v-thinking-flash(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 65536,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-4-flashx-250414(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 131072,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-4-flash-250414(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 131072,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*glm-4v-flash(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 16384,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*codegeex-4(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 131072,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*charglm-4(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 8192,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*emohaa(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 8192,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*gpt-5\\.6(?:-(?:sol|terra|luna))?(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1050000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false,
+      "supportsAudio": false,
+      "supportsPdf": true
+     },
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*gpt-5\\.3-codex(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 400000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false,
+      "supportsAudio": false,
+      "supportsPdf": true
+     },
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*gpt-6-astra(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1050000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false,
+      "supportsAudio": false,
+      "supportsPdf": true
+     },
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*gpt-5\\.4(?:-20\\d{2}(?:-?\\d{2}){2})?(?:[:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1050000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false,
+      "supportsAudio": false,
+      "supportsPdf": true
+     },
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*gpt-5\\.4-pro(?:-20\\d{2}(?:-?\\d{2}){2})?(?:[:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1050000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false,
+      "supportsAudio": false,
+      "supportsPdf": true
+     },
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*gpt-5\\.4-mini(?:-20\\d{2}(?:-?\\d{2}){2})?(?:[:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 400000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false,
+      "supportsAudio": false,
+      "supportsPdf": true
+     },
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*gpt-5\\.4-nano(?:-20\\d{2}(?:-?\\d{2}){2})?(?:[:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 400000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false,
+      "supportsAudio": false,
+      "supportsPdf": true
+     },
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*claude-(?:fable|opus|sonnet)-5(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false,
+      "supportsAudio": false,
+      "supportsPdf": true
+     },
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*claude-haiku-4[.-]5(?:-20251001)?(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 200000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false,
+      "supportsAudio": false,
+      "supportsPdf": true
+     },
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*claude-(?:fable|mythos)-5[.-]1(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false,
+      "supportsAudio": false,
+      "supportsPdf": true
+     },
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*grok-4\\.6(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 500000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false,
+      "supportsAudio": false,
+      "supportsPdf": false
+     },
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*grok-build-0\\.1(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 256000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false,
+      "supportsAudio": false,
+      "supportsPdf": false
+     },
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*grok-4\\.3(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false,
+      "supportsAudio": false,
+      "supportsPdf": false
+     },
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*kimi-k3(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1048576,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*k3(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1048576,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*k3-256k(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 262144,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*kimi-k2\\.7-code(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 262144,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*kimi-k2\\.6(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 262144,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*kimi-k2\\.5(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 262144,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*moonshot-v1-8k(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 8192,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*moonshot-v1-32k(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 32768,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*moonshot-v1-128k(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 131072,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*moonshot-v1-8k-vision-preview(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 8192,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*moonshot-v1-32k-vision-preview(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 32768,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*moonshot-v1-128k-vision-preview(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 131072,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*MiniMax-M3(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*MiniMax-M2(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 204800,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*MiniMax-M2\\.7(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 204800,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*MiniMax-M2\\.7-highspeed(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 204800,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*MiniMax-M2\\.5(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 204800,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*MiniMax-M2\\.5-highspeed(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 204800,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*MiniMax-M2\\.1(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 204800,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*MiniMax-M2\\.1-highspeed(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 204800,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*deepseek-v4-flash(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     },
+     "supportsJsonSchemaOutput": false
+    }
+   }
+  },
+  {
+   "modelMatch": ".*deepseek-v4-pro(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     },
+     "supportsJsonSchemaOutput": false
+    }
+   }
+  },
+  {
+   "modelMatch": ".*deepseek-flash(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false
+     },
+     "supportsJsonSchemaOutput": false
+    }
+   }
+  },
+  {
+   "modelMatch": ".*deepseek-v4[.-]1-flash(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": false
+     },
+     "supportsJsonSchemaOutput": false
+    }
+   }
+  },
+  {
+   "modelMatch": ".*qwen3\\.8-(?:max|flash)(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     },
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*qwen3\\.5-plus(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     },
+     "supportsJsonSchemaOutput": false
+    }
+   }
+  },
+  {
+   "modelMatch": ".*qwen3\\.5-flash(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     },
+     "supportsJsonSchemaOutput": false
+    }
+   }
+  },
+  {
+   "modelMatch": ".*qwen3-max(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 262144,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*qwen-plus(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*qwen-flash(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*qwen3-vl-plus(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 262144,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     },
+     "supportsJsonSchemaOutput": false
+    }
+   }
+  },
+  {
+   "modelMatch": ".*qwen3\\.7-max(?:-20\\d{2}(?:-?\\d{2}){2})?(?:[:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     },
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*qwen3\\.7-plus(?:-20\\d{2}(?:-?\\d{2}){2})?(?:[:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     },
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*qwen3\\.7-flash(?:-20\\d{2}(?:-?\\d{2}){2})?(?:[:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     },
+     "supportsJsonSchemaOutput": false
+    }
+   }
+  },
+  {
+   "modelMatch": ".*qwen3\\.6-plus(?:-20\\d{2}(?:-?\\d{2}){2})?(?:[:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     },
+     "supportsJsonSchemaOutput": false
+    }
+   }
+  },
+  {
+   "modelMatch": ".*qwen3\\.6-flash(?:-20\\d{2}(?:-?\\d{2}){2})?(?:[:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     },
+     "supportsJsonSchemaOutput": false
+    }
+   }
+  },
+  {
+   "modelMatch": ".*qwen3\\.7-max-2026-06-08(?:[:/\\[].*)?",
+   "config": {
+    "properties": {
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*qwen3\\.8-omni-flash(?:-20\\d{2}(?:-?\\d{2}){2})?(?:[:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 65536,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true,
+      "supportsAudio": true
+     },
+     "supportsJsonSchemaOutput": false
+    }
+   }
+  },
+  {
+   "modelMatch": ".*mimo-v2\\.5(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true,
+      "supportsAudio": true
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*mimo-v2\\.5-pro(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false,
+      "supportsAudio": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*mimo-v2-pro(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*mimo-v2-omni(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 262144,
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*mimo-v2-flash(?:[.\\-:/\\[].*)?",
+   "config": {
+    "properties": {
+     "contextWindow": 262144,
+     "inputFormat": {
+      "supportsImage": false,
+      "supportsVideo": false
+     }
+    }
+   }
+  }
+ ],
+ "modelApiRules": [
+  {
+   "modelMatch": ".*claude-(?:opus-(?:4[.-]8|5)|(?:fable|mythos)-5(?:[.-]1)?)(?:[.\\-:/\\[].*)?",
+   "apiTypeMatch": "anthropic-messages",
+   "config": {
+    "properties": {
+     "supportsMidConversationSystem": true
+    }
+   }
+  }
+ ],
+ "providerSiteRules": [
+  {
+   "modelMatch": "glm-5\\.3-flash",
+   "apiTypeMatch": "openai-chat-completions",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": true,
+      "supportsVideo": true,
+      "supportsPdf": true,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": true,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "glm-5\\.3",
+   "apiTypeMatch": "openai-chat-completions",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": false,
+      "supportsVideo": false,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": true,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "glm-5\\.2",
+   "apiTypeMatch": "openai-chat-completions",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": false,
+      "supportsVideo": false,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": true,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "glm-5\\.1",
+   "apiTypeMatch": "openai-chat-completions",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 202752,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": false,
+      "supportsVideo": false,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": false,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "kimi-k3",
+   "apiTypeMatch": "openai-chat-completions",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1048576,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": true,
+      "supportsVideo": true,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": true,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "kimi-k2\\.7-code",
+   "apiTypeMatch": "openai-chat-completions",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 262144,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": true,
+      "supportsVideo": true,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": true,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "kimi-k2\\.6",
+   "apiTypeMatch": "openai-chat-completions",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 262144,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": true,
+      "supportsVideo": true,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": false,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "deepseek-v4\\.1-flash",
+   "apiTypeMatch": "openai-chat-completions",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": true,
+      "supportsVideo": false,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": true,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "deepseek-v4-pro",
+   "apiTypeMatch": "openai-chat-completions",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": false,
+      "supportsVideo": false,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": true,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "deepseek-v4-flash",
+   "apiTypeMatch": "openai-chat-completions",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": false,
+      "supportsVideo": false,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": true,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "deepseek-v4-flash-vision-exp",
+   "apiTypeMatch": "openai-chat-completions",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": true,
+      "supportsVideo": false,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": true,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "mimo-v2\\.5",
+   "apiTypeMatch": "openai-chat-completions",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": true,
+      "supportsVideo": true,
+      "supportsPdf": false,
+      "supportsAudio": true
+     },
+     "supportsJsonSchemaOutput": false,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "mimo-v2\\.5-pro",
+   "apiTypeMatch": "openai-chat-completions",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1048576,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": false,
+      "supportsVideo": false,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": false,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "hy4-preview",
+   "apiTypeMatch": "openai-chat-completions",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1024000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": false,
+      "supportsVideo": false,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": false,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "hy3",
+   "apiTypeMatch": "openai-chat-completions",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 256000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": false,
+      "supportsVideo": false,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": false,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "minimax-m3",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": true,
+      "supportsVideo": true,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": false,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "minimax-m2\\.7",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 204800,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": false,
+      "supportsVideo": false,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": false,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "minimax-m2\\.5",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 204800,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": false,
+      "supportsVideo": false,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": false,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "qwen3\\.8-max",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": true,
+      "supportsVideo": true,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": true,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "qwen3\\.8-flash",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": true,
+      "supportsVideo": true,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": true,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "qwen3\\.7-max",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": false,
+      "supportsVideo": false,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": false,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "qwen3\\.7-plus",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": true,
+      "supportsVideo": true,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": false,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "qwen3\\.6-plus",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1000000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": true,
+      "supportsVideo": true,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": false,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "gpt-5\\.6-luna",
+   "apiTypeMatch": "openai-responses",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1050000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": true,
+      "supportsVideo": false,
+      "supportsPdf": true,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": true,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": "grok-4\\.6",
+   "apiTypeMatch": "openai-responses",
+   "baseUrlMatch": "https://opencode\\.ai/zen/go/v1/?",
+   "config": {
+    "properties": {
+     "contextWindow": 500000,
+     "inputFormat": {
+      "supportsText": true,
+      "supportsImage": true,
+      "supportsVideo": false,
+      "supportsPdf": false,
+      "supportsAudio": false
+     },
+     "supportsJsonSchemaOutput": true,
+     "supportsNativeWebSearch": false
+    }
+   }
+  },
+  {
+   "modelMatch": ".*(?:glm-|deepseek-|kimi-k2|qwen|mimo-).*",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://openrouter\\.ai/api(?:/v1)?/?"
+  },
+  {
+   "modelMatch": ".*",
+   "baseUrlMatch": "https://api\\.z\\.ai/api/anthropic/?",
+   "config": {
+    "properties": {
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*",
+   "baseUrlMatch": "https://open\\.bigmodel\\.cn/api/anthropic/?",
+   "config": {
+    "properties": {
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*",
+   "baseUrlMatch": "https://zcode\\.z\\.ai/api/v1/zcode-plan/anthropic/?",
+   "config": {
+    "properties": {
+     "inputFormat": {
+      "supportsImage": true,
+      "supportsVideo": true
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*claude-.*",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "(?:https://api\\.anthropic\\.com/v1)",
+   "config": {
+    "properties": {
+     "supportsNativeWebSearch": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*(?:kimi-k3|k3|k3-256k)(?:[.\\-:/\\[].*)?",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "(?:https://api\\.moonshot\\.cn/anthropic)"
+  },
+  {
+   "modelMatch": ".*",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "(?:https://api\\.deepseek\\.com/anthropic)",
+   "config": {
+    "properties": {
+     "supportsNativeWebSearch": true,
+     "supportsMidConversationSystem": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*gpt-5\\.(?:6(?:-(?:sol|terra|luna))?|3-codex)(?:[.\\-:/\\[].*)?",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://openrouter\\.ai/api(?:/v1)?/?"
+  },
+  {
+   "modelMatch": ".*",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://api\\.z\\.ai/api/anthropic/?",
+   "config": {
+    "properties": {
+     "supportsNativeWebSearch": true,
+     "supportsMidConversationSystem": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://open\\.bigmodel\\.cn/api/anthropic/?",
+   "config": {
+    "properties": {
+     "supportsNativeWebSearch": true,
+     "supportsMidConversationSystem": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://zcode\\.z\\.ai/api/v1/zcode-plan/anthropic/?",
+   "config": {
+    "properties": {
+     "supportsNativeWebSearch": true,
+     "supportsMidConversationSystem": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://zcode\\.z\\.ai/api/v1/off-peak/anthropic/?",
+   "config": {
+    "properties": {
+     "supportsNativeWebSearch": false,
+     "supportsMidConversationSystem": true
+    }
+   }
+  },
+  {
+   "modelMatch": "deepseek-v4-flash",
+   "apiTypeMatch": "openai-responses",
+   "baseUrlMatch": "https://api\\.deepseek\\.com(?:/.*)?",
+   "config": {
+    "properties": {
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": "deepseek-v4-pro",
+   "apiTypeMatch": "openai-responses",
+   "baseUrlMatch": "https://api\\.deepseek\\.com(?:/.*)?",
+   "config": {
+    "properties": {
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": "deepseek-flash",
+   "apiTypeMatch": "openai-responses",
+   "baseUrlMatch": "https://api\\.deepseek\\.com(?:/.*)?",
+   "config": {
+    "properties": {
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": "deepseek-v4-flash(?:-vision-exp)?",
+   "apiTypeMatch": ".*",
+   "baseUrlMatch": "https://api\\.deepseek\\.com(?:/.*)?",
+   "config": {
+    "properties": {
+     "inputFormat": {
+      "supportsImage": true
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*gpt-6-astra(?:[.\\-:/\\[].*)?",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://openrouter\\.ai/api(?:/v1)?/?"
+  },
+  {
+   "modelMatch": ".*gpt-5\\.4(?:-(?:pro|mini|nano))?(?:-20\\d{2}(?:-?\\d{2}){2})?(?:[:/\\[].*)?",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://openrouter\\.ai/api(?:/v1)?/?"
+  },
+  {
+   "modelMatch": ".*deepseek-v4[.-]1-flash(?:[.\\-:/\\[].*)?",
+   "apiTypeMatch": ".*",
+   "baseUrlMatch": "https://openrouter\\.ai/api(?:/v1)?/?",
+   "config": {
+    "properties": {
+     "contextWindow": 1048576,
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*deepseek-v4[.-]1-flash(?:[.\\-:/\\[].*)?",
+   "apiTypeMatch": "openai-chat-completions",
+   "baseUrlMatch": "https://openrouter\\.ai/api(?:/v1)?/?"
+  },
+  {
+   "modelMatch": ".*qwen3\\.(?:7-(?:max|plus|flash)|6-(?:plus|flash))(?:-20\\d{2}(?:-?\\d{2}){2})?(?:[:/\\[].*)?",
+   "apiTypeMatch": "openai-chat-completions",
+   "baseUrlMatch": "https://openrouter\\.ai/api(?:/v1)?/?"
+  },
+  {
+   "modelMatch": ".*qwen3\\.7-flash(?:-20\\d{2}(?:-?\\d{2}){2})?(?:[:/\\[].*)?",
+   "apiTypeMatch": ".*",
+   "baseUrlMatch": "https://openrouter\\.ai/api(?:/v1)?/?"
+  },
+  {
+   "modelMatch": ".*qwen3\\.7-plus(?:-20\\d{2}(?:-?\\d{2}){2})?(?:[:/\\[].*)?",
+   "apiTypeMatch": ".*",
+   "baseUrlMatch": "https://openrouter\\.ai/api(?:/v1)?/?",
+   "config": {
+    "properties": {
+     "inputFormat": {
+      "supportsVideo": false
+     }
+    }
+   }
+  },
+  {
+   "modelMatch": ".*qwen3\\.7-(?:max|plus|flash)(?:-20\\d{2}(?:-?\\d{2}){2})?(?:[:/\\[].*)?",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://dashscope\\.aliyuncs\\.com/apps/anthropic/?",
+   "config": {
+    "properties": {
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": ".*qwen3\\.7-(?:max|plus|flash)(?:-20\\d{2}(?:-?\\d{2}){2})?(?:[:/\\[].*)?",
+   "apiTypeMatch": "anthropic-messages",
+   "baseUrlMatch": "https://dashscope-intl\\.aliyuncs\\.com/apps/anthropic/?",
+   "config": {
+    "properties": {
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  },
+  {
+   "modelMatch": "qwen/qwen3\\.8-max-0902",
+   "apiTypeMatch": ".*",
+   "baseUrlMatch": "https://openrouter\\.ai/api(?:/v1)?/?"
+  },
+  {
+   "modelMatch": "qwen/qwen3\\.6-(?:plus|flash)",
+   "apiTypeMatch": ".*",
+   "baseUrlMatch": "https://openrouter\\.ai/api(?:/v1)?/?",
+   "config": {
+    "properties": {
+     "supportsJsonSchemaOutput": true
+    }
+   }
+  }
+ ]
+}

@@ -1324,6 +1324,196 @@
     "附魔书": {
       "slug": "experience-bottling",
       "title": "Experience Bottling"
+    },
+    "create": {
+      "slug": "create",
+      "cf": 238222,
+      "title": "Create"
+    },
+    "机械动力": {
+      "slug": "create",
+      "cf": 238222,
+      "title": "Create"
+    },
+    "机械动力模组": {
+      "slug": "create",
+      "cf": 238222,
+      "title": "Create"
+    },
+    "机械动力：黄铜协奏曲": {
+      "slug": "create-the-brass-concerto",
+      "title": "Create: The Brass Concerto"
+    },
+    "create brass concerto": {
+      "slug": "create-the-brass-concerto",
+      "title": "Create: The Brass Concerto"
+    },
+    "机械动力附属": {
+      "slug": "create",
+      "cf": 238222,
+      "title": "Create"
+    },
+    "create addon": {
+      "slug": "create",
+      "cf": 238222,
+      "title": "Create"
+    },
+    "create 机械动力": {
+      "slug": "create",
+      "cf": 238222,
+      "title": "Create"
+    },
+    "机械动力中文": {
+      "slug": "create",
+      "cf": 238222,
+      "title": "Create"
+    },
+    "应用能源": {
+      "slug": "ae2",
+      "cf": 223794,
+      "title": "Applied Energistics 2"
+    },
+    "applied energistics": {
+      "slug": "ae2",
+      "cf": 223794,
+      "title": "Applied Energistics 2"
+    },
+    "ae2物品管理器": {
+      "slug": "ae2",
+      "cf": 223794,
+      "title": "Applied Energistics 2"
+    },
+    "应用能源物品管理器": {
+      "slug": "ae2",
+      "cf": 223794,
+      "title": "Applied Energistics 2"
+    },
+    "tinkers": {
+      "slug": "tinkers-construct",
+      "cf": 74072,
+      "title": "Tinkers' Construct"
+    },
+    "industrialcraft": {
+      "slug": "industrial-craft",
+      "cf": 242638,
+      "title": "IndustrialCraft 2"
+    },
+    "工业时代": {
+      "slug": "industrial-craft",
+      "cf": 242638,
+      "title": "IndustrialCraft 2"
+    },
+    "gregtech": {
+      "slug": "gregtech",
+      "title": "GregTech"
+    },
+    "格雷科技": {
+      "slug": "gregtech",
+      "title": "GregTech"
+    },
+    "gregtech community edition": {
+      "slug": "gregtech",
+      "title": "GregTech"
+    },
+    "embeddium": {
+      "slug": "embeddium",
+      "title": "Embeddium"
+    },
+    "rubidium": {
+      "slug": "rubidium",
+      "title": "Rubidium"
+    },
+    "optifabric": {
+      "slug": "optifabric",
+      "title": "OptiFabric"
+    },
+    "高清修复模组": {
+      "slug": "optifine",
+      "title": "OptiFine"
+    },
+    "apple skin": {
+      "slug": "appleskin",
+      "title": "AppleSkin"
+    },
+    "苹果核": {
+      "slug": "appleskin",
+      "title": "AppleSkin"
+    },
+    "hwyla": {
+      "slug": "hwyla",
+      "title": "Hwyla"
+    },
+    "jade物品提示": {
+      "slug": "jade",
+      "title": "Jade"
+    },
+    "旅行地图小地图": {
+      "slug": "journeymap",
+      "title": "JourneyMap"
+    },
+    "xaeros": {
+      "slug": "xaeros-minimap",
+      "title": "Xaero's Minimap"
+    },
+    "chunk loaders": {
+      "slug": "chunk-loaders",
+      "title": "Chunk Loaders"
+    },
+    "虚无世界": {
+      "slug": "divine-rpg",
+      "title": "DivineRPG"
+    },
+    "divine rpg": {
+      "slug": "divine-rpg",
+      "title": "DivineRPG"
+    },
+    "冰与火之歌": {
+      "slug": "ice-and-fire",
+      "title": "Ice and Fire: Dragons"
+    },
+    "ice and fire": {
+      "slug": "ice-and-fire",
+      "title": "Ice and Fire: Dragons"
+    },
+    "alex mobs": {
+      "slug": "alexs-mobs",
+      "title": "Alex's Mobs"
+    },
+    "alexs mobs": {
+      "slug": "alexs-mobs",
+      "title": "Alex's Mobs"
+    },
+    "alex's mobs": {
+      "slug": "alexs-mobs",
+      "title": "Alex's Mobs"
+    },
+    "无尽贪婪": {
+      "slug": "avaritia",
+      "title": "Avaritia"
+    },
+    "avaritia": {
+      "slug": "avaritia",
+      "title": "Avaritia"
+    },
+    "等价交换": {
+      "slug": "projecte",
+      "title": "ProjectE"
+    },
+    "projecte": {
+      "slug": "projecte",
+      "title": "ProjectE"
+    },
+    "mob grinder": {
+      "slug": "mob-grinding-utils",
+      "title": "Mob Grinding Utils"
+    },
+    "geckolib": {
+      "slug": "geckolib",
+      "title": "GeckoLib"
+    },
+    "architectury": {
+      "slug": "architectury-api",
+      "title": "Architectury API"
     }
   },
   "pack_aliases": {
@@ -1763,5 +1953,235 @@
   "cbc_id": 1238396,
   "cbc_slug": "create-the-brass-concerto",
   "cdc_id": 1059094,
-  "cdc_slug": "create-delight-remake"
+  "cdc_slug": "create-delight-remake",
+  "shader_aliases": {
+    "BSL": {
+      "slug": "bsl-shaders",
+      "title": "BSL Shaders"
+    },
+    "bsl光影": {
+      "slug": "bsl-shaders",
+      "title": "BSL Shaders"
+    },
+    "bsl shaders": {
+      "slug": "bsl-shaders",
+      "title": "BSL Shaders"
+    },
+    "Complementary": {
+      "slug": "complementary-reimagined",
+      "title": "Complementary Shaders - Reimagined"
+    },
+    "complementary光影": {
+      "slug": "complementary-reimagined",
+      "title": "Complementary Shaders - Reimagined"
+    },
+    "互补光影": {
+      "slug": "complementary-reimagined",
+      "title": "Complementary Shaders - Reimagined"
+    },
+    "Complementary Reimagined": {
+      "slug": "complementary-reimagined",
+      "title": "Complementary Shaders - Reimagined"
+    },
+    "Complementary Unbound": {
+      "slug": "complementary-unbound",
+      "title": "Complementary Shaders - Unbound"
+    },
+    "Sildurs": {
+      "slug": "sildurs-vibrant-shaders",
+      "title": "Sildur's Vibrant Shaders"
+    },
+    "sildurs光影": {
+      "slug": "sildurs-vibrant-shaders",
+      "title": "Sildur's Vibrant Shaders"
+    },
+    "sildur光影": {
+      "slug": "sildurs-vibrant-shaders",
+      "title": "Sildur's Vibrant Shaders"
+    },
+    "KUDA": {
+      "slug": "kuda-shaders",
+      "title": "KUDA Shaders"
+    },
+    "kuda光影": {
+      "slug": "kuda-shaders",
+      "title": "KUDA Shaders"
+    },
+    "Photon": {
+      "slug": "photon-shader",
+      "title": "Photon Shaders"
+    },
+    "photon光影": {
+      "slug": "photon-shader",
+      "title": "Photon Shaders"
+    },
+    "MakeUp": {
+      "slug": "makeup-ultra-fast-shaders",
+      "title": "MakeUp - Ultra Fast"
+    },
+    "makeup光影": {
+      "slug": "makeup-ultra-fast-shaders",
+      "title": "MakeUp - Ultra Fast"
+    },
+    "Bliss": {
+      "slug": "bliss-shader",
+      "title": "Bliss Shaders"
+    },
+    "bliss光影": {
+      "slug": "bliss-shader",
+      "title": "Bliss Shaders"
+    },
+    "RedHat": {
+      "slug": "redhat-shaders",
+      "title": "RedHat Shaders"
+    },
+    "redhat光影": {
+      "slug": "redhat-shaders",
+      "title": "RedHat Shaders"
+    }
+  },
+  "resourcepack_aliases": {
+    "Faithful": {
+      "slug": "faithful-32x",
+      "title": "Faithful 32x"
+    },
+    "faithful忠实": {
+      "slug": "faithful-32x",
+      "title": "Faithful 32x"
+    },
+    "忠实材质": {
+      "slug": "faithful-32x",
+      "title": "Faithful 32x"
+    },
+    "faithful材质包": {
+      "slug": "faithful-32x",
+      "title": "Faithful 32x"
+    },
+    "Xray": {
+      "slug": "x-ray",
+      "title": "Xray (Spectator X Ray)"
+    },
+    "xray透视": {
+      "slug": "x-ray",
+      "title": "Xray (Spectator X Ray)"
+    },
+    "透视材质": {
+      "slug": "x-ray",
+      "title": "Xray (Spectator X Ray)"
+    },
+    "透视材质包": {
+      "slug": "x-ray",
+      "title": "Xray (Spectator X Ray)"
+    },
+    "Soartex": {
+      "slug": "soartex-grove",
+      "title": "Soartex Grove"
+    },
+    "soartex材质": {
+      "slug": "soartex-grove",
+      "title": "Soartex Grove"
+    },
+    "Bare Bones": {
+      "slug": "bare-bones",
+      "title": "Bare Bones"
+    },
+    "barebones": {
+      "slug": "bare-bones",
+      "title": "Bare Bones"
+    },
+    "简化材质": {
+      "slug": "bare-bones",
+      "title": "Bare Bones"
+    },
+    "Better Leaves": {
+      "slug": "better-leaves",
+      "title": "Better Leaves"
+    },
+    "更好树叶": {
+      "slug": "better-leaves",
+      "title": "Better Leaves"
+    },
+    "Fresh Animations": {
+      "slug": "fresh-animations",
+      "title": "Fresh Animations"
+    },
+    "FreshAnimations": {
+      "slug": "fresh-animations",
+      "title": "Fresh Animations"
+    },
+    "动作优化": {
+      "slug": "fresh-animations",
+      "title": "Fresh Animations"
+    },
+    "Dokucraft": {
+      "slug": "dokucraft-light",
+      "title": "Dokucraft Light"
+    },
+    "Dokucraft Light": {
+      "slug": "dokucraft-light",
+      "title": "Dokucraft Light"
+    }
+  },
+  "datapack_aliases": {
+    "Terralith": {
+      "slug": "terralith",
+      "title": "Terralith"
+    },
+    "terralith地形": {
+      "slug": "terralith",
+      "title": "Terralith"
+    },
+    "地形生成": {
+      "slug": "terralith",
+      "title": "Terralith"
+    },
+    "Towns and Towers": {
+      "slug": "towns-and-towers",
+      "title": "Towns and Towers"
+    },
+    "村庄与塔": {
+      "slug": "towns-and-towers",
+      "title": "Towns and Towers"
+    },
+    "Incendium": {
+      "slug": "incendium",
+      "title": "Incendium"
+    },
+    "incendium地狱": {
+      "slug": "incendium",
+      "title": "Incendium"
+    },
+    "Nullscape": {
+      "slug": "nullscape",
+      "title": "Nullscape"
+    },
+    "nullscape末地": {
+      "slug": "nullscape",
+      "title": "Nullscape"
+    },
+    "Amplified Nether": {
+      "slug": "amplified-nether",
+      "title": "Amplified Nether"
+    },
+    "放大地狱": {
+      "slug": "amplified-nether",
+      "title": "Amplified Nether"
+    },
+    "When Dungeons Arise": {
+      "slug": "when-dungeons-arise",
+      "title": "When Dungeons Arise"
+    },
+    "地牢浮现": {
+      "slug": "when-dungeons-arise",
+      "title": "When Dungeons Arise"
+    },
+    "YUNG's Better Dungeons": {
+      "slug": "yungs-better-dungeons",
+      "title": "YUNG's Better Dungeons"
+    },
+    "yung更好地牢": {
+      "slug": "yungs-better-dungeons",
+      "title": "YUNG's Better Dungeons"
+    }
+  }
 }

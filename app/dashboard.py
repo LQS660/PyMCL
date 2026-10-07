@@ -23,8 +23,8 @@ from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
-    BodyLabel, MessageBoxBase, PrimaryPushButton, PushButton, StrongBodyLabel,
-    SubtitleLabel, ToolButton,
+    BodyLabel, InfoBar, InfoBarPosition, MessageBoxBase, PrimaryPushButton, PushButton,
+    StrongBodyLabel, SubtitleLabel, ToolButton,
 )
 from qfluentwidgets import FluentIcon as FIF
 
@@ -34,6 +34,165 @@ from .layout_model import LayoutDoc, LayoutItem, default_doc, min_size_for
 from . import motion
 
 GRID_CHOICES = [0, 4, 8, 16, 24]
+
+# 标题栏高度：卡片本体最小高 = 正文最小高 + 它。
+# 与 eziapp 的 layout_geom.HEADER_PX 同值：同一份 ui_layout 文档两端读，
+# 一边按「正文 + 40」卡下限、另一边按「正文」卡，窄窗口下 eziapp 会把卡片
+# 抬得比 Qt 高 40px，多顶掉一张卡，两端版式就不一样了。
+HEADER_PX = 40
+
+
+def _card_min_px(card_type: str) -> tuple[int, int]:
+    """卡片**本体**（含标题栏）的最小尺寸，与 DashboardCard.setMinimumSize 同口径。
+
+    `min_size_for` 量的是正文部分；卡片本体矩形比它高一个标题栏。找空位与
+    适应窗口量的都是本体矩形，少算这 40px 就会摆出一个 CSS/Qt 会把控件
+    撑回去的位置，撑回去正好压住下面那张（与 eziapp cardMinPx 对齐）。
+    """
+    mw, mh = min_size_for(card_type)
+    return mw, mh + HEADER_PX
+
+
+# 分离/校验用的容差：贴边取整差个一两像素不算重叠（与 eziapp 的 SEP_EPS /
+# OVERLAP_TOL 同值，两端对同一份文档给出同一结论）。
+_SEP_EPS = 1
+_OVERLAP_TOL = 2
+
+
+def _clamp_rect(r: QRect, mw: int, mh: int, cw: int, ch: int):
+    """把矩形抬到最小尺寸并钳进画布（就地改）。"""
+    mw, mh = min(mw, cw), min(mh, ch)
+    r.setWidth(min(max(r.width(), mw), cw))
+    r.setHeight(min(max(r.height(), mh), ch))
+    r.moveTo(max(0, min(r.x(), max(0, cw - r.width()))),
+             max(0, min(r.y(), max(0, ch - r.height()))))
+
+
+def _split_push(need: int, room_a: int, room_b: int) -> tuple[int, int]:
+    """要把两个矩形分开 need 像素，各自最多能动 room 像素。
+
+    先对半分，剩下的补给还有余量的一边；两边都顶到画布边时返回 (0, 0)。
+    """
+    a = min(room_a, -(-need // 2))          # ceil(need / 2)
+    b = min(room_b, max(0, need - a))
+    rest = need - a - b
+    if rest > 0:
+        extra = min(room_a - a, rest)
+        a += extra
+        rest -= extra
+    if rest > 0:
+        b += min(room_b - b, rest)
+    return a, b
+
+
+def _separate_rects(rects: list[QRect], mins: list[tuple[int, int]], cw: int, ch: int) -> bool:
+    """把互相重叠的矩形沿「重叠较小」的那条轴推开（就地改 rects）。
+
+    推不动（两边都顶到画布边）返回 False。与 eziapp layout_geom.separateRects
+    逐句对齐，两端对同一份文档的适应结果必须一致。
+    """
+    n = len(rects)
+    if n < 2:
+        return True
+    for _pass in range(160):
+        touched = False
+        for i in range(n):
+            for j in range(i + 1, n):
+                a, b = rects[i], rects[j]
+                ox = min(a.x() + a.width(), b.x() + b.width()) - max(a.x(), b.x())
+                oy = min(a.y() + a.height(), b.y() + b.height()) - max(a.y(), b.y())
+                if ox <= _SEP_EPS or oy <= _SEP_EPS:
+                    continue
+                touched = True
+                if ox <= oy:
+                    ma, mb = _split_push(ox + _SEP_EPS, a.x(), cw - (b.x() + b.width()))
+                    if ma == 0 and mb == 0:
+                        return False
+                    a.moveLeft(a.x() - ma)
+                    b.moveLeft(b.x() + mb)
+                else:
+                    ma, mb = _split_push(oy + _SEP_EPS, a.y(), ch - (b.y() + b.height()))
+                    if ma == 0 and mb == 0:
+                        return False
+                    a.moveTop(a.y() - ma)
+                    b.moveTop(b.y() + mb)
+                _clamp_rect(a, mins[i][0], mins[i][1], cw, ch)
+                _clamp_rect(b, mins[j][0], mins[j][1], cw, ch)
+        if not touched:
+            return True
+    return False
+
+
+def _rects_valid(rects: list[QRect], mins: list[tuple[int, int]], cw: int, ch: int) -> bool:
+    """全部卡片：不出画布、不低于最小尺寸、两两不重叠。"""
+    for r, (mw, mh) in zip(rects, mins):
+        mw, mh = min(mw, cw), min(mh, ch)
+        if r.x() < -_OVERLAP_TOL or r.y() < -_OVERLAP_TOL \
+                or r.x() + r.width() > cw + _OVERLAP_TOL or r.y() + r.height() > ch + _OVERLAP_TOL:
+            return False
+        if r.width() < mw - _OVERLAP_TOL or r.height() < mh - _OVERLAP_TOL:
+            return False
+    for i in range(len(rects)):
+        for j in range(i + 1, len(rects)):
+            a, b = rects[i], rects[j]
+            ox = min(a.x() + a.width(), b.x() + b.width()) - max(a.x(), b.x())
+            oy = min(a.y() + a.height(), b.y() + b.height()) - max(a.y(), b.y())
+            if ox > _OVERLAP_TOL and oy > _OVERLAP_TOL:
+                return False
+    return True
+
+
+def _fit_rects(vis, cw: int, ch: int) -> list[QRect] | None:
+    """把可见卡片的联合包围盒等比放大到铺满画布（留 12px 边距）。
+
+    返回每张卡的像素矩形；**画布塞不下时返回 None**（调用方保持原样、不落盘）。
+
+    逐卡抬到最小尺寸那一步会互相压住：等比缩放的结果比某张卡的最小尺寸还小
+    时 `max(mw / cw, …)` 把它抬起来，却没有任何一步动它的邻居，比例位置不变
+    → 成片重叠（与 eziapp layout_geom.fitToWindow 同一套算法、同一个缺陷：
+    默认窗口排好的无重叠布局，窗口缩到 1260 再点「适应窗口」就开始重叠）。
+    所以抬完之后必须再跑一遍分离，推不开就逐步缩小比例重试（缩小的那部分
+    正好变成分离所需的余量）；k=0 时全部卡片都在各自最小尺寸上还分不开，
+    就是真塞不下，只能拒绝。
+    """
+    bx0 = min(it.x for it in vis)
+    by0 = min(it.y for it in vis)
+    bx1 = max(it.x + it.w for it in vis)
+    by1 = max(it.y + it.h for it in vis)
+    bw = max(1e-4, bx1 - bx0)
+    bh = max(1e-4, by1 - by0)
+    for k in _FIT_SCALES:
+        rects, mins = _fit_rects_at(vis, cw, ch, bx0, by0, bw, bh, k)
+        if _separate_rects(rects, mins, cw, ch) and _rects_valid(rects, mins, cw, ch):
+            return rects
+    return None
+
+
+# 「适应窗口」的比例回退序列：先按铺满的理想比例（1.0）试，推不开就缩小重试。
+# 与 eziapp fitToWindow 的同一个数组，两端对同一份文档给出同一结论。
+_FIT_SCALES = (1, 0.97, 0.93, 0.88, 0.82, 0.75, 0.66, 0.55, 0.42, 0.28, 0)
+
+
+def _fit_rects_at(vis, cw: int, ch: int, bx0: float, by0: float,
+                  bw: float, bh: float, k: float) -> tuple[list[QRect], list[tuple[int, int]]]:
+    """按比例因子 k 把包围盒铺进画布，返回 (每张卡的像素矩形, 各自的最小尺寸)。"""
+    mx, my = 12 / cw, 12 / ch
+    sx = (k - 2 * mx) / bw
+    sy = (k - 2 * my) / bh
+    rects: list[QRect] = []
+    mins: list[tuple[int, int]] = []
+    for it in vis:
+        mw, mh = _card_min_px(it.type)
+        mins.append((mw, mh))
+        r = QRect(0, 0, max(mw, int(round(it.w * sx * cw))),
+                  max(mh, int(round(it.h * sy * ch))))
+        _clamp_rect(r, mw, mh, cw, ch)
+        r.moveTo(int(round((mx + (it.x - bx0) * sx) * cw)),
+                 int(round((my + (it.y - by0) * sy) * ch)))
+        _clamp_rect(r, mw, mh, cw, ch)
+        rects.append(r)
+    return rects, mins
+
 
 # 新增卡片时各类型的默认几何（画布比例）
 # 第二栏（y）起自 0.32：横幅在默认版式里占到 0.30，而矮窗口下它还会被自己
@@ -213,8 +372,8 @@ class DashboardCard(QFrame):
 
         # 类型兜底最小值 + 标题栏高度（banner 的正文最小值 155 < 兜底
         # 186，进度条/状态行不会被压扁——黑线回归见 banner.no_squeeze）
-        mw, mh = min_size_for(item.type)
-        self.setMinimumSize(mw, mh + 40)
+        mw, mh = _card_min_px(item.type)
+        self.setMinimumSize(mw, mh)
         self.restyle()
 
     # ---- 公共 ----
@@ -785,10 +944,10 @@ class DashboardCanvas(QWidget):
 
     def _find_free_spot(self, card_type: str, fx, fy, fw, fh) -> tuple[int, int, int, int]:
         cw, ch = max(1, self.width()), max(1, self.height())
-        w = max(min_size_for(card_type)[0], int(fw * cw))
-        h = max(min_size_for(card_type)[1], int(fh * ch))
-        w = min(w, cw - 16)
-        h = min(h, ch - 16)
+        w = max(_card_min_px(card_type)[0], int(fw * cw))
+        h = max(_card_min_px(card_type)[1], int(fh * ch))
+        w = max(1, min(w, cw - 16))
+        h = max(1, min(h, ch - 16))
         rects = [QRect(c.x(), c.y(), c.width(), c.height()) for c in self.cards]
 
         def free(r: QRect, pad: int = 8) -> bool:
@@ -816,26 +975,24 @@ class DashboardCanvas(QWidget):
         return px, py, w, h
 
     def fit_to_window(self):
-        """把可见卡片的联合包围盒等比放大到铺满画布（留边距）。"""
+        """把可见卡片的联合包围盒等比放大到铺满画布（留边距）。
+
+        算法在模块级 `_fit_rects` 里（测试直接调它，不必起真窗口）；这里只负责
+        落盘与提示。抬完最小尺寸后仍摆不开就整盘放弃并提示，不写重叠版式。
+        """
         cw, ch = max(1, self.width()), max(1, self.height())
         vis = self.doc.visible_items()
         if not vis:
             return
-        bx0 = min(it.x for it in vis)
-        by0 = min(it.y for it in vis)
-        bx1 = max(it.x + it.w for it in vis)
-        by1 = max(it.y + it.h for it in vis)
-        bw = max(1e-4, bx1 - bx0)
-        bh = max(1e-4, by1 - by0)
-        m = 12 / cw, 12 / ch
-        sx = (1.0 - 2 * m[0]) / bw
-        sy = (1.0 - 2 * m[1]) / bh
-        for it in vis:
-            mw, mh = min_size_for(it.type)
-            it.x = m[0] + (it.x - bx0) * sx
-            it.y = m[1] + (it.y - by0) * sy
-            it.w = max(mw / cw, it.w * sx)
-            it.h = max(mh / ch, it.h * sy)
+        rects = _fit_rects(vis, cw, ch)
+        if rects is None:
+            # 画布塞不下（卡片最小尺寸之和已超画布）：保持原样，别写出重叠版式
+            InfoBar.warning(tr("窗口太小"), tr("当前窗口放不下这些卡片，先拉大窗口再适应。"),
+                            parent=self.window(), position=InfoBarPosition.TOP,
+                            duration=3000)
+            return
+        for it, r in zip(vis, rects):
+            it.set_geometry_px(r.x(), r.y(), r.width(), r.height(), (cw, ch))
         self._rebuild()
         self._touch(structural=True)
 

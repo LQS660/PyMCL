@@ -49,8 +49,8 @@ def _free_bytes(path):
         return None
 
 
-def _looks_complete(path) -> bool:
-    """无 sha1/size 时：拒绝空文件和 HTML 错误页，jar/zip 必须是 PK。"""
+def _looks_complete(path, dest=None) -> bool:
+    """无哈希时拒绝空文件和 HTML 错误页；按最终文件名检查 jar/zip。"""
     p = Path(path)
     try:
         size = p.stat().st_size
@@ -63,7 +63,7 @@ def _looks_complete(path) -> bool:
             head = f.read(32)
     except OSError:
         return False
-    if p.suffix.lower() in (".jar", ".zip"):
+    if Path(dest if dest is not None else p).suffix.lower() in (".jar", ".zip"):
         return head.startswith(b"PK")
     stripped = head.lstrip().lower()
     return not stripped.startswith((b"<html", b"<!doctype", b"error"))
@@ -352,6 +352,9 @@ class DownloadManager:
                 if utils.file_matches(dest, sha1, size, sha256=sha256):
                     if not sha512 or utils.sha512_file(dest).lower() == str(sha512).lower():
                         return dest, True
+            elif sha512:
+                if dest.is_file() and utils.sha512_file(dest).lower() == str(sha512).lower():
+                    return dest, True
             elif dest.is_file() and _looks_complete(dest):
                 return dest, True
 
@@ -417,8 +420,17 @@ class DownloadManager:
                             cl_n = int(resp.headers.get("Content-Length") or 0)
                         except (TypeError, ValueError):
                             cl_n = 0
-                        if resume:
-                            expected = have + cl_n if cl_n else int(size or 0)
+                        if code == 206:
+                            content_range = str(resp.headers.get("Content-Range") or "")
+                            match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", content_range.strip(), re.I)
+                            if not resume or not match:
+                                raise DownloadError(f"无效 Content-Range: {url} ({content_range})")
+                            start, end, total = map(int, match.groups())
+                            if (start != have or end < start or end + 1 != total
+                                    or (size is not None and total != int(size))
+                                    or ("Content-Length" in resp.headers and cl_n != end - start + 1)):
+                                raise DownloadError(f"无效 Content-Range: {url} ({content_range})")
+                            expected = total
                         else:
                             expected = cl_n or int(size or 0)
                         self.tracker.http_ok(resp.status_code, expected, key)
@@ -455,28 +467,20 @@ class DownloadManager:
                                     self.tracker.transfer(key, got, expected)
                                     self._notify_progress()
                                     self._pace(len(chunk))
-                        if expected and got != expected and not (sha1 or sha256 or sha512):
+                        if expected and got != expected and (code == 206 or not (sha1 or sha256 or sha512)):
                             raise DownloadError(f"下载不完整 {url} ({got}/{expected})")
                     self.tracker.verify(dest.name)
                     self._notify_progress(force=True)
-                    if hasher_sha1:
-                        if hasher_sha1.hexdigest() != str(sha1).lower():
-                            raise DownloadError(f"校验失败: {url} (期望 sha1={sha1}, size={size})")
-                    elif sha1 or sha256 or size is not None:
-                        if not utils.file_matches(part, sha1, size, sha256=sha256):
-                            raise DownloadError(f"校验失败: {url} (期望 sha1={sha1}, size={size})")
-                    if hasher_sha256:
-                        if hasher_sha256.hexdigest() != str(sha256).lower():
-                            raise DownloadError(f"sha256 校验失败: {url}")
-                    elif sha256 and utils.sha256_file(part).lower() != str(sha256).lower():
+                    if size is not None and got != int(size):
+                        raise DownloadError(f"大小校验失败: {url} (期望 size={size}, 实际 {got})")
+                    if hasher_sha1 and hasher_sha1.hexdigest() != str(sha1).lower():
+                        raise DownloadError(f"sha1 校验失败: {url}")
+                    if hasher_sha256 and hasher_sha256.hexdigest() != str(sha256).lower():
                         raise DownloadError(f"sha256 校验失败: {url}")
-                    elif not _looks_complete(part):
-                        raise DownloadError(f"下载内容无效: {url}")
-                    if hasher_sha512:
-                        if hasher_sha512.hexdigest() != sha512.lower():
-                            raise DownloadError(f"sha512 校验失败: {url}")
-                    elif sha512 and utils.sha512_file(part) != sha512.lower():
+                    if hasher_sha512 and hasher_sha512.hexdigest() != str(sha512).lower():
                         raise DownloadError(f"sha512 校验失败: {url}")
+                    if not (sha1 or sha256 or sha512) and not _looks_complete(part, dest):
+                        raise DownloadError(f"下载内容无效: {url}")
                     os.replace(part, dest)
                     return dest, False
                 except DownloadError as e:

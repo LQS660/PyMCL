@@ -230,7 +230,38 @@ class Handler(BaseHTTPRequestHandler):
                 "model": NEWAPI_MODEL,
             }, ensure_ascii=False).encode("utf-8"))
             return
+        if path == "/pymcl/models":
+            self._list_models()
+            return
         self._err(404, "not found")
+
+    def _list_models(self):
+        """返回可用模型清单，供启动器设置页下拉框填充。
+
+        优先代理上游 NewAPI 的 /v1/models（拿到的是实时可用列表）；上游没配或
+        拉取失败时退回「网关已配置的模型清单」，至少保证下拉框不为空。
+        """
+        if NEWAPI_BASE and NEWAPI_KEY:
+            req = Request(
+                NEWAPI_BASE + "/models",
+                method="GET",
+                headers={"Authorization": "Bearer " + NEWAPI_KEY},
+            )
+            try:
+                with urlopen(req, timeout=15) as resp:
+                    raw = resp.read()
+                data = json.loads(raw.decode("utf-8", errors="replace"))
+                if isinstance(data, dict) and isinstance(data.get("data"), list):
+                    self._send(200, raw)
+                    return
+            except (HTTPError, URLError, ValueError, OSError):
+                pass  # 继续走兜底
+        fallback = sorted({m for m in (NEWAPI_MODEL, DEGRADE_MODEL) if m})
+        self._send(200, json.dumps({
+            "object": "list",
+            "data": [{"id": m, "object": "model"} for m in fallback],
+            "source": "gateway-config",
+        }, ensure_ascii=False).encode("utf-8"))
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]

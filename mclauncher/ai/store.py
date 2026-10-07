@@ -17,7 +17,8 @@ MAX_CHATS = 40
 MAX_MESSAGES = 200
 
 # note = 「为什么停」的提示，只给界面渲染；api_messages 不会把它喂给模型
-_KEEP_FIELDS = ("tool_calls", "tool_call_id", "name", "id", "note")
+# images = 该条消息附带的图片路径（只存路径，不存 base64；见 agent._persisted）
+_KEEP_FIELDS = ("tool_calls", "tool_call_id", "name", "id", "note", "images")
 
 # 被内核读到的运行中插话，入库时带这个前缀的 id（内核导出 turn_messages 时补上）
 STEER_ID_PREFIX = "steer_"
@@ -160,7 +161,12 @@ def api_messages(messages: list) -> list:
                 entry["tool_calls"] = m["tool_calls"]
             out.append(entry)
         elif role == "user":
-            out.append({"role": "user", "content": m.get("content") or ""})
+            entry = {"role": "user", "content": m.get("content") or ""}
+            # 图片路径跟着历史走：client 层按当前模型能力决定编码还是剥离，
+            # 所以历史里的图片在新模型下同样会自动适配（不用重发）
+            if m.get("images"):
+                entry["images"] = list(m["images"])
+            out.append(entry)
     # 切片可能把 tool 消息切到它前面的 assistant.tool_calls 之前，补丁在这里兜住
     while out and out[0].get("role") == "tool":
         out.pop(0)

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import platform
+import posixpath
 import re
 import shutil
 import stat
@@ -141,6 +142,98 @@ def unc_twin(path) -> str:
 
 
 # ---------------------------------------------------------------- 目录与文件
+
+class PathEscapeError(ValueError):
+    """路径片段试图逃出基目录（`../`、绝对路径、盘符、非法字符）。"""
+
+
+def safe_version_id(raw, what="版本 ID") -> str:
+    """版本 ID 只能是 `versions/` 下的一个目录名。
+
+    审计 #1：`version_ops.rename_version` / `version_settings._file` 把未校验的
+    版本 ID 直接拼进路径，`../<目录>` 能读到、写到、甚至删掉游戏目录之外的路径。
+    `installer.uninstall_version` 早就有这套校验，这里抽出来给其余调用点共用。
+    """
+    vid = str(raw or "").strip()
+    if not vid or vid in (".", "..") or any(ch in vid for ch in "/\\") or ":" in vid:
+        raise PathEscapeError(f"非法{what}: {raw!r}")
+    return vid
+
+
+def safe_child_path(base, name, what="路径") -> Path:
+    """只允许访问 `base` 的直接子项，挡掉 `../` 与绝对路径。
+
+    校验方式与 `saves._safe_child` / `mods._mod_file_at` /
+    `content_export.source_path` 的既有实现一致：`resolve()` 之后比对父目录。
+    返回的是**未 resolve** 的 `base / name`，与各调用点原来的返回值保持一致
+    （Windows 上 `resolve()` 会把 `Administrator` 换成 `ADMINI~1`，直接返回解析
+    结果会让 `game_dir` 之类函数的返回值悄悄变样）。调用方自己决定把
+    `PathEscapeError` 包成哪个模块的异常。
+    """
+    folder = Path(base)
+    try:
+        resolved_folder = folder.resolve()
+        resolved = (folder / str(name)).resolve()
+    except OSError as exc:  # 非法字符 / 路径过长
+        raise PathEscapeError(f"非法{what}: {name!r}") from exc
+    if resolved.parent != resolved_folder:
+        raise PathEscapeError(f"非法{what}: {name!r}")
+    return folder / str(name)
+
+
+# ---------------------------------------------------------------- 路径拼写归一
+#
+# 审计 05 P0-1 / P1-1：权限规则与执行护栏必须在**同一个名字**上做比较。
+# Windows 会把同一批写法归一到同一个文件：
+#   ./jei.toml  .\jei.toml  jei.toml.  jei.toml␠  sub/../jei.toml  JEI.TOML
+# 判权只做字符串相等（大小写已折叠）时，模型把 path 写成上面任一种就能绕过用户
+# 设的 DENY 规则，落到 acceptEdits/edit/build/yolo 的默认 ALLOW，执行层照单执行。
+# 反过来，`mods._mod_file_at` 用 `.resolve()` 归一，护栏与判权看到的名字不一致。
+
+# 只有「看起来像路径」的内容才做路径归一：模组 slug（sodium）、版本号（1.20.1）
+# 这类标识不能被 normpath 改写。判据 = 含分隔符、以 ./ .\ 开头、含 ..，
+# 或尾部有点/空格（Windows 会把这些吃掉，是等价拼写的典型特征）。
+def looks_like_path_spelling(text) -> bool:
+    s = str(text or "")
+    return ("/" in s or "\\" in s
+            or s.startswith("./") or s.startswith(".\\")
+            or ".." in s
+            or s != s.rstrip(" ."))
+
+
+# 兼容旧名（下划线版），内部实现同一个
+_looks_like_path = looks_like_path_spelling
+
+
+def norm_path_spelling(text) -> str:
+    """把一个「可能是路径」的字符串归一到可比较的规范形式。
+
+    - 统一分隔符（`\\` → `/`）
+    - 消解 `.` 与 `..`（`posixpath.normpath`；**不用** `Path.resolve()`——它会碰
+      文件系统，对不存在的路径行为不一致，判权阶段不能有 I/O）
+    - 去掉 Windows 尾部的点与空格（`jei.toml.` → `jei.toml`），逐个分量都去；
+      单独的 `.` / `..` 分量本身不动（它们有路径语义）
+    - 折叠连续空白 + casefold（沿用 `_norm_content` 的原口径）
+
+    不像路径的内容（模组 slug / 版本号 / 查询词）原样返回，只做空白与大小写归一。
+    """
+    raw = " ".join(str(text or "").split()).casefold()
+    if not raw:
+        return ""
+    if not looks_like_path_spelling(raw):
+        return raw
+    parts = []
+    for part in raw.replace("\\", "/").split("/"):
+        if part in (".", ".."):
+            parts.append(part)
+        else:
+            # Windows 对每个分量的尾部点/空格都做归一（"a. /b" 与 "a/b" 同文件）
+            parts.append(part.rstrip(" ."))
+    norm = posixpath.normpath("/".join(parts))
+    if norm in (".", ""):
+        return ""
+    return norm
+
 
 def ensure_dir(path) -> Path:
     p = Path(path)

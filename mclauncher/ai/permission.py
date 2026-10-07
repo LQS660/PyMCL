@@ -125,14 +125,20 @@ def _coerce_rule(raw) -> Rule | None:
 # ---------------------------------------------------------------- 判权
 
 def _norm_content(text) -> str:
-    """规则内容比对前的归一：去首尾空白、压掉连续空白、忽略大小写。
+    """规则内容比对前的归一：去首尾空白、压掉连续空白、忽略大小写 + 路径拼写归一。
 
     以前是精确字符串相等：用户定的 deny 规则 `name="jei"` 挡不住 `name="JEI"` /
     `"jei "`；default 档下只是回落成 ASK，但 acceptEdits 档下回落成 ALLOW——模型换个
     大小写就绕过了用户的禁用规则。模组 slug / 文件名 / 版本号都不区分大小写，
     Windows 路径也不区分，所以统一 casefold 比对。
+
+    审计 05 P0-1：只折叠大小写还不够。`./jei.toml` / `jei.toml.` / `sub\jei2.toml`
+    都是 Windows 会归一到同一个文件的写法，纯字符串比较判成「不是同一条规则」，
+    于是落到档位默认（acceptEdits/edit/build/yolo = ALLOW）→ 执行层真的写了盘。
+    路径类内容再走一遍 `utils.norm_path_spelling`（统一分隔符、消解 `.`/`..`、
+    去掉 Windows 尾部点与空格）；不像路径的标识（slug / 版本号）不受影响。
     """
-    return " ".join(str(text or "").split()).casefold()
+    return utils.norm_path_spelling(text)
 
 
 def _matches(rule: Rule, tname: str, content: str | None) -> bool:

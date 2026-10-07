@@ -132,12 +132,29 @@ static wchar_t *join_headers(const char *extra_hdr) {
 
 typedef int (*sink_fn)(void *ud, const char *data, size_t n);
 
+/* 对拍录制回放（GOAL 4.B）：PYMCL_HTTP_REPLAY 指向回放服务器时，出网请求改写
+   过去并带上原始 URL 头，两侧桥的联网响应即可逐字节可比。 */
+static int replay_base(char *out, size_t n) {
+    const char *e = getenv("PYMCL_HTTP_REPLAY");
+    if (!e || !e[0]) return 0;
+    snprintf(out, n, "%s", e);
+    return 1;
+}
+
 /* 传输层成功就回 0（4xx/5xx 也算成功，状态码交给调用方判断），连不上才回 -1。 */
 static int http_request(const char *verb, const char *url,
                         const void *body, size_t bodylen,
                         const char *extra_hdr, int timeout,
                         sink_fn sink, void *sink_ud,
                         int *out_status, long long *out_clen) {
+    char replay_buf[512];
+    char replay_hdr[2048];
+    if (replay_base(replay_buf, sizeof(replay_buf))) {
+        snprintf(replay_hdr, sizeof(replay_hdr), "X-PyMCL-Replay-Url: %s\n%s",
+                 url, extra_hdr ? extra_hdr : "");
+        url = replay_buf;
+        extra_hdr = replay_hdr;
+    }
     if (out_status) *out_status = 0;
     if (out_clen) *out_clen = -1;
     if (!g_session && http_init() != 0) return -1;
@@ -157,7 +174,19 @@ static int http_request(const char *verb, const char *url,
 
     int secs = timeout > 0 ? timeout : 60;
     WinHttpSetTimeouts(req, 20000, 20000, secs * 1000, secs * 1000);
-    DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+    /* P2-5：旧值 REDIRECT_POLICY_ALWAYS 会跟随跨 scheme 重定向，包含 HTTPS → HTTP
+       的降级 —— 中间人只要把 302 指到 http:// 就能让下载（jar / Java / 模组）落到明文，
+       再去改内容，而内容哈希也在同一份被篡改的响应里。
+       DISALLOW_HTTPS_TO_HTTP 仍允许正常的 HTTP→HTTPS 与同协议重定向，只禁降级。
+       常量在 MinGW 的 winhttp.h 里有定义（= 1，见 WINHTTP_OPTION_REDIRECT_POLICY_LAST
+       之前的枚举）；万一某个更旧的头文件缺它，下面的 #ifndef 兜住，值取自 Windows SDK：
+         WINHTTP_OPTION_REDIRECT_POLICY_NEVER                 0
+         WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP 1
+         WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS                2 */
+#ifndef WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP
+#define WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP 1
+#endif
+    DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
     WinHttpSetOption(req, WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof(policy));
     DWORD maxred = 8;
     WinHttpSetOption(req, WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS, &maxred, sizeof(maxred));
@@ -222,8 +251,16 @@ int http_get(const char *url, http_resp *r, const char *extra_hdr, int timeout) 
 
 int http_get_query(const char *url, const char *query, http_resp *r, const char *extra_hdr, int timeout) {
     if (!query || !query[0]) return http_get(url, r, extra_hdr, timeout);
+    /* P2-8：旧版忽略 snprintf 的返回值，URL+query 超过 4095 字节时被**静默截断**成一个
+       语法合法但语义不同的 URL（搜索词被切一半），请求照发、返回的是另一个资源的结果。
+       现在超长直接报错返回，不发出任何请求。 */
     char full[4096];
-    snprintf(full, sizeof(full), "%s%s%s", url, strchr(url, '?') ? "&" : "?", query);
+    int n = snprintf(full, sizeof(full), "%s%s%s", url, strchr(url, '?') ? "&" : "?", query);
+    if (n < 0 || (size_t)n >= sizeof(full)) {
+        if (r) memset(r, 0, sizeof(*r));   /* 失败时不留半初始化结构给调用方 */
+        pymcl_set_error("URL 过长");
+        return -1;
+    }
     return http_get(full, r, extra_hdr, timeout);
 }
 
@@ -265,6 +302,20 @@ cJSON *http_get_json_hdr(const char *url, const char *extra_hdr, int timeout) {
     cJSON *j = cJSON_Parse(r.body ? r.body : "{}");
     http_resp_free(&r);
     return j;
+}
+
+/* SSE / 流式 POST：sink 逐块收正文（4xx/5xx 也算传输成功，状态码交给调用方）。 */
+int http_post_json_stream(const char *url, const char *json, const char *extra_hdr,
+                          int timeout, int (*sink)(void *, const char *, size_t),
+                          void *sink_ud, int *out_status) {
+    char hdrs[2048];
+    snprintf(hdrs, sizeof(hdrs), "Content-Type: application/json\nAccept: text/event-stream\n%s",
+             extra_hdr ? extra_hdr : "");
+    int code = 0;
+    int rc = http_request("POST", url, json, json ? strlen(json) : 0, hdrs, timeout,
+                          sink, sink_ud, &code, NULL);
+    if (out_status) *out_status = code;
+    return rc;
 }
 
 static int is_github(const char *u) {
@@ -377,9 +428,23 @@ int http_download_one(const char *url, const char *dest, pymcl_ctx *ctx,
         pymcl_set_error("下载不完整 %s (%lld/%lld)", url, st.got, cl);
         return -1;
     }
-    if (!pymcl_file_matches(part, sha1, size >= 0 ? size : -1)) {
+    /* 有 sha1/size 就按它校验；没有就走 Python 的 _looks_complete 兜底（downloader.py:463-476
+       里 else 分支那一层），既不能把「无法校验」当失败，也不能把 HTML 错误页当成果。 */
+    if (sha1 && sha1[0]) {
+        if (!pymcl_file_matches(part, sha1, size >= 0 ? size : -1)) {
+            pymcl_remove_tree(part);
+            pymcl_set_error("校验失败: %s", url);
+            return -1;
+        }
+    } else if (size >= 0) {
+        if (!pymcl_file_matches(part, NULL, size)) {
+            pymcl_remove_tree(part);
+            pymcl_set_error("校验失败: %s", url);
+            return -1;
+        }
+    } else if (!pymcl_looks_complete(part)) {
         pymcl_remove_tree(part);
-        pymcl_set_error("校验失败: %s", url);
+        pymcl_set_error("下载内容无效: %s", url);
         return -1;
     }
     if (sha512 && sha512[0]) {
@@ -401,10 +466,16 @@ int http_download_one(const char *url, const char *dest, pymcl_ctx *ctx,
 
 int download_file(const char *url, const char **extra, int nextra, const char *dest,
                   pymcl_ctx *ctx, const char *sha1, long long size, const char *sha512) {
-    if (pymcl_file_matches(dest, sha1, size >= 0 ? size : -1)) {
-        if (!sha512 || !sha512[0]) return 0;
-        char hex[129];
-        if (pymcl_sha512_file(dest, hex) == 0 && _stricmp(hex, sha512) == 0) return 0;
+    /* 跳过已下载的判据与 downloader.py:353-358 一致：有哈希/尺寸就按它校验，一个都没有时
+       才退回 _looks_complete。旧版把「无约束」交给 pymcl_file_matches（恒 0），等于每次都重下。 */
+    if ((sha1 && sha1[0]) || size >= 0 || (sha512 && sha512[0])) {
+        if (pymcl_file_matches(dest, sha1, size >= 0 ? size : -1)) {
+            if (!sha512 || !sha512[0]) return 0;
+            char hex[129];
+            if (pymcl_sha512_file(dest, hex) == 0 && _stricmp(hex, sha512) == 0) return 0;
+        }
+    } else if (pymcl_looks_complete(dest)) {
+        return 0;
     }
     char **cands = NULL; int nc = 0;
     expand_urls(url, &cands, &nc);

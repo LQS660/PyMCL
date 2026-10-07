@@ -1,0 +1,15 @@
+{
+  "name": "Ocean",
+  "theme_color": "#1E6FD9",
+  "ui_dark": true,
+  "ui_background": "",
+  "ui_sidebar_opacity": 90,
+  "ui_background_blur": 4,
+  "ui_background_dim": 10,
+  "ui_background_folder": "",
+  "ui_background_shuffle": false,
+  "ui_background_interval": 10,
+  "window_mode": "window",
+  "custom_homepage": "",
+  "homepage_mode": "news"
+}

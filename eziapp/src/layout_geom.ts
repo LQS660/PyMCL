@@ -462,6 +462,92 @@ export function resizeLinked(active: CardGeom, others: CardGeom[], dir: Dir,
 const intersects = (a: Rect, b: Rect) =>
   a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 
+const ovX = (a: Rect, b: Rect) => Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+const ovY = (a: Rect, b: Rect) => Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+
+/** 分离/校验用的容差：贴边取整差个一两像素不算重叠。 */
+const SEP_EPS = 1;
+const OVERLAP_TOL = 2;
+
+/** 卡片本体矩形的下限：画布比卡片最小尺寸还小时只能缩到画布那么大。 */
+function effMin(min: [number, number], cw: number, ch: number): [number, number] {
+  return [Math.min(min[0], cw), Math.min(min[1], ch)];
+}
+
+/** 把矩形抬到最小尺寸并钳进画布（就地改）。 */
+function clampRect(r: Rect, min: [number, number], cw: number, ch: number) {
+  const [mw, mh] = effMin(min, cw, ch);
+  r.w = Math.min(Math.max(r.w, mw), cw);
+  r.h = Math.min(Math.max(r.h, mh), ch);
+  r.x = Math.max(0, Math.min(r.x, Math.max(0, cw - r.w)));
+  r.y = Math.max(0, Math.min(r.y, Math.max(0, ch - r.h)));
+}
+
+/**
+ * 要把两个矩形分开 `need` 像素，各自最多能动 `room` 像素：先对半分，
+ * 剩下的补给还有余量的一边。两边都顶到画布边时返回 (0, 0)。
+ */
+function splitPush(need: number, roomA: number, roomB: number): [number, number] {
+  let a = Math.min(roomA, Math.ceil(need / 2));
+  let b = Math.min(roomB, Math.max(0, need - a));
+  let rest = need - a - b;
+  if (rest > 0) { const extra = Math.min(roomA - a, rest); a += extra; rest -= extra; }
+  if (rest > 0) { const extra = Math.min(roomB - b, rest); b += extra; }
+  return [a, b];
+}
+
+/**
+ * 把互相重叠的矩形沿「重叠较小」的那条轴推开（就地改 rects）。
+ * 推不动（两边都顶到画布边）返回 false。
+ */
+export function separateRects(rects: Rect[], mins: [number, number][], cw: number, ch: number): boolean {
+  cw = Math.max(1, cw);
+  ch = Math.max(1, ch);
+  const n = rects.length;
+  if (n < 2) return true;
+  for (let pass = 0; pass < 160; pass++) {
+    let touched = false;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const a = rects[i], b = rects[j];
+        const ox = ovX(a, b), oy = ovY(a, b);
+        if (ox <= SEP_EPS || oy <= SEP_EPS) continue;
+        touched = true;
+        if (ox <= oy) {
+          const [ma, mb] = splitPush(ox + SEP_EPS, a.x, cw - (b.x + b.w));
+          if (ma === 0 && mb === 0) return false;
+          a.x -= ma; b.x += mb;
+        } else {
+          const [ma, mb] = splitPush(oy + SEP_EPS, a.y, ch - (b.y + b.h));
+          if (ma === 0 && mb === 0) return false;
+          a.y -= ma; b.y += mb;
+        }
+        clampRect(a, mins[i], cw, ch);
+        clampRect(b, mins[j], cw, ch);
+      }
+    }
+    if (!touched) return true;
+  }
+  return false;
+}
+
+/** 全部卡片：不出画布、不低于最小尺寸、两两不重叠。 */
+function fitValid(rects: Rect[], mins: [number, number][], cw: number, ch: number): boolean {
+  for (let i = 0; i < rects.length; i++) {
+    const r = rects[i];
+    const [mw, mh] = effMin(mins[i], cw, ch);
+    if (r.x < -OVERLAP_TOL || r.y < -OVERLAP_TOL
+      || r.x + r.w > cw + OVERLAP_TOL || r.y + r.h > ch + OVERLAP_TOL) return false;
+    if (r.w < mw - OVERLAP_TOL || r.h < mh - OVERLAP_TOL) return false;
+  }
+  for (let i = 0; i < rects.length; i++) {
+    for (let j = i + 1; j < rects.length; j++) {
+      if (ovX(rects[i], rects[j]) > OVERLAP_TOL && ovY(rects[i], rects[j]) > OVERLAP_TOL) return false;
+    }
+  }
+  return true;
+}
+
 /**
  * 新卡片落点：从左上角按 24px 步进扫，找第一个与现有卡片（外扩 8px）都不相交的位置。
  * ADD_DEFAULT 里的 x/y 只作参考，落点总是扫出来的第一个空位（对齐 Qt _find_free_spot）。
@@ -477,8 +563,8 @@ export function findFreeSpot(type: string, fw: number, fh: number,
   const [mw, mh] = cardMinPx(type);
   let w = Math.max(mw, Math.trunc(fw * cw));
   let h = Math.max(mh, Math.trunc(fh * ch));
-  w = Math.min(w, cw - 16);
-  h = Math.min(h, ch - 16);
+  w = Math.max(1, Math.min(w, cw - 16));
+  h = Math.max(1, Math.min(h, ch - 16));
   const padded = existing.map((r) => ({ x: r.x - 8, y: r.y - 8, w: r.w + 16, h: r.h + 16 }));
   const step = 24;
   for (let yy = 8; yy < Math.max(9, ch - h - 8); yy += step) {
@@ -490,29 +576,68 @@ export function findFreeSpot(type: string, fw: number, fh: number,
   return { x: 8, y: 8, w, h };
 }
 
-/** 把可见卡片的联合包围盒等比放大到铺满画布（留 12px 边距）。就地改 doc。 */
-export function fitToWindow(doc: LayoutDoc, cw: number, ch: number) {
+/** 按比例因子 k 把包围盒铺进画布，返回每张卡的像素矩形（未分离）。 */
+function fitRectsAt(vis: LayoutItem[], cw: number, ch: number,
+                    bx0: number, by0: number, bw: number, bh: number, k: number): {
+                      rects: Rect[]; mins: [number, number][];
+                    } {
+  const mx = 12 / cw;
+  const my = 12 / ch;
+  const sx = (k - 2 * mx) / bw;
+  const sy = (k - 2 * my) / bh;
+  const rects: Rect[] = [];
+  const mins: [number, number][] = [];
+  for (const it of vis) {
+    const [mw, mh] = cardMinPx(it.type);
+    mins.push([mw, mh]);
+    const r = {
+      x: (mx + (it.x - bx0) * sx) * cw,
+      y: (my + (it.y - by0) * sy) * ch,
+      w: Math.max(mw, it.w * sx * cw),
+      h: Math.max(mh, it.h * sy * ch),
+    };
+    clampRect(r, [mw, mh], cw, ch);
+    rects.push(r);
+  }
+  return { rects, mins };
+}
+
+/**
+ * 把可见卡片的联合包围盒等比放大到铺满画布（留 12px 边距）。就地改 doc。
+ *
+ * 返回 false = 这份布局在当前画布上摆不开，**doc 原样不动**，调用方负责提示。
+ *
+ * 逐卡抬到最小尺寸那一步会互相压住：等比缩放的结果比某张卡的最小尺寸还小时
+ * `Math.max(mw/cw, …)` 把它抬起来，但**没有任何一步动它的邻居**，比例位置不变
+ * → 成片重叠（实测默认窗口 1320×840 上排好的无重叠布局，窗口缩到 1260 点一次
+ * 「适应窗口」23% 变重叠，缩到 1220 时 100%）。而这是持久化操作
+ * （dashboard.ts 的 `touch(true)` 立即落盘），重叠版式会被写进 ui_layout，
+ * Qt 版打开也是同一份重叠。所以抬完之后必须再跑一遍分离，推不开就拒绝缩放。
+ */
+export function fitToWindow(doc: LayoutDoc, cw: number, ch: number): boolean {
   cw = Math.max(1, cw);
   ch = Math.max(1, ch);
   const vis = visibleItems(doc);
-  if (!vis.length) return;
+  if (!vis.length) return true;
   const bx0 = Math.min(...vis.map((it) => it.x));
   const by0 = Math.min(...vis.map((it) => it.y));
   const bx1 = Math.max(...vis.map((it) => it.x + it.w));
   const by1 = Math.max(...vis.map((it) => it.y + it.h));
   const bw = Math.max(1e-4, bx1 - bx0);
   const bh = Math.max(1e-4, by1 - by0);
-  const mx = 12 / cw;
-  const my = 12 / ch;
-  const sx = (1 - 2 * mx) / bw;
-  const sy = (1 - 2 * my) / bh;
-  for (const it of vis) {
-    const [mw, mh] = cardMinPx(it.type); // 同 findFreeSpot：量的是卡片本体，含标题栏
-    it.x = mx + (it.x - bx0) * sx;
-    it.y = my + (it.y - by0) * sy;
-    it.w = Math.max(mw / cw, it.w * sx);
-    it.h = Math.max(mh / ch, it.h * sy);
+  // 先按「铺满」的理想比例试；推不开（卡片抬到下限后互相顶住，画布塞不下）
+  // 就逐步缩小比例重试——缩小的那部分正好变成分离所需的余量。k=0 时全部
+  // 卡片都在各自最小尺寸上，此时还分不开就是真塞不下，只能拒绝。
+  let best: Rect[] | null = null;
+  for (const k of [1, 0.97, 0.93, 0.88, 0.82, 0.75, 0.66, 0.55, 0.42, 0.28, 0]) {
+    const { rects, mins } = fitRectsAt(vis, cw, ch, bx0, by0, bw, bh, k);
+    if (!separateRects(rects, mins, cw, ch) || !fitValid(rects, mins, cw, ch)) continue;
+    best = rects;
+    break;
   }
+  if (best === null) return false;
+  vis.forEach((it, i) => setGeometryPx(it, best[i], cw, ch));
+  return true;
 }
 
 /** 两矩形是否有正面积重叠（模糊测试断言用；允许 tol 像素的贴边误差）。 */

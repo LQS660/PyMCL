@@ -7,6 +7,7 @@ from pathlib import Path
 from . import utils
 from .config import CONFIG
 from .instances import Instance, list_instances
+from .installer import natives_jar_relpath, select_native_classifier
 from .manifest import resolve_inherits
 
 
@@ -31,6 +32,9 @@ def _lib_paths(instance: Instance) -> set:
                 path = utils.maven_artifact_path(lib["name"])
             if path:
                 used.add(str((libs / path).resolve()).lower())
+            nkey = select_native_classifier(lib) if lib.get("natives") else None
+            if nkey and lib.get("name"):
+                used.add(str((libs / natives_jar_relpath(lib, nkey)).resolve()).lower())
             for clf in (downloads.get("classifiers") or {}).values():
                 if isinstance(clf, dict) and clf.get("path"):
                     used.add(str((libs / clf["path"]).resolve()).lower())
@@ -42,14 +46,12 @@ def preview() -> dict:
     parts = []
     cache_files = []
     used = set()
-    seen_libs = set()
+    library_dirs = set()
     for name in list_instances():
         inst = Instance(name)
         used |= _lib_paths(inst)
-        libs = inst.libraries_dir()
-        if str(libs) in seen_libs:
-            continue
-        seen_libs.add(str(libs))
+        library_dirs.add(inst.libraries_dir().resolve())
+    for libs in library_dirs:
         if libs.is_dir():
             for p in libs.rglob("*"):
                 if not p.is_file():

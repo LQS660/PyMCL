@@ -721,7 +721,7 @@ static char *install_forge_modern(const char *inst, const char *jar, cJSON *prof
     install_libraries(inst, libs, vid, ctx);
     cJSON_Delete(libs);
     char tmp[PYMCL_PATH];
-    GetTempPathA(sizeof(tmp), tmp);
+    pymcl_get_temp_u8(tmp, sizeof(tmp));
     char tdir[PYMCL_PATH];
     snprintf(tdir, sizeof(tdir), "%spymcl_fgdata_%u", tmp, GetTickCount());
     pymcl_ensure_dir(tdir);
@@ -810,7 +810,7 @@ static char *run_forge_installer(const char *inst, const char *jar, const char *
     char *java = java_for_installer((a < 1 || (a == 1 && b < 17)) ? "forge-legacy" : "forge", ctx);
     if (!java) return NULL;
     char tmp[MAX_PATH], work[PYMCL_PATH];
-    GetTempPathA(MAX_PATH, tmp);
+    pymcl_get_temp_u8(tmp, sizeof(tmp));
     snprintf(work, sizeof(work), "%spymclfg%u", tmp, GetTickCount());
     pymcl_ensure_dir(work);
     const char *argv[] = { java, "-jar", jar, "--installClient", work };

@@ -1,0 +1,17 @@
+{
+  "instances": {
+    ".minecraft": {
+      "total": 5400,
+      "versions": {
+        "1.20.1": 5400
+      },
+      "sessions": [
+        {
+          "start": 1700000000,
+          "duration": 5400,
+          "version": "1.20.1"
+        }
+      ]
+    }
+  }
+}

@@ -56,12 +56,19 @@ class McpClient:
         import time
         deadline = time.monotonic() + timeout
         timed_out = [False]
+        # 审计 05 P1-3：看门狗必须可取消。原来它无条件 sleep 到 deadline 再
+        # kill()，从不检查这次请求是否已收到应答——成功调用之后整个回合只要
+        # 超过 CONNECT_TIMEOUT（10s）server 就被杀，之后所有 MCP 工具报
+        # OSError [Errno 22]，本回合永久失效。改成 Event：应答到了就置位，
+        # 看门狗醒来先看这个标志，只有真正没应答才 kill。
+        answered = threading.Event()
 
         def _watchdog():
             # readline 是无超时阻塞读：server 进程活着但不回话时，必须由
             # 看门狗在 deadline 杀掉进程，readline 才会以 EOF 返回，否则
             # 整个 agent 线程永久挂死（停止按钮也打断不了阻塞中的 readline）
-            time.sleep(max(0.1, deadline - time.monotonic()))
+            if answered.wait(max(0.1, deadline - time.monotonic())):
+                return          # 应答已到：这个线程什么都不做
             timed_out[0] = True
             try:
                 if self._proc is not None and self._proc.poll() is None:
@@ -71,24 +78,28 @@ class McpClient:
 
         dog = threading.Thread(target=_watchdog, daemon=True)
         dog.start()
-        while True:
-            line = self._proc.stdout.readline()
-            if not line:
-                if timed_out[0]:
+        try:
+            while True:
+                line = self._proc.stdout.readline()
+                if not line:
+                    if timed_out[0]:
+                        raise McpError(f"MCP server {self.name} 响应超时")
+                    raise McpError(f"MCP server {self.name} 已退出"
+                                   f"（exit={self._proc.poll()}）")
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(msg, dict) and msg.get("id") == want_id:
+                    return msg
+                if time.monotonic() > deadline:
                     raise McpError(f"MCP server {self.name} 响应超时")
-                raise McpError(f"MCP server {self.name} 已退出"
-                               f"（exit={self._proc.poll()}）")
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                msg = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(msg, dict) and msg.get("id") == want_id:
-                return msg
-            if time.monotonic() > deadline:
-                raise McpError(f"MCP server {self.name} 响应超时")
+        finally:
+            # 无论正常返回还是抛错都置位：让看门狗立刻收工，不再留着杀进程
+            answered.set()
 
     def _request(self, method: str, params: dict | None, timeout: float) -> dict:
         with self._lock:

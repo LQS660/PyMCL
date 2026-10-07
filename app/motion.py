@@ -37,8 +37,12 @@ def _keep(widget, *anims):
 
     def _bind(a):
         def _drop(new_state, _old_state=None):
-            if new_state == _STOPPED and a in box:
-                box.remove(a)
+            # 摘除只能用身份比较：排队的这一拍里 a 的 C++ 部分可能已随宿主
+            # 先死，`a in box` 会踩已析构包装器的 __eq__（与 tween._drop 同）。
+            # `is` 不走 __eq__，包装器已经析构也照样安全。
+            if new_state != _STOPPED:
+                return
+            box[:] = [t for t in box if t is not a]
         a.stateChanged.connect(_drop)
     for a in anims:
         _bind(a)
@@ -227,20 +231,48 @@ def pop(widget, scale: float = 1.35, ms: int = 260):
 class SmoothProgressBar(ProgressBar):
     """进度条补间：setValue 的变化走 240ms 缓动，进度增长不再跳格。
 
-    value() 语义不变（立即反映目标值），只有绘制是渐进的。
+    value() 语义不变（立即反映目标值），只有绘制是渐进的：
+    - `value()` / `_target`：目标值，setValue 后立刻读得到；
+    - `super().value()` / `_shown`：当前绘制值，由动画逐帧逼近目标。
+
+    以前把 `QVariantAnimation.valueChanged` 直接连回自己的 `setValue`，
+    等于自己连自己：对处于 Stopped 的动画调 `setStartValue(x)` 会同步 emit
+    `valueChanged(旧 startValue)`，重入进来时 `anim.state()` 还是 Stopped
+    （不是 Running），密集更新分支不生效，于是重入那层拿**旧值**覆盖
+    start/end 再 `start()` —— 动画区间与 `_shown` 脱节，进度卡在中间值。
+    实测：任务已完成、`set_finished` 发完 100%，进度条停在 72%，`value()`
+    仍是 80，`TaskCard.setValue(100)` 也拉不回来。
+
+    修法：动画回调只走 `_apply_shown`（直连基类），公开 `setValue` 只负责
+    记目标值并启动动画，自反馈环断开。
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._shown = super().value()
+        self._shown = super().value()    # 绘制值：动画逐帧逼近
+        self._target = super().value()   # 目标值：value() 的返回值
         self._anim = QVariantAnimation(self)
         self._anim.setDuration(240)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
-        self._anim.valueChanged.connect(
-            lambda v: SmoothProgressBar.setValue(self, int(v)))
+        self._anim.valueChanged.connect(self._apply_shown)
+
+    def value(self) -> int:
+        """公开 value()：立即反映目标值（docstring 承诺），不等动画。"""
+        tgt = getattr(self, "_target", None)
+        return super().value() if tgt is None else tgt
+
+    def _apply_shown(self, v):
+        """动画每一帧：只更新绘制值，直连基类，不经公开 setValue。
+
+        经过公开 setValue 就会重新 `setStartValue`（同步 emit valueChanged）
+        把自己再叫一遍 —— 那就是上面那条自反馈环。
+        """
+        self._shown = int(v)
+        ProgressBar.setValue(self, int(v))
 
     def setValue(self, v):
         v = int(v)
+        self._target = v
         anim = getattr(self, "_anim", None)
         if anim is None:  # 父类构造期间会先调 setValue(0)
             ProgressBar.setValue(self, v)
@@ -258,5 +290,4 @@ class SmoothProgressBar(ProgressBar):
             return
         anim.setStartValue(self._shown)
         anim.setEndValue(v)
-        self._shown = v
         anim.start()

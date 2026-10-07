@@ -32,9 +32,9 @@ def list_entries() -> list:
     return rows
 
 
-def _link_file(dest: Path, src: Path):
+def _link_file(dest: Path, src: Path) -> bool:
     if dest.exists() or dest.is_symlink():
-        return
+        return False
     utils.ensure_dir(dest.parent)
     try:
         if os.name == "nt":
@@ -42,14 +42,16 @@ def _link_file(dest: Path, src: Path):
             flags = 0x2  # SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
             ok = ctypes.windll.kernel32.CreateSymbolicLinkW(str(dest), str(src), flags)
             if ok:
-                return
+                return True
         dest.symlink_to(src)
+        return True
     except OSError:
         try:
             import shutil
             shutil.copy2(src, dest)
+            return True
         except OSError:
-            pass
+            return False
 
 
 def set_enabled(filename: str, enabled: bool) -> str:
@@ -89,6 +91,6 @@ def apply(game_mods_dir: Path) -> int:
     for p in src_dir.iterdir():
         if not p.is_file() or not p.name.lower().endswith(".jar"):
             continue
-        _link_file(dest / p.name, p)
-        n += 1
+        if _link_file(dest / p.name, p):
+            n += 1
     return n

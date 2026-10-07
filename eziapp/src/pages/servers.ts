@@ -66,11 +66,16 @@ function render(container: HTMLElement, instance: string, servers: ServerRow[]) 
   container.querySelector<HTMLButtonElement>('#servers-import')?.addEventListener('click', () => void onImport(container));
   container.querySelector<HTMLButtonElement>('#servers-export')?.addEventListener('click', () => void onExport(container));
 
+  // 实例名在**渲染时**定死，不在 await 之后重新读 DOM：`servers` 是这次渲染
+  // 捕获的数组，`index` 是它在数组里的下标。如果 instance 是确认框返回后才
+  // 现读的，用户切了实例（或无焦点陷阱下用 Tab 绕到下拉）就会拿旧 index 去
+  // 删另一个实例的服务器 —— 跨实例误删。
+  const boundInstance = currentInstance(container);
   container.querySelectorAll<HTMLButtonElement>('[data-server-edit]').forEach((btn) => {
-    btn.addEventListener('click', () => void onEdit(container, Number(btn.dataset.serverEdit)));
+    btn.addEventListener('click', () => void onEdit(container, Number(btn.dataset.serverEdit), boundInstance));
   });
   container.querySelectorAll<HTMLButtonElement>('[data-server-delete]').forEach((btn) => {
-    btn.addEventListener('click', () => void onDelete(container, Number(btn.dataset.serverDelete), servers));
+    btn.addEventListener('click', () => void onDelete(container, Number(btn.dataset.serverDelete), servers, boundInstance));
   });
 }
 
@@ -148,8 +153,7 @@ async function onAdd(container: HTMLElement) {
   }
 }
 
-async function onEdit(container: HTMLElement, index: number) {
-  const instance = currentInstance(container);
+async function onEdit(container: HTMLElement, index: number, instance: string) {
   let servers: ServerRow[] = [];
   try {
     servers = await bridge.call<ServerRow[]>('list_servers', { instance });
@@ -177,13 +181,13 @@ async function onEdit(container: HTMLElement, index: number) {
   }
 }
 
-async function onDelete(container: HTMLElement, index: number, servers: ServerRow[]) {
+async function onDelete(container: HTMLElement, index: number, servers: ServerRow[], instance: string) {
   const s = servers[index];
   if (!s) return;
   const confirmed = await confirmDialog('确认删除', `删除服务器 ${s.name || s.ip || '?'}？`);
   if (!confirmed) return;
   try {
-    await bridge.call('delete_server', { instance: currentInstance(container), index });
+    await bridge.call('delete_server', { instance, index });
     toast('已删除', 'success');
     void loadAndRender(container);
   } catch (error) {

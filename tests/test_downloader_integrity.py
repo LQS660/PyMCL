@@ -6,10 +6,13 @@ import os
 import tempfile
 import threading
 import unittest
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 from mclauncher.downloader import DownloadError, DownloadManager
+from mclauncher.installer import Installer
 
 
 @contextmanager
@@ -59,6 +62,49 @@ class DownloaderIntegrityTests(unittest.TestCase):
                         f"{base}/source.bin", target, sha256=bad_digest, size=len(payload), expand=False,
                     )
             self.assertFalse(target.exists())
+
+    def test_size_only_jar_replaces_same_size_html_cache(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "source.jar"
+            with zipfile.ZipFile(source, "w") as zf:
+                zf.writestr("package/Demo.class", b"compiled class")
+            expected = source.read_bytes()
+            target = root / "downloaded.jar"
+            target.write_bytes(b"<html>download failed</html>".ljust(len(expected), b"x"))
+            with local_file_server(root) as base:
+                dm = DownloadManager(threads=1)
+                self.addCleanup(dm.session.close)
+                dm.download(f"{base}/source.jar", target, size=len(expected), expand=False)
+            self.assertEqual(target.read_bytes(), expected)
+
+    def test_install_library_rechecks_size_only_jar_cache(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "source.jar"
+            with zipfile.ZipFile(source, "w") as zf:
+                zf.writestr("package/Demo.class", b"compiled class")
+            expected = source.read_bytes()
+            target = root / "libraries" / "org" / "example" / "demo" / "demo.jar"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"<html>download failed</html>".ljust(len(expected), b"x"))
+            instance = SimpleNamespace(
+                libraries_dir=lambda: root / "libraries",
+                natives_dir=lambda version, resolved: root / "versions" / version / "natives",
+            )
+            with local_file_server(root) as base:
+                dm = DownloadManager(threads=1)
+                self.addCleanup(dm.session.close)
+                installer = Installer(instance, dm=dm)
+                installer._install_libraries({"libraries": [{
+                    "name": "org.example:demo:1.0",
+                    "downloads": {"artifact": {
+                        "url": f"{base}/source.jar",
+                        "path": "org/example/demo/demo.jar",
+                        "size": len(expected),
+                    }},
+                }]}, "1.20.1")
+            self.assertEqual(target.read_bytes(), expected)
 
 
 if __name__ == "__main__":

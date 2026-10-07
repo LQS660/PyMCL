@@ -44,7 +44,15 @@ def unique_id(instance: Instance, raw: str) -> str:
 
 
 def _vdir(instance: Instance, version_id: str) -> Path:
-    p = instance.versions_dir() / version_id
+    """版本目录，且必须真的是 `versions/` 的直接子目录。
+
+    审计 #1 P0-1：这里以前只做 `is_dir()`，`version_id="../<目录>"` 会解析到
+    `versions/` 之外，`rename_version` 随后 `remove_tree` 掉它 —— 整棵删。
+    """
+    try:
+        p = utils.safe_child_path(instance.versions_dir(), utils.safe_version_id(version_id))
+    except utils.PathEscapeError as exc:
+        raise VersionOpError(str(exc)) from exc
     if not p.is_dir():
         raise VersionOpError(f"版本不存在: {version_id}")
     return p
@@ -52,6 +60,9 @@ def _vdir(instance: Instance, version_id: str) -> Path:
 
 def rename_version(instance: Instance, old_id: str, new_id: str) -> str:
     new_id = sanitize_id(new_id)
+    # 审计 #1 P0-1：old_id 以前一个字符都没过滤，直接拼进 versions_dir()。
+    # 这里显式挡一道，后面的 _vdir 还有 resolve() 二次确认。
+    old_id = _checked_id(old_id)
     if new_id == old_id:
         return old_id
     src = _vdir(instance, old_id)
@@ -66,6 +77,14 @@ def rename_version(instance: Instance, old_id: str, new_id: str) -> str:
         utils.remove_tree(dest)
         raise
     return new_id
+
+
+def _checked_id(raw) -> str:
+    """校验版本 ID 并原样返回（不含 sanitize 的重写，用于匹配已有目录名）。"""
+    try:
+        return utils.safe_version_id(raw)
+    except utils.PathEscapeError as exc:
+        raise VersionOpError(str(exc)) from exc
 
 
 def copy_version(instance: Instance, old_id: str, new_id: str) -> str:
@@ -109,6 +128,10 @@ def is_hidden(instance: Instance, version_id: str) -> bool:
 
 
 def folder_map(instance: Instance, version_id: str = "") -> dict:
+    # 审计 #1 P1-4：这里以前对 version_id 不做任何校验，下面每个键都是
+    # versions_dir()/version_id 的直接拼接，open_folder 会把它 ensure_dir 出来。
+    if version_id:
+        version_id = _checked_id(version_id)
     settings = vs.load(instance, version_id) if version_id else None
     gdir = vs.game_dir(instance, version_id, settings) if version_id else Path(instance.path)
     vdir = instance.versions_dir() / version_id if version_id else instance.versions_dir()
@@ -130,6 +153,15 @@ def folder_map(instance: Instance, version_id: str = "") -> dict:
 def open_folder(instance: Instance, version_id: str = "", which: str = "root") -> str:
     mapping = folder_map(instance, version_id)
     path = mapping.get(which) or mapping["root"]
+    # 二次确认：映射出来的每个键都必须在游戏目录之下（审计 #1 P1-4）。
+    # folder_map 已经把 version_id 校验过，这里是「以后有人往 mapping 里加键」的保险。
+    root = Path(instance.path).resolve()
+    try:
+        resolved = Path(path).resolve()
+    except OSError as exc:
+        raise VersionOpError(f"非法路径: {path}") from exc
+    if resolved != root and root not in resolved.parents:
+        raise VersionOpError(f"非法路径: {path}")
     utils.ensure_dir(path)
     if not open_path(path):
         raise VersionOpError(f"无法打开: {path}")

@@ -140,18 +140,14 @@ def clear_playtime(instance_name: str = "", version_id: str = ""):
         elif instance_name in data.get("instances", {}):
             if version_id:
                 inst = data["instances"][instance_name]
-                inst["total"] = 0
-                inst["versions"] = {}
-                # 重新计算
-                sessions = inst.get("sessions", [])
-                remaining = []
-                for s in sessions:
-                    if s.get("version") != version_id:
-                        remaining.append(s)
-                        inst["total"] += s.get("duration", 0)
-                        ver = s.get("version", "?")
-                        inst["versions"][ver] = inst["versions"].get(ver, 0) + s.get("duration", 0)
-                inst["sessions"] = remaining
+                versions = dict(inst.get("versions", {}))
+                removed = versions.pop(version_id, 0)
+                # Sessions are capped at 500, so they cannot reconstruct the
+                # historical totals; the cumulative per-version data can.
+                inst["total"] = max(0, inst.get("total", 0) - removed)
+                inst["versions"] = versions
+                inst["sessions"] = [s for s in inst.get("sessions", [])
+                                    if s.get("version") != version_id]
             else:
                 del data["instances"][instance_name]
         _write_safe(data)
@@ -173,6 +169,7 @@ class PlaytimeTracker:
         if self._started <= 0:
             return 0
         duration = int(time.time() - self._started)
+        self._started = 0.0
         if duration > 0:
             record_session(self.instance_name, self.version_id, duration)
         return duration

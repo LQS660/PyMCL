@@ -380,6 +380,7 @@ class BackendAPI(QObject):
 
     def wait_task(self, task_id: str, timeout: float = 1800, cancelled=None) -> dict:
         """后台线程里等任务结束。启动游戏不要用这个（会等到退出）。"""
+        deadline = time.monotonic() + max(0.0, timeout)
         if task_id in self._task_results:
             ok, msg = self._task_results[task_id]
             return {"ok": ok, "message": msg, "task_id": task_id}
@@ -398,16 +399,18 @@ class BackendAPI(QObject):
             if task_id in self._task_results:
                 ok, msg = self._task_results[task_id]
                 return {"ok": ok, "message": msg, "task_id": task_id}
-            while not done.wait(0.4):
+            while not done.is_set():
                 if cancelled and cancelled():
                     self.cancel_task(task_id)
                     return {"ok": False, "message": tr("已停止"), "task_id": task_id}
-                timeout -= 0.4
-                if timeout <= 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     # timeout=True 是给调用方（AI agent）判「还在跑」用的结构化位：
                     # 光靠比对 message 文案，英文界面下就认不出来了
                     return {"ok": False, "message": tr("等待任务超时"), "task_id": task_id,
                             "timeout": True}
+                # 短超时不能被固定的 400ms 轮询拉长；检查回调的耗时也计入预算。
+                done.wait(min(0.4, remaining))
         finally:
             try:
                 self.finished.disconnect(on_finished)
@@ -594,27 +597,27 @@ class BackendAPI(QObject):
         return self.start_task(title, self._install_game_impl, version, loader, loader_version, inst, extra)
 
     def install_modpack(self, name: str, source: str = "Modrinth", extra: dict | None = None) -> str:
-        return self.start_task(f"安装整合包 {Path(name).name}", self._install_modpack_impl,
+        return self.start_task(f"{tr('安装整合包')} {Path(name).name}", self._install_modpack_impl,
                                name, source, extra or {})
 
     def install_mod(self, name: str, instance: str = "default", extra: dict | None = None) -> str:
-        return self.start_task(f"安装模组 {Path(str(name)).name}", self._install_mod_impl,
+        return self.start_task(f"{tr('安装模组')} {Path(str(name)).name}", self._install_mod_impl,
                                name, instance, extra or {})
 
     def install_shader(self, name: str, instance: str = "default", extra: dict | None = None) -> str:
-        return self.start_task(f"安装光影 {Path(str(name)).name}", self._install_content_impl,
+        return self.start_task(f"{tr('安装光影')} {Path(str(name)).name}", self._install_content_impl,
                                "shader", name, instance, extra or {})
 
     def install_resourcepack(self, name: str, instance: str = "default", extra: dict | None = None) -> str:
-        return self.start_task(f"安装资源包 {Path(str(name)).name}", self._install_content_impl,
+        return self.start_task(f"{tr('安装资源包')} {Path(str(name)).name}", self._install_content_impl,
                                "resourcepack", name, instance, extra or {})
 
     def install_datapack(self, name: str, instance: str = "default", extra: dict | None = None) -> str:
-        return self.start_task(f"安装数据包 {Path(str(name)).name}", self._install_content_impl,
+        return self.start_task(f"{tr('安装数据包')} {Path(str(name)).name}", self._install_content_impl,
                                "datapack", name, instance, extra or {})
 
     def install_world(self, name: str, instance: str = "default", extra: dict | None = None) -> str:
-        return self.start_task(f"安装世界 {Path(str(name)).name}", self._install_world_impl,
+        return self.start_task(f"{tr('安装世界')} {Path(str(name)).name}", self._install_world_impl,
                                name, instance, extra or {})
 
     def list_catalog_files(self, extra: dict | None = None) -> list[dict]:
@@ -654,7 +657,7 @@ class BackendAPI(QObject):
         return vops.open_folder(self._instance(instance), version, which)
 
     def export_launch_script(self, instance: str, version: str, dest: str = "") -> str:
-        return self.start_task(f"导出启动脚本 {version}", self._export_bat_impl, instance, version, dest)
+        return self.start_task(f"{tr('导出启动脚本')} {version}", self._export_bat_impl, instance, version, dest)
 
     def create_desktop_shortcut(self, instance: str, version: str, username: str = "",
                                 account: str = "", name: str = "") -> str:
@@ -671,7 +674,7 @@ class BackendAPI(QObject):
         self._emit_ui_changed()
 
     def backup_save(self, instance: str, name: str, version: str = "") -> str:
-        return self.start_task(f"备份存档 {name}", self._backup_save_impl, instance, name, version)
+        return self.start_task(f"{tr('备份存档')} {name}", self._backup_save_impl, instance, name, version)
 
     def _backup_save_impl(self, progress, log, instance, name, version):
         from mclauncher import saves as saves_mod
@@ -792,7 +795,7 @@ class BackendAPI(QObject):
     def download_java(self, major: str, vendor: str = "adoptium") -> str:
         vendor = (vendor or "adoptium").strip() or "adoptium"
         if vendor == "adoptium":
-            return self.start_task(f"下载 Java {major}", self._download_java_impl, major)
+            return self.start_task(f"{tr('下载 Java')} {major}", self._download_java_impl, major)
         return self.install_java(int(major), vendor=vendor)
 
     def terracotta_player(self) -> str:
@@ -1128,7 +1131,7 @@ class BackendAPI(QObject):
             "ui_background_shuffle": bool(CONFIG.get("ui_background_shuffle", False)),
             "ui_background_interval": _clamp_int(
                 CONFIG.get("ui_background_interval", 10), 1, 1440, 10),
-            "ui_background_history": list(CONFIG.get("ui_background_history") or []),
+            "ui_background_history": _bg_history()[0],
             "ui_sidebar_opacity": _clamp_opacity(CONFIG.get("ui_sidebar_opacity", 100)),
             "ui_background_blur": _clamp_int(CONFIG.get("ui_background_blur", 0), 0, 40, 0),
             "ui_background_dim": _clamp_int(CONFIG.get("ui_background_dim", 0), 0, 80, 0),
@@ -1506,7 +1509,7 @@ class BackendAPI(QObject):
         return out
 
     def repair_version(self, instance: str, version: str) -> str:
-        return self.start_task(f"修复 {version}", self._repair_impl, instance, version)
+        return self.start_task(f"{tr('修复')} {version}", self._repair_impl, instance, version)
 
     def preflight_launch(self, instance: str, version: str, memory_mb: int = 0,
                          java: str = "") -> dict:
@@ -1610,14 +1613,14 @@ class BackendAPI(QObject):
         return {"ok": False, "message": f"未知动作: {aid}"}
 
     def export_modpack(self, instance: str, dest: str = "") -> str:
-        return self.start_task(f"导出整合包 {instance}", self._export_pack_impl, instance, dest)
+        return self.start_task(f"{tr('导出整合包')} {instance}", self._export_pack_impl, instance, dest)
 
     def check_mod_updates(self, instance: str) -> list:
         from mclauncher.mod_update import check_updates
         return check_updates(self._instance(instance))
 
     def start_mod_updates(self, instance: str) -> str:
-        return self.start_task(f"检查模组更新 {instance}", self._mod_update_impl, instance)
+        return self.start_task(f"{tr('检查模组更新')} {instance}", self._mod_update_impl, instance)
 
     def apply_mod_update(self, instance: str, row: dict) -> str:
         from mclauncher.mod_update import apply_update
@@ -2748,7 +2751,7 @@ class BackendAPI(QObject):
     def install_java(self, major: int, vendor: str = "adoptium") -> str:
         """异步下载 Java 运行时。"""
         return self.start_task(
-            f"下载 {vendor} Java {major}",
+            f"{tr('下载')} {vendor} Java {major}",
             self._install_java_impl, major, vendor,
         )
 

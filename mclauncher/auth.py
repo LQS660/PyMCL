@@ -434,6 +434,8 @@ class MicrosoftAuthenticator:
         mc_token = self.mc_login(uhs, xsts)
         profile = self.get_profile(mc_token)
         account.update({
+            "name": profile["name"],
+            "uuid": profile["uuid"],
             "access_token": mc_token,
             "refresh_token": refresh_token,
             "xuid": uhs,
@@ -453,7 +455,12 @@ class AccountManager:
 
     def load(self):
         data = utils.read_json(ACCOUNTS_FILE, None) or {}
-        self.accounts = [open_account(a) for a in data.get("accounts", []) if isinstance(a, dict)]
+        if not isinstance(data, dict):
+            data = {}
+        stored_accounts = data.get("accounts", [])
+        if not isinstance(stored_accounts, list):
+            stored_accounts = []
+        self.accounts = [open_account(a) for a in stored_accounts if isinstance(a, dict)]
         self.active = data.get("active")
 
     def save(self):
@@ -485,7 +492,12 @@ class AccountManager:
         if not name:
             return
         data = utils.read_json(ACCOUNTS_FILE, {}) or {}
-        for stored in data.get("accounts", []):
+        if not isinstance(data, dict):
+            return
+        stored_accounts = data.get("accounts", [])
+        if not isinstance(stored_accounts, list):
+            return
+        for stored in stored_accounts:
             if not isinstance(stored, dict) or stored.get("name") != name:
                 continue
             for key in _TOKEN_KEYS:
@@ -548,7 +560,15 @@ class AccountManager:
             raise AuthError("正版令牌已过期且无法刷新，请重新登录。")
         from .config import CONFIG
         client_id = CONFIG.get("microsoft_client_id") or "00000000402b5328"
-        account = MicrosoftAuthenticator(client_id=client_id).refresh(account)
+        original_name = account.get("name")
+        refreshed = MicrosoftAuthenticator(client_id=client_id).refresh(dict(account))
+        if refreshed["name"] != original_name:
+            # Do not overwrite another saved identity when a profile is renamed.
+            if self.get_account(refreshed["name"]) is not None:
+                raise AuthError("刷新后的角色名与已有账号冲突，请先处理同名账号。")
+            self._remove_stored_secrets(original_name)
+            self.accounts = [a for a in self.accounts if a.get("name") != original_name]
+        account.update(refreshed)
         return self.add_account(account)
 
     def launch_props(self, account):

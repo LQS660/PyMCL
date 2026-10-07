@@ -94,8 +94,12 @@ def sanitize_instance_name(raw, fallback="游戏") -> str:
     s = re.sub(r"\s+", " ", s).strip(" .")
     if not s:
         s = fallback
-    if s.upper() in _WIN_RESERVED:
-        s = f"{s}-游戏"
+    if len(s) > _MAX_INSTANCE_NAME:
+        s = s[:_MAX_INSTANCE_NAME].rstrip(" .")
+    # Windows also reserves CON.txt / LPT1.zip etc.; the check is on the
+    # portion before the first dot, not the full filename.
+    if s.split(".", 1)[0].upper() in _WIN_RESERVED:
+        s = f"游戏-{s}"
     if len(s) > _MAX_INSTANCE_NAME:
         s = s[:_MAX_INSTANCE_NAME].rstrip(" .")
     if not s:

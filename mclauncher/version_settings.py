@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
 
 from . import utils
@@ -60,7 +59,16 @@ FULLSCREEN_MODES = ("maximize", "fullscreen")
 
 
 def _file(instance, version_id) -> Path:
-    return instance.versions_dir() / version_id / FILE_NAME
+    """版本设置的落盘位置：`versions/<id>/pymcl.json`。
+
+    审计 #1 P0-2：这里以前零校验，`version_id="../../pwned"` 会让
+    `utils.write_json` 先在游戏目录之外建目录、再把 pymcl.json 写进去。
+    `safe_child_path` 的语义与 `saves._safe_child` / `installer.uninstall_version`
+    一致：`resolve()` 之后确认父目录就是 `versions/`。
+    """
+    vid = utils.safe_version_id(version_id)
+    vdir = utils.safe_child_path(instance.versions_dir(), vid)
+    return vdir / FILE_NAME
 
 
 def load(instance, version_id) -> dict:
@@ -80,7 +88,8 @@ def save(instance, version_id, data: dict) -> dict:
     cur.update(data or {})
     if cur.get("isolation") not in ISOLATION_LABELS:
         cur["isolation"] = ISOLATION_NONE
-    utils.write_json(_file(instance, version_id), cur)
+    target = _file(instance, version_id)  # 落盘前再校验一次（load 已过，这里是显式保险）
+    utils.write_json(target, cur)
     return cur
 
 
@@ -131,10 +140,14 @@ def _seed_from_shared(instance, version_id):
 
 
 def game_dir(instance, version_id, settings=None) -> Path:
+    # 审计 #1：这里是版本目录的公共入口，调用方（worlds / content_export /
+    # saves / modpack）都假定它返回的是 versions/ 下的真实目录。穿越名在这里挡住，
+    # 免得每个调用方各挡一遍。
+    utils.safe_version_id(version_id)
     settings = settings or load(instance, version_id)
     iso = settings.get("isolation") or ISOLATION_NONE
     if iso in (ISOLATION_ALL, ISOLATION_SAVES, ISOLATION_MODS):
-        return instance.versions_dir() / version_id
+        return utils.safe_child_path(instance.versions_dir(), version_id, "版本 ID")
     return Path(instance.path)
 
 
@@ -158,17 +171,124 @@ def _junction(link: Path, target: Path):
             return
     utils.ensure_dir(target)
     utils.ensure_dir(link.parent)
+    # 审计 #1 P0-4：这里以前走 `cmd /c mklink /J <link> <target>`。subprocess 用
+    # 列表参数看着安全，但 cmd.exe 会**二次解析**命令行：`&` 是命令分隔符，而
+    # `subprocess.list2cmdline` 只在参数含空格/引号时才加引号 —— 版本 ID 里带
+    # `&`（Windows 目录名的合法字符，sanitize_id 的黑名单里没有它）就能执行任意
+    # 命令。现在全程不经过 cmd.exe：os.symlink → CreateSymbolicLinkW → junction。
     if os.name == "nt":
-        subprocess.run(
-            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
-            capture_output=True, check=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        _win_dir_link(link, target)
         return
     try:
         link.symlink_to(target, target_is_directory=True)
     except OSError:
         pass
+
+
+def _win_dir_link(link: Path, target: Path):
+    """Windows 上建目录链接，按「不需要管理员」的顺序尝试三种实现。
+
+    1. `os.symlink`（开发者模式 / 有 SeCreateSymbolicLinkPrivilege 时可用）
+    2. `CreateSymbolicLinkW`（同上，但能显式要 `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE`）
+    3. junction（`FSCTL_SET_REPARSE_POINT`，**不需要任何特权**，老系统也能用）
+
+    全部失败就静默返回：隔离降级成普通目录，与旧实现 `check=False` 的行为一致。
+    """
+    if _try_symlink(link, target):
+        return
+    _create_junction(link, target)
+
+
+def _try_symlink(link: Path, target: Path) -> bool:
+    try:
+        os.symlink(str(target), str(link), target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError):
+        pass
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateSymbolicLinkW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+        k32.CreateSymbolicLinkW.restype = ctypes.c_ubyte
+        flags = 0x1 | 0x2  # SYMBOLIC_LINK_FLAG_DIRECTORY | ALLOW_UNPRIVILEGED_CREATE
+        return bool(k32.CreateSymbolicLinkW(str(link), str(target), flags))
+    except (OSError, AttributeError):
+        return False
+
+
+def _create_junction(link: Path, target: Path) -> bool:
+    """用 `FSCTL_SET_REPARSE_POINT` 建 junction（无特权要求）。
+
+    布局照 Windows 自己 `mklink /J` 写出来的那份：MountPoint 头的
+    ReparseDataLength 从结构体第 8 字节起算，SubstituteName 是 `\\??\\<绝对路径>`。
+    """
+    if os.name != "nt":
+        return False
+    import ctypes
+    import struct
+    from ctypes import wintypes
+
+    FSCTL_SET_REPARSE_POINT = 0x000900A4
+    IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
+    GENERIC_WRITE = 0x40000000
+    FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+    OPEN_EXISTING = 3
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = wintypes.HANDLE
+        k32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        ]
+        k32.DeviceIoControl.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+            ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
+        ]
+        k32.DeviceIoControl.restype = wintypes.BOOL
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        target_abs = os.path.abspath(str(target))
+        sub_b = ("\\??\\" + target_abs).encode("utf-16-le")
+        print_b = target_abs.encode("utf-16-le")
+        data_len = 8 + len(sub_b) + 2 + len(print_b) + 2
+        total = 8 + data_len
+        buf = ctypes.create_string_buffer(total)
+        struct.pack_into(
+            "<IHHHHHH", buf, 0, IO_REPARSE_TAG_MOUNT_POINT, data_len, 0,
+            0, len(sub_b), len(sub_b) + 2, len(print_b),
+        )
+        off = 16
+        buf[off:off + len(sub_b)] = sub_b
+        off += len(sub_b)
+        buf[off:off + 2] = b"\x00\x00"
+        off += 2
+        buf[off:off + len(print_b)] = print_b
+        off += len(print_b)
+        buf[off:off + 2] = b"\x00\x00"
+
+        utils.ensure_dir(link)
+        handle = k32.CreateFileW(
+            str(link), GENERIC_WRITE, 0, None, OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, None,
+        )
+        if not handle or handle == INVALID_HANDLE_VALUE:
+            return False
+        try:
+            returned = wintypes.DWORD(0)
+            return bool(k32.DeviceIoControl(
+                handle, FSCTL_SET_REPARSE_POINT, buf, total, None, 0,
+                ctypes.byref(returned), None,
+            ))
+        finally:
+            k32.CloseHandle(handle)
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def apply_isolation(instance, version_id, settings=None) -> Path:

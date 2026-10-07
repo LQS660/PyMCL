@@ -14,6 +14,15 @@ public static class Motion
     private static readonly DependencyProperty ActiveSbProperty =
         DependencyProperty.RegisterAttached("_activeSb", typeof(Storyboard), typeof(Motion), new PropertyMetadata(null));
 
+    /// <summary>
+    /// 正在跑的动画对应的完成信号。Storyboard.Stop() 不触发 Completed，
+    /// 而 AnimateAsync 的返回值就挂在那上面——被顶掉或 ResetVisual 掐掉之后，
+    /// 等在 await 上的调用方（PageInAsync / DockShowAsync / TabInAsync …）就永远不返回。
+    /// 存一份在这里，让 Stop 的两条路径能主动把它放行。
+    /// </summary>
+    private static readonly DependencyProperty ActiveDoneProperty =
+        DependencyProperty.RegisterAttached("_activeDone", typeof(TaskCompletionSource), typeof(Motion), new PropertyMetadata(null));
+
     public static bool AnimationsWanted()
     {
         try
@@ -44,10 +53,7 @@ public static class Motion
             return Task.CompletedTask;
         }
         var t = Tx(el);
-        if (el.GetValue(ActiveSbProperty) is Storyboard prev)
-        {
-            try { prev.Stop(); } catch { }
-        }
+        StopActive(el);
         var sb = new Storyboard();
         el.SetValue(ActiveSbProperty, sb);
         var ease = new CubicEase { EasingMode = mode };
@@ -64,14 +70,33 @@ public static class Motion
             sb.Children.Add(Anim(t, "ScaleY", s, dur, ease));
         }
         var done = new TaskCompletionSource();
+        el.SetValue(ActiveDoneProperty, done);
         sb.Completed += (_, _) =>
         {
             if (ReferenceEquals(el.GetValue(ActiveSbProperty), sb))
+            {
                 el.SetValue(ActiveSbProperty, null);
+                el.SetValue(ActiveDoneProperty, null);
+            }
             done.TrySetResult();
         };
         sb.Begin();
         return done.Task;
+    }
+
+    /// <summary>停掉在跑的动画并放行它的 await（Stop 不触发 Completed，得手动收尾）。</summary>
+    private static void StopActive(UIElement el)
+    {
+        if (el.GetValue(ActiveSbProperty) is Storyboard prev)
+        {
+            try { prev.Stop(); } catch { }
+            el.SetValue(ActiveSbProperty, null);
+        }
+        if (el.GetValue(ActiveDoneProperty) is TaskCompletionSource tcs)
+        {
+            el.SetValue(ActiveDoneProperty, null);
+            tcs.TrySetResult();
+        }
     }
 
     private static void ApplyInstant(UIElement el, double? opacity, double? x, double? y, double? scale)
@@ -101,6 +126,10 @@ public static class Motion
         return a;
     }
 
+    /// <summary>
+    /// 等元素 Loaded。加一个上限：元素若永不 Loaded（被换下的页、构造后没进可视树），
+    /// 原来这里会永久挂起，而 PageInAsync / TabInAsync 都 await 它。
+    /// </summary>
     public static async Task WaitLoadedAsync(FrameworkElement el)
     {
         if (el.IsLoaded) return;
@@ -112,7 +141,9 @@ public static class Motion
             tcs.TrySetResult();
         };
         el.Loaded += h;
-        await tcs.Task;
+        await Task.WhenAny(tcs.Task, Task.Delay(1000));
+        // 超时也要把处理器摘掉，否则这个元素每等一次就多挂一个永不执行的委托
+        if (!tcs.Task.IsCompleted) el.Loaded -= h;
     }
 
     public static async Task PageOutAsync(UIElement el)
@@ -229,11 +260,7 @@ public static class Motion
     public static void ResetVisual(UIElement? el)
     {
         if (el is null) return;
-        if (el.GetValue(ActiveSbProperty) is Storyboard sb)
-        {
-            try { sb.Stop(); } catch { }
-            el.SetValue(ActiveSbProperty, null);
-        }
+        StopActive(el);
         var t = Tx(el);
         el.Opacity = 1;
         t.TranslateX = 0;

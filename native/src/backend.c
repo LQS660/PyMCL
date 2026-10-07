@@ -30,6 +30,13 @@ static cJSON *g_titles;
 static cJSON *g_results;
 
 #define CRASH_TAIL 200
+
+/* P2-6：g_last_crash 的写入口（定义在 analyze_game_crash 之后，这里先声明）。 */
+static void crash_store(cJSON *rep);
+
+/* 开发后端的 Python 回落（GOAL 明确它仍是参考实现）。nopy 构建把整段编掉：
+   find_python 与下面两处调用点都在 #ifndef PYMCL_NO_PY 里，产物中没有对应符号。 */
+#ifndef PYMCL_NO_PY
 static int find_python(char *out, size_t n) {
     const char *env = getenv("PYMCL_PYTHON");
     if (env && env[0] && GetFileAttributesA(env) != INVALID_FILE_ATTRIBUTES) {
@@ -46,13 +53,14 @@ static int find_python(char *out, size_t n) {
     snprintf(out, n, "python");
     return 0;
 }
+#endif
 
 static cJSON *analyze_game_crash(const char *inst, const char *ver, long code,
                                  char **tail, int tn, int ts, double started) {
 #ifdef PYMCL_NO_PY
     (void)inst; (void)ver; (void)code; (void)tail; (void)tn; (void)ts; (void)started;
     return NULL;
-#endif
+#else
     char py[PYMCL_PATH], outf[PYMCL_PATH], jsonf[PYMCL_PATH], codebuf[32], startbuf[32];
     find_python(py, sizeof(py));
     snprintf(outf, sizeof(outf), "%s\\game-output-tail.txt", g_root);
@@ -88,16 +96,31 @@ static cJSON *analyze_game_crash(const char *inst, const char *ver, long code,
     argv[argc++] = startbuf;
     pymcl_run_process(argv, argc, g_root, NULL, NULL, 45);
     cJSON *rep = pymcl_read_json(jsonf);
-    if (rep) {
-        if (g_last_crash) cJSON_Delete(g_last_crash);
-        g_last_crash = cJSON_Duplicate(rep, 1);
-    }
+    if (rep) crash_store(rep);
     return rep;
+#endif
+}
+
+/* P2-6：g_last_crash 的写入点。旧版这里是裸的两行（task 线程）：
+       if (g_last_crash) cJSON_Delete(g_last_crash);
+       g_last_crash = cJSON_Duplicate(rep, 1);
+   而 client 线程会在 get_crash / backend_last_crash / open_crash_file 里读同一个
+   指针 → 删除与复制之间被读 = use-after-free。现在写读都在 g_mu 下。
+   抽成独立函数是为了让 tests/crash_race_harness.c 能直接并发压它。 */
+static void crash_store(cJSON *rep) {
+    cJSON *dup = rep ? cJSON_Duplicate(rep, 1) : NULL;
+    pthread_mutex_lock(&g_mu);
+    if (g_last_crash) cJSON_Delete(g_last_crash);
+    g_last_crash = dup;
+    pthread_mutex_unlock(&g_mu);
 }
 
 static void emit(const char *ev, cJSON *data) {
     if (g_emit) g_emit(ev, data);
 }
+
+/* AI 回合线程等后台使用者：事件与任务进度走同一条 SSE 通道。 */
+void backend_emit(const char *ev, cJSON *data) { emit(ev, data); }
 
 static void emit_kv(const char *ev, const char *fmt, ...) {
     /* unused helper kept for future */
@@ -187,6 +210,18 @@ static int pint(cJSON *a, const char *k, int def) {
     if (cJSON_IsString(v) && v->valuestring) return atoi(v->valuestring);
     return def;
 }
+/* save_settings 用：Python 的 (value or "").strip()，NULL 与空串都返回 "" */
+static const char *trim_str_or(const char *s, const char *def) {
+    static _Thread_local char buf[512];
+    if (!s) return def;
+    snprintf(buf, sizeof(buf), "%s", s);
+    char *p = buf;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    size_t n = strlen(p);
+    while (n && (p[n - 1] == ' ' || p[n - 1] == '\t' || p[n - 1] == '\r' || p[n - 1] == '\n')) p[--n] = 0;
+    if (!p[0]) return def;
+    return p;
+}
 
 static void on_login_code(void *ud, const char *code, const char *uri) {
     (void)ud;
@@ -201,9 +236,14 @@ static void on_login_code(void *ud, const char *code, const char *uri) {
     cJSON_Delete(st);
 }
 
+static void ctx_event(void *ud, const char *ev, cJSON *data) {
+    (void)ud;
+    emit(ev, data);
+}
+
 static void *task_run(void *p) {
     task_t *t = (task_t *)p;
-    pymcl_ctx ctx = { ctx_progress, ctx_log, ctx_cancel, t, config_int("download_threads", 8) };
+    pymcl_ctx ctx = { ctx_progress, ctx_log, ctx_cancel, t, config_int("download_threads", 8), ctx_event, NULL };
     int ok = 0;
     char msg[256] = {0};
     if (strcmp(t->method, "install_game") == 0) {
@@ -244,6 +284,12 @@ static void *task_run(void *p) {
         ok = install_content(kind, pstr(t->args, "instance", "default"),
                              pstr(t->args, "name", ""), cJSON_GetObjectItem(t->args, "extra"), &ctx) == 0;
         if (ok) snprintf(msg, sizeof(msg), "完成");
+    } else if (strcmp(t->method, "install_world") == 0) {
+        /* 世界装进 saves（开了存档隔离的版本进 versions/<id>/saves）。
+           完成文案由 install_world 回填，对齐 Python 的「已安装世界 {0}」。 */
+        ok = install_world(pstr(t->args, "instance", "default"),
+                           pstr(t->args, "name", ""), cJSON_GetObjectItem(t->args, "extra"),
+                           &ctx, msg, sizeof(msg)) == 0;
     } else if (strcmp(t->method, "launch_game") == 0) {
         const char *inst = pstr(t->args, "instance", "default");
         const char *ver = pstr(t->args, "version", "");
@@ -303,6 +349,17 @@ static void *task_run(void *p) {
                     snprintf(g_launch_id, sizeof(g_launch_id), "%s", t->id);
                     pthread_mutex_unlock(&g_mu);
                     if (proc) {
+                        /* bridge/api.py:2113 / :2136 —— game_started 无 payload（Python 发 {}），
+                           game_exited 带 {"code": code}。WPF 启动页靠这两个事件更新状态行，
+                           WinUI3 的 launcher_visibility（启动游戏时最小化/隐藏启动器）也订阅它们。
+                           此前 C 桥一个都不发，默认后端下这两个功能全部失效。
+                           发出时机与 Python 对齐：进程起来（拿到 handle）就 started，
+                           等待结束、清掉 g_game 之后才 exited。 */
+                        {
+                            cJSON *gs = cJSON_CreateObject();
+                            emit("game_started", gs);
+                            cJSON_Delete(gs);
+                        }
                         char buf[4096]; DWORD got;
                         char *tail[CRASH_TAIL];
                         int tn = 0, ts = 0;
@@ -330,10 +387,23 @@ static void *task_run(void *p) {
                         WaitForSingleObject(proc, INFINITE);
                         DWORD code = 0;
                         GetExitCodeProcess(proc, &code);
-                        CloseHandle(rd); CloseHandle(proc);
+                        /* P2-6（同族）：先把 g_game 摘掉再关句柄。旧顺序是
+                           CloseHandle 在前、清 g_game 在后，中间 is_game_running
+                           可能对一个已关闭的句柄做 WaitForSingleObject。 */
                         pthread_mutex_lock(&g_mu);
                         if (g_game == proc) g_game = NULL;
                         pthread_mutex_unlock(&g_mu);
+                        CloseHandle(rd); CloseHandle(proc);
+                        /* bridge/api.py:2136 的 `self._emit("game_exited", {"code": code})`。
+                           Python 那边 code 是 subprocess 的退出码（Windows 上可能是
+                           3221225477 这种大数），这里原样发 DWORD 转 double，不再做
+                           scode 的符号还原——前端只按数字显示（WPF 取 GetInt32）。 */
+                        {
+                            cJSON *ge = cJSON_CreateObject();
+                            cJSON_AddNumberToObject(ge, "code", (double)code);
+                            emit("game_exited", ge);
+                            cJSON_Delete(ge);
+                        }
                         if (t->cancelled) { ok = 1; snprintf(msg, sizeof(msg), "已停止游戏"); }
                         else {
                             long scode = (long)code;
@@ -382,6 +452,26 @@ static void *task_run(void *p) {
         }
     } else if (strcmp(t->method, "terracotta_prepare") == 0) {
         ok = terracotta_prepare_run(&ctx, msg, sizeof(msg)) == 0;
+    } else if (strcmp(t->method, "backup_save") == 0) {
+        ok = task_backup_save_run(&ctx, t->args, msg, sizeof(msg)) == 0;
+    } else if (strcmp(t->method, "repair_version") == 0) {
+        ok = task_repair_version_run(&ctx, t->args, msg, sizeof(msg)) == 0;
+    } else if (strcmp(t->method, "export_modpack") == 0) {
+        ok = task_export_modpack_run(&ctx, t->args, msg, sizeof(msg)) == 0;
+    } else if (strcmp(t->method, "start_authlib_login") == 0) {
+        ok = task_authlib_login_run(&ctx, t->args, msg, sizeof(msg)) == 0;
+    } else if (strcmp(t->method, "start_nide8_login") == 0) {
+        ok = task_nide8_login_run(&ctx, t->args, msg, sizeof(msg)) == 0;
+    } else if (strcmp(t->method, "export_launch_script") == 0) {
+        ok = task_export_launch_script_run(&ctx, t->args, msg, sizeof(msg)) == 0;
+    } else if (strcmp(t->method, "install_java") == 0) {
+        ok = task_install_java_run(&ctx, t->args, msg, sizeof(msg)) == 0;
+    } else if (strcmp(t->method, "start_mod_updates") == 0) {
+        ok = task_start_mod_updates_run(&ctx, t->args, msg, sizeof(msg)) == 0;
+    } else if (strcmp(t->method, "start_self_update") == 0) {
+        ok = task_start_self_update_run(&ctx, t->args, msg, sizeof(msg)) == 0;
+    } else if (strcmp(t->method, "migrate_official_launcher") == 0) {
+        ok = task_migrate_official_run(&ctx, t->args, msg, sizeof(msg)) == 0;
     }
     if (!msg[0]) snprintf(msg, sizeof(msg), "%s", ok ? "任务完成" : (t->cancelled ? "已取消" : pymcl_error()));
     finish_task(t, ok && !t->cancelled, t->cancelled ? "已取消" : msg);
@@ -539,7 +629,22 @@ void backend_init(sse_emit_fn emit_fn) {
 }
 
 void backend_shutdown(void) {
-    if (g_game) game_kill(g_game);
+    /* P2-6（同族）：与 task 线程的 g_game 写点共用 g_mu。game_kill 只是
+       TerminateProcess，不会回调回来取锁，不构成重入。 */
+    pthread_mutex_lock(&g_mu);
+    HANDLE g = g_game;
+    g_game = NULL;
+    pthread_mutex_unlock(&g_mu);
+    if (g) game_kill(g);
+}
+
+cJSON *backend_last_crash(void) {
+    /* P2-6：读侧同样持锁 —— 复制完再解锁，否则 task 线程的 crash_store
+       可能在这中间 delete 掉旧对象。 */
+    pthread_mutex_lock(&g_mu);
+    cJSON *dup = g_last_crash ? cJSON_Duplicate(g_last_crash, 1) : NULL;
+    pthread_mutex_unlock(&g_mu);
+    return dup ? dup : cJSON_CreateObject();
 }
 
 cJSON *backend_call(const char *method, cJSON *params) {
@@ -612,40 +717,130 @@ cJSON *backend_call(const char *method, cJSON *params) {
             Sleep(300);
         }
     }
-    if (strcmp(method, "is_game_running") == 0)
-        return cJSON_CreateBool(g_game && WaitForSingleObject(g_game, 0) == WAIT_TIMEOUT);
+    if (strcmp(method, "is_game_running") == 0) {
+        /* P2-6（同族）：旧版裸读 g_game。WaitForSingleObject 用 0 超时（立即返回），
+           放锁内不会阻塞他人；这样也不会对已被 CloseHandle 的句柄取值。 */
+        pthread_mutex_lock(&g_mu);
+        int running = g_game && WaitForSingleObject(g_game, 0) == WAIT_TIMEOUT;
+        pthread_mutex_unlock(&g_mu);
+        return cJSON_CreateBool(running);
+    }
     if (strcmp(method, "save_settings") == 0 || strcmp(method, "update_settings") == 0) {
         cJSON *d = params;
         cJSON *inner = cJSON_GetObjectItem(d, "data");
         if (!cJSON_IsObject(inner)) inner = cJSON_GetObjectItem(d, "settings");
         if (cJSON_IsObject(inner)) d = inner;
         /* 局部更新：只写提交里真带来的键。侧栏拖一下只发 ui_nav_*，不能顺手把
-           共享库 / 共享资源两个开关刷成 false。 */
-        if (cJSON_IsBool(cJSON_GetObjectItem(d, "share_libraries")))
-            config_set_bool("shared_libraries", cJSON_IsTrue(cJSON_GetObjectItem(d, "share_libraries")));
-        if (cJSON_IsBool(cJSON_GetObjectItem(d, "share_assets")))
-            config_set_bool("shared_assets", cJSON_IsTrue(cJSON_GetObjectItem(d, "share_assets")));
-        if (cJSON_IsNumber(cJSON_GetObjectItem(d, "download_threads")))
-            config_set_int("download_threads", (int)cJSON_GetObjectItem(d, "download_threads")->valuedouble);
-        if (cJSON_IsNumber(cJSON_GetObjectItem(d, "default_memory_mb")))
-            config_set_int("memory_mb", (int)cJSON_GetObjectItem(d, "default_memory_mb")->valuedouble);
+           共享库 / 共享资源两个开关刷成 false。
+           键名与落盘字段名逐条对照 bridge/api.py:956-1122 的 save_settings 白名单
+           （Python 是权威）：有键名映射的按映射写（default_memory_mb→memory_mb、
+           share_libraries→shared_libraries、game_dir→instances_dir）。
+           以前这里只有 8 个键 + ui_* 透传，WinUI3 设置页提交的 23 个键里有 14 个被
+           静默丢掉却仍返回 true（前端弹「已保存」）。 */
+        cJSON *v;
+        v = cJSON_GetObjectItem(d, "share_libraries");
+        if (cJSON_IsBool(v)) config_set_bool("shared_libraries", cJSON_IsTrue(v));
+        v = cJSON_GetObjectItem(d, "share_assets");
+        if (cJSON_IsBool(v)) config_set_bool("shared_assets", cJSON_IsTrue(v));
+        v = cJSON_GetObjectItem(d, "download_threads");
+        if (cJSON_IsNumber(v)) config_set_int("download_threads", (int)v->valuedouble);
+        v = cJSON_GetObjectItem(d, "default_memory_mb");
+        if (cJSON_IsNumber(v)) config_set_int("memory_mb", (int)v->valuedouble);
         cJSON *res = cJSON_GetObjectItem(d, "default_resolution");
         if (cJSON_IsArray(res) && cJSON_GetArraySize(res) >= 2) {
             config_set_int("width", (int)cJSON_GetArrayItem(res, 0)->valuedouble);
             config_set_int("height", (int)cJSON_GetArrayItem(res, 1)->valuedouble);
         }
-        if (cJSON_IsString(cJSON_GetObjectItem(d, "ms_client_id")))
-            config_set_str("microsoft_client_id", cJSON_GetObjectItem(d, "ms_client_id")->valuestring);
-        if (cJSON_IsString(cJSON_GetObjectItem(d, "curseforge_api_key")))
-            config_set_str("curseforge_api_key", cJSON_GetObjectItem(d, "curseforge_api_key")->valuestring);
+        v = cJSON_GetObjectItem(d, "ms_client_id");
+        if (cJSON_IsString(v)) {
+            /* Python：((value or "").strip() or CONFIG.get("microsoft_client_id")) —— 空串回退旧值 */
+            char t[512];
+            snprintf(t, sizeof(t), "%s", v->valuestring ? v->valuestring : "");
+            char *s = t;
+            while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+            size_t tl = strlen(s);
+            while (tl && (s[tl - 1] == ' ' || s[tl - 1] == '\t' || s[tl - 1] == '\r' || s[tl - 1] == '\n')) s[--tl] = 0;
+            if (s[0]) config_set_str("microsoft_client_id", s);
+            else {
+                const char *old = config_str("microsoft_client_id", PYMCL_MS_CLIENT_DEFAULT);
+                if (old && old[0]) config_set_str("microsoft_client_id", old);
+            }
+        }
+        v = cJSON_GetObjectItem(d, "curseforge_api_key");
+        if (cJSON_IsString(v)) {
+            char t[512];
+            snprintf(t, sizeof(t), "%s", v->valuestring ? v->valuestring : "");
+            char *s = t;
+            while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+            size_t tl = strlen(s);
+            while (tl && (s[tl - 1] == ' ' || s[tl - 1] == '\t' || s[tl - 1] == '\r' || s[tl - 1] == '\n')) s[--tl] = 0;
+            config_set_str("curseforge_api_key", s);
+        }
         {
             const char *inst = cJSON_GetStringValue(cJSON_GetObjectItem(d, "default_instance"));
             if (inst && inst[0]) config_set_str("default_instance", inst);
+        }
+        /* ---- AI 五键（WinUI3 的「测试 AI 连接」先 save_settings 再 test，缺这几个键
+           测的永远是旧配置）。地址类键各自独立判定，不能挂在 ai_mode 下：Python 的
+           注释专门写了这一点（api.py:986-996）。 ---- */
+        v = cJSON_GetObjectItem(d, "ai_mode");
+        if (v) {
+            const char *s = cJSON_GetStringValue(v);
+            config_set_str("ai_mode", (s && s[0]) ? s : "public");     /* value or "public" */
+        }
+        v = cJSON_GetObjectItem(d, "ai_gateway_url");
+        if (v) config_set_str("ai_gateway_url", trim_str_or(cJSON_GetStringValue(v), ""));
+        v = cJSON_GetObjectItem(d, "ai_base_url");
+        if (v) config_set_str("ai_base_url", trim_str_or(cJSON_GetStringValue(v), ""));
+        v = cJSON_GetObjectItem(d, "ai_api_key");
+        if (v) {
+            const char *s = cJSON_GetStringValue(v);                   /* value or ""（不 strip） */
+            config_set_str("ai_api_key", s ? s : "");
+        }
+        v = cJSON_GetObjectItem(d, "ai_model");
+        if (v) {
+            /* value or CONFIG.get("ai_model") or "deepseek-v4-flash"（不 strip） */
+            const char *s = cJSON_GetStringValue(v);
+            if (!s || !s[0]) s = config_str("ai_model", "deepseek-v4-flash");
+            config_set_str("ai_model", (s && s[0]) ? s : "deepseek-v4-flash");
+        }
+        /* ---- 其余 WinUI3 提交的键（api.py:1020-1122 的对应分支） ---- */
+        /* 这四个 Python 走 `patch[key] = data.get(key)` 原样落盘（不补默认值、不 strip） */
+        static const char *k_raw_keys[] = {"launcher_visibility", "gc_preset", "custom_homepage",
+                                           "homepage_mode", NULL};
+        for (int i = 0; k_raw_keys[i]; i++) {
+            v = cJSON_GetObjectItem(d, k_raw_keys[i]);
+            if (v) config_set(k_raw_keys[i], cJSON_Duplicate(v, 1));
+        }
+        v = cJSON_GetObjectItem(d, "download_source");
+        if (v) {
+            const char *s = cJSON_GetStringValue(v);
+            config_set_str("download_source", (s && s[0]) ? s : "auto");   /* value or "auto" */
+        }
+        v = cJSON_GetObjectItem(d, "download_limit_kbps");
+        if (v) {
+            long long x = 0;
+            if (!py_int(v, &x)) x = 0;                                    /* int(value or 0) */
+            if (x < 0) x = 0;
+            config_set_int("download_limit_kbps", (int)x);
+        }
+        v = cJSON_GetObjectItem(d, "auto_check_update");
+        if (v) config_set_bool("auto_check_update", py_truthy(v));         /* bool(value) */
+        v = cJSON_GetObjectItem(d, "default_isolation");
+        if (v) {
+            const char *s = cJSON_GetStringValue(v);
+            config_set_str("default_isolation", (s && s[0]) ? s : "none"); /* value or "none" */
+        }
+        v = cJSON_GetObjectItem(d, "default_jvm_args");
+        if (v) {
+            const char *s = cJSON_GetStringValue(v);                       /* value or "" */
+            config_set_str("default_jvm_args", s ? s : "");
         }
         /* ui_* 整键原样落盘：前端提交什么就存什么，读回去时各端自己做合法性过滤
            （Qt nav_items_from_config / WPF NavModel / 网页版 nav_model.ts 都会滤）。
            null 表示清掉（恢复默认侧栏就是把 ui_nav_groups / ui_section_members 置 null）。 */
         {
+            config_lock();
             cJSON *cfg = config_obj();
             cJSON *it;
             cJSON_ArrayForEach(it, d) {
@@ -653,6 +848,7 @@ cJSON *backend_call(const char *method, cJSON *params) {
                 cJSON_DeleteItemFromObject(cfg, it->string);
                 cJSON_AddItemToObject(cfg, it->string, cJSON_Duplicate(it, 1));
             }
+            config_unlock();
         }
         config_save();
         return cJSON_CreateTrue();
@@ -848,6 +1044,14 @@ cJSON *backend_call(const char *method, cJSON *params) {
         return search_content("resourcepack", pstr(params, "query", ""), pstr(params, "source", ""));
     if (strcmp(method, "search_datapacks") == 0)
         return search_content("datapack", pstr(params, "query", ""), pstr(params, "source", ""));
+    /* 世界页直接调 search_worlds（CatalogKind.World 的 SearchMethod）。此前这一支
+       落在 rpc_extra.c 的「转给 Python」列表里，打包版没有 Python 就必现
+       「方法 search_worlds 需要 Python 桥」——docs/GOAL-c-bridge-no-python.md:31
+       假设「前端不直接调用」是错的。这里原生实现，参数与 Python 版同构：
+       query / source / extra{game_version, category}。 */
+    if (strcmp(method, "search_worlds") == 0)
+        return search_worlds(pstr(params, "query", ""), pstr(params, "source", ""),
+                             cJSON_GetObjectItem(params, "extra"));
     if (strcmp(method, "get_installed_mods") == 0)
         return list_instance_files(pstr(params, "instance", "default"), "mods");
     if (strcmp(method, "get_installed_shaders") == 0)
@@ -856,19 +1060,69 @@ cJSON *backend_call(const char *method, cJSON *params) {
         return list_instance_files(pstr(params, "instance", "default"), "resourcepacks");
     if (strcmp(method, "get_installed_datapacks") == 0)
         return list_instance_files(pstr(params, "instance", "default"), "datapacks");
+    /* bridge/api.py:1458 get_installed_modpacks：读实例 .instance.json 里的 modpack 记录，
+       有 name 就拼成 "名字 版本"（version 为空则只留名字），否则空列表。 */
+    if (strcmp(method, "get_installed_modpacks") == 0) {
+        const char *inst = pstr(params, "instance", "default");
+        char ip[PYMCL_PATH];
+        if (instance_open(inst, ip, sizeof(ip)) != 0) return NULL;
+        cJSON *meta = instance_meta(inst);
+        cJSON *pack = cJSON_GetObjectItemCaseSensitive(meta, "modpack");
+        cJSON *out = cJSON_CreateArray();
+        cJSON *name = cJSON_IsObject(pack) ? cJSON_GetObjectItemCaseSensitive(pack, "name") : NULL;
+        if (py_truthy(name)) {
+            char nm[512], ver[512];
+            py_str(name, nm, sizeof(nm));
+            cJSON *v = cJSON_GetObjectItemCaseSensitive(pack, "version");
+            if (py_truthy(v)) {
+                py_str(v, ver, sizeof(ver));
+                char label[1100];
+                snprintf(label, sizeof(label), "%s %s", nm, ver);
+                cJSON_AddItemToArray(out, cJSON_CreateString(label));
+            } else {
+                cJSON_AddItemToArray(out, cJSON_CreateString(nm));
+            }
+        }
+        cJSON_Delete(meta);
+        return out;
+    }
     if (strcmp(method, "delete_mod") == 0) {
-        delete_instance_file(pstr(params, "instance", "default"), "mods", pstr(params, "filename", ""));
+        /* 原先无条件返回 true：路径校验失败（返回 -1）时前端照样弹「已删除」。
+           改成跟 Python 一致——校验不过就报错（api.py:793 → mods.py:504 的
+           delete_mod 会抛 ModError）。
+           这一处不补 emit ui_changed：现有前端删完都自己 LoadInstalledAsync()，
+           保持原样以免多一次无谓整页重载。 */
+        if (delete_instance_file(pstr(params, "instance", "default"), "mods", pstr(params, "filename", "")) != 0)
+            return NULL;
         return cJSON_CreateTrue();
     }
+    /* bridge/api.py:830/834/838：三个 delete_<kind> 只差 subdir，Python 侧都是
+       mods_mod.delete_content_file(inst, "<subdir>", filename) + emit ui_changed，
+       返回 None。这里同样回 null（同 delete_modpack/delete_instance 的写法），
+       前端只判 error 字段，不看 result。
+       路径校验在 delete_instance_file 内（同 delete_mod）：文件名带分隔符 / `..`
+       / 盘符一律报错，不落盘也不删。 */
+    if (strcmp(method, "delete_shader") == 0 || strcmp(method, "delete_resourcepack") == 0
+        || strcmp(method, "delete_datapack") == 0) {
+        const char *subdir = strcmp(method, "delete_shader") == 0 ? "shaderpacks"
+            : strcmp(method, "delete_resourcepack") == 0 ? "resourcepacks" : "datapacks";
+        if (delete_instance_file(pstr(params, "instance", "default"), subdir, pstr(params, "filename", "")) != 0)
+            return NULL;
+        emit("ui_changed", cJSON_CreateObject());
+        return cJSON_CreateNull();
+    }
     if (strcmp(method, "get_crash") == 0) {
-        if (g_last_crash) return cJSON_Duplicate(g_last_crash, 1);
-        return cJSON_CreateObject();
+        /* P2-6：与 crash_store 同一把锁（旧版裸读 → 与写方的 delete 竞态） */
+        pthread_mutex_lock(&g_mu);
+        cJSON *c = g_last_crash ? cJSON_Duplicate(g_last_crash, 1) : NULL;
+        pthread_mutex_unlock(&g_mu);
+        return c ? c : cJSON_CreateObject();
     }
     if (strcmp(method, "export_crash_report") == 0) {
 #ifdef PYMCL_NO_PY
         pymcl_set_error("NOT_NATIVE: export_crash_report still runs python -m mclauncher.crash");
         return NULL;
-#endif
+#else
         char py[PYMCL_PATH], jsonf[PYMCL_PATH], destf[PYMCL_PATH];
         const char *dest = pstr(params, "dest", "");
         find_python(py, sizeof(py));
@@ -885,14 +1139,29 @@ cJSON *backend_call(const char *method, cJSON *params) {
         argv[argc++] = jsonf;
         argv[argc++] = "--export";
         argv[argc++] = destf;
-        pymcl_run_process(argv, argc, g_root, NULL, NULL, 30);
+        /* P2-1：退出码必须看——旧版无条件返回 destf，python 没跑起来时也报成功，
+           前端拿到一个并不存在的 zip 路径。 */
+        if (pymcl_run_process(argv, argc, g_root, NULL, NULL, 30) != 0 || !pymcl_file_exists(destf)) {
+            if (!pymcl_error()[0]) pymcl_set_error("导出崩溃报告失败");
+            return NULL;
+        }
         return cJSON_CreateString(destf);
+#endif
     }
     if (strcmp(method, "open_crash_file") == 0) {
         const char *path = pstr(params, "path", "");
-        if (!path[0] && g_last_crash) {
-            const char *df = cJSON_GetStringValue(cJSON_GetObjectItem(g_last_crash, "direct_file"));
-            path = df ? df : "";
+        char from_crash[PYMCL_PATH];
+        from_crash[0] = 0;
+        if (!path[0]) {
+            /* P2-6：在锁内把 direct_file 抄出来再用（旧版直接引用 g_last_crash 里的
+               字符串，写方 delete 后就是悬垂指针）。 */
+            pthread_mutex_lock(&g_mu);
+            if (g_last_crash) {
+                const char *df = cJSON_GetStringValue(cJSON_GetObjectItem(g_last_crash, "direct_file"));
+                if (df) snprintf(from_crash, sizeof(from_crash), "%s", df);
+            }
+            pthread_mutex_unlock(&g_mu);
+            path = from_crash;
         }
         if (!path[0]) { pymcl_set_error("没有可打开的日志文件"); return NULL; }
         pymcl_open_folder(path);
@@ -921,12 +1190,34 @@ cJSON *backend_call(const char *method, cJSON *params) {
         return start_task("安装资源包", method, params);
     if (strcmp(method, "install_datapack") == 0)
         return start_task("安装数据包", method, params);
+    if (strcmp(method, "install_world") == 0)
+        return start_task("安装世界", method, params);
     if (strcmp(method, "launch_game") == 0)
         return start_task("启动游戏", method, params);
     if (strcmp(method, "start_microsoft_login") == 0)
         return start_task("微软登录", method, params);
     if (strcmp(method, "terracotta_prepare") == 0)
         return start_task("准备陶瓦联机", method, params);
+    if (strcmp(method, "backup_save") == 0)
+        return start_task("备份存档", method, params);
+    if (strcmp(method, "repair_version") == 0)
+        return start_task("修复", method, params);
+    if (strcmp(method, "export_modpack") == 0)
+        return start_task("导出整合包", method, params);
+    if (strcmp(method, "start_authlib_login") == 0)
+        return start_task("皮肤站登录", method, params);
+    if (strcmp(method, "start_nide8_login") == 0)
+        return start_task("统一通行证登录", method, params);
+    if (strcmp(method, "export_launch_script") == 0)
+        return start_task("导出启动脚本", method, params);
+    if (strcmp(method, "install_java") == 0)
+        return start_task("安装 Java", method, params);
+    if (strcmp(method, "start_mod_updates") == 0)
+        return start_task("检查模组更新", method, params);
+    if (strcmp(method, "start_self_update") == 0)
+        return start_task("更新启动器", method, params);
+    if (strcmp(method, "migrate_official_launcher") == 0)
+        return start_task("迁移官方启动器", method, params);
 
     /* 启动页布局：原生实现，别为每一次拖拽起一个 python 进程 */
     {
@@ -940,6 +1231,17 @@ cJSON *backend_call(const char *method, cJSON *params) {
         int handled = 0;
         cJSON *local = rpc_local_call(method, params, emit, &handled);
         if (handled) return local;
+    }
+
+    /* M2 联网：反馈 / 模组更新 / 目录文件列表（docs/GOAL-c-bridge-no-python.md M2） */
+    {
+        int handled = 0;
+        cJSON *m2 = rpc_feedback_call(method, params, &handled);
+        if (handled) return m2;
+        m2 = rpc_mod_update_call(method, params, &handled);
+        if (handled) return m2;
+        m2 = rpc_catalog_call(method, params, &handled);
+        if (handled) return m2;
     }
 
     /* 陶瓦联机（docs/GOAL-c-bridge-no-python.md M4） */
@@ -956,8 +1258,9 @@ cJSON *backend_call(const char *method, cJSON *params) {
         if (handled) return aligned;
     }
     {
+        /* nopy 构建里这一支只剩 NOT_NATIVE（rpc_fallback_call 内部 #ifdef 掉真回落）。 */
         int handled = 0;
-        cJSON *via_py = py_rpc_call_ex(method, params, &handled);
+        cJSON *via_py = rpc_fallback_call(method, params, &handled);
         if (via_py) return via_py;
         /* Python 端跑到了、只是抛了错：pymcl_set_error 里已经是真正的原因。
            再写一句 "unknown method" 就把它盖掉了——界面上那一片

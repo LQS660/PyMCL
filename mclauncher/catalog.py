@@ -73,6 +73,12 @@ MOD_ALIASES = {
     "ae2": {"slug": "ae2", "cf": 223794, "title": "Applied Energistics 2"},
     "applied energistics 2": {"slug": "ae2", "cf": 223794, "title": "Applied Energistics 2"},
 
+    # 机械动力本体（Create）：Modrinth slug=create，CurseForge projectId=238222。
+    # 注意别和下面 MODPACK_ALIASES 里的「机械动力整合包」（CBC）混为一谈。
+    "create": {"slug": "create", "cf": 238222, "title": "Create"},
+    "机械动力": {"slug": "create", "cf": 238222, "title": "Create"},
+    "机械动力模组": {"slug": "create", "cf": 238222, "title": "Create"},
+
     "神秘时代": {"slug": "thaumcraft", "cf": 223628, "title": "Thaumcraft"},
     "thaumcraft": {"slug": "thaumcraft", "cf": 223628, "title": "Thaumcraft"},
 
@@ -491,6 +497,68 @@ MOD_ALIASES = {
     "经验掉落": {"slug": "experience-bottling", "title": "Experience Bottling"},
     "附魔书": {"slug": "experience-bottling", "title": "Experience Bottling"},
 }
+
+# ----------------------------------------------------------------
+# 常见模组中文简介（本地映射，不走任何在线翻译）
+# 上游 Modrinth / CurseForge 只给英文 description/summary，这里按 slug 补中文；
+# 查不到就保留英文原文，不猜不编。
+# ----------------------------------------------------------------
+MOD_DESC_CN = {
+    "fabric-api": "Fabric 模组开发的核心前置库，提供绝大多数模组依赖的接口。",
+    "create": "机械动力：用齿轮、传送带与蒸汽动力搭建自动化工厂，主打原版风格的大型机械。",
+    "jei": "物品管理器：在物品栏与合成界面直接查询配方、用途与来源。",
+    "rei": "物品管理器（REI）：JEI 的 Fabric 版，查看合成配方与物品用途。",
+    "emi": "物品管理器 EMI：现代界面的配方查询模组，支持合成、烧炼与村民交易。",
+    "sodium": "钠：重构渲染管线，大幅提升帧率、消除卡顿，Fabric 端首选渲染优化。",
+    "lithium": "锂：优化服务端与客户端 tick 逻辑，降低卡顿且几乎不改变原版行为。",
+    "iris": "光影加载器：为 Sodium 提供光影支持，兼容 OptiFine 光影包。",
+    "starlight": "星光：重写光照引擎，显著降低光照更新带来的卡顿。",
+    "ae2": "应用能源2：以存储网络与自动化合成闻名的科技模组。",
+    "botania": "植物魔法：以魔力花与自然之力驱动的植物系魔法模组。",
+    "applied-energistics-2": "应用能源2：以存储网络与自动化合成闻名的科技模组。",
+    "twilight-forest": "暮色森林：加入全新维度，含独特生物群系、地牢与 Boss。",
+    "journeymap": "旅行地图：小地图与全屏地图，支持路径点与坐标显示。",
+    "xaeros-minimap": "Xaero 小地图：轻量小地图，显示地形、生物与路径点。",
+    "xaeros-world-map": "Xaero 世界地图：与小地图配套的全屏世界地图。",
+    "mekanism": "通用机械：涵盖采矿、能源、传送与五倍矿物处理的综合科技模组。",
+    "thermal-expansion": "热力膨胀：以机器、能源与管道为核心的经典科技模组。",
+    "tinkers-construct": "匠魂：自由组合材料锻造工具与武器，含熔炼炉系统。",
+    "farmers-delight": "农夫乐事：新增烹饪、锅具与大量食物，丰富农业玩法。",
+    "quark": "夸克：大量贴近原版风格的小功能合集，可逐项开关。",
+    "appleskin": "苹果皮：显示食物恢复的饥饿值与饱和度。",
+    "wthit": "方块信息显示：准星指向方块/实体时显示名称与状态（WAILA 后继）。",
+    "jade": "玉：现代化的方块信息显示模组，WAILA 系列的替代品。",
+    "worldedit": "创世神：功能强大的世界编辑工具，支持批量建造与区域操作。",
+    "litematica": "投影：把建造蓝图投影到世界中，按图施工。",
+    "carry-on": "搬运：徒手搬起箱子、熔炉等方块而不掉落内容物。",
+    "simple-voice-chat": "简单语音聊天：游戏内就近声音传播的语音插件。",
+    "customskinloader": "皮肤加载器：支持离线皮肤与多皮肤站，无需正版也能换皮肤。",
+    "3dskinlayers": "3D 皮肤层：把玩家的帽子与外套层渲染成 3D 立体。",
+    "biomesoplenty": "超多群系：新增大量生物群系与植物，丰富世界生成。",
+    "iceandfire": "冰火传说：加入巨龙、神话生物与遗迹的冒险模组。",
+    "galacticraft-legacy": "星系：加入火箭、太空维度与各行星探索。",
+    "mowzies-mobs": "更多生物：新增风格贴近原版的 Boss 与敌对生物。",
+    "veinminer": "连锁采集：按住快捷键一次性挖掉整条矿脉。",
+    "betterf3": "更好的 F3：让调试界面更简洁、更易读、可自定义。",
+    "inventory-profiles-next": "物品栏配置：一键保存/加载背包排序与整理方案。",
+}
+
+# 别名命中时往往拿不到 slug（CurseForge 走的是数字 id），再用英文标题兜一层。
+_MOD_DESC_BY_TITLE = {v.get("title", "").strip().lower(): MOD_DESC_CN.get(k) or MOD_DESC_CN.get(v.get("slug") or "")
+                      for k, v in MOD_ALIASES.items()}
+_MOD_DESC_BY_TITLE = {k: v for k, v in _MOD_DESC_BY_TITLE.items() if k and v}
+
+
+def mod_desc_cn(slug=None, title=None, fallback=""):
+    """按 slug / 标题查本地中文简介，查不到原样返回 fallback（英文原文）。"""
+    key = (slug or "").strip().lower()
+    if key in MOD_DESC_CN:
+        return MOD_DESC_CN[key]
+    tkey = (title or "").strip().lower()
+    if tkey and tkey in _MOD_DESC_BY_TITLE:
+        return _MOD_DESC_BY_TITLE[tkey]
+    return fallback if fallback is not None else ""
+
 
 # 别名索引（小写化）
 _MOD_ALIASES_LOWER = {k.lower(): v for k, v in MOD_ALIASES.items()}

@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""OpenAI 兼容客户端：公益网关 / 自定义 NewAPI。"""
+"""OpenAI 兼容客户端：公益网关 / 自定义 OpenAI 兼容端点。"""
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Iterator
 
 import requests
@@ -11,11 +12,15 @@ from requests.exceptions import ReadTimeout, ChunkedEncodingError
 
 from mclauncher.net import apply_direct_to_session
 
-from . import builtin
+from . import builtin, images, modelcaps
 from .defaults import (
-    CLIENT_HEADER, DEFAULT_GATEWAY_URL, DEFAULT_MODEL,
+    CLIENT_HEADER, DEFAULT_API_BASE, DEFAULT_API_KEY, DEFAULT_GATEWAY_URL, DEFAULT_MODEL,
     ONCE_TIMEOUT, STREAM_CONNECT_TIMEOUT, STREAM_READ_TIMEOUT,
 )
+
+# 模块级变量便于测试 / 打包时替换内置网关。
+_BUILTIN_BASE = DEFAULT_API_BASE
+_BUILTIN_KEY = DEFAULT_API_KEY
 
 
 def _categorize(message: str, status: int) -> str:
@@ -112,17 +117,58 @@ def normalize_base(url: str) -> str:
     return u + "/v1"
 
 
+def model_caps(settings: dict) -> dict:
+    """当前所选模型的能力（是否支持图片 / 上下文窗口）。
+
+    mode=custom 用用户填的模型名查表；mode=public 的模型由网关侧锁定
+    （builtin.public_model()），同样查表——所以公益接口换模型时 UI 的图片
+    开关会自动跟着变，不需要改前端。
+    """
+    mode = (settings.get("ai_mode") or "public").strip().lower()
+    if mode in ("custom", "newapi", "自定义"):
+        model = (settings.get("ai_model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        base_url = settings.get("ai_base_url") or ""
+    else:
+        model = builtin.public_model() or DEFAULT_MODEL
+        base_url = settings.get("ai_gateway_url") or DEFAULT_GATEWAY_URL or ""
+    return modelcaps.resolve(
+        model,
+        api_type=modelcaps.api_type_for_mode(mode),
+        base_url=base_url,
+        settings=settings,
+    )
+
+
+def current_model(settings: dict) -> str:
+    mode = (settings.get("ai_mode") or "public").strip().lower()
+    if mode in ("custom", "newapi", "自定义"):
+        return (settings.get("ai_model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    return builtin.public_model() or DEFAULT_MODEL
+
+
+def supports_image(settings: dict) -> bool:
+    """UI 门控入口：当前模型能不能收图片。"""
+    try:
+        return bool((model_caps(settings).get("inputFormat") or {})
+                    .get("supportsImage"))
+    except Exception:  # noqa: BLE001
+        # 能力表读不出来时按不支持处理：宁可不给入口，也不让用户发出去被上游拒
+        return False
+
+
 def resolve_endpoint(settings: dict) -> dict:
     """返回 {mode, url, headers, model, public}。"""
     mode = (settings.get("ai_mode") or "public").strip().lower()
     model = (settings.get("ai_model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
     if mode in ("custom", "newapi", "自定义"):
-        base = normalize_base(settings.get("ai_base_url") or "")
-        key = (settings.get("ai_api_key") or "").strip()
+        # 用户没填就用内置公益网关的地址与令牌（开箱即用）。用户想用自己的
+        # NewAPI，填了任意一项就完全按用户填的走。
+        base = normalize_base(settings.get("ai_base_url") or _BUILTIN_BASE)
+        key = (settings.get("ai_api_key") or "").strip() or _BUILTIN_KEY
         if not base:
-            raise AIClientError("请在设置里填写自定义 NewAPI 地址（到 /v1 为止）")
+            raise AIClientError("请在设置里填写「自定义 OpenAI 兼容端点」的地址（到 /v1 为止）")
         if not key:
-            raise AIClientError("请在设置里填写 NewAPI 令牌")
+            raise AIClientError("请在设置里填写「自定义 OpenAI 兼容端点」的令牌")
         return {
             "mode": "custom",
             "url": base + "/chat/completions",
@@ -133,6 +179,7 @@ def resolve_endpoint(settings: dict) -> dict:
             },
             "model": model,
             "public": False,
+            "builtin": base == _BUILTIN_BASE,
         }
     builtin_ep = builtin.public_endpoint()
     gateway = (settings.get("ai_gateway_url") or DEFAULT_GATEWAY_URL or "").strip().rstrip("/")
@@ -140,7 +187,8 @@ def resolve_endpoint(settings: dict) -> dict:
         return {
             "mode": "public",
             "url": gateway + "/pymcl/chat",
-            "models_url": gateway + "/health",
+            # 公开网关模式的模型列表走 /pymcl/models（老的 /health 不返回模型清单）
+            "models_url": gateway + "/pymcl/models",
             "headers": {
                 "Content-Type": "application/json",
                 "X-PyMCL-Client": CLIENT_HEADER,
@@ -152,7 +200,8 @@ def resolve_endpoint(settings: dict) -> dict:
     # 不静默失败、不偷偷走什么内置通道。
     raise AIClientError(
         "还没有配置 AI 网关：请到「设置 → AI 助手」填入自建公益网关地址，"
-        "或切到「自定义 NewAPI」模式填地址与令牌。搭建方法见 ai_gateway/README.md。")
+        "或切到「自定义 OpenAI 兼容端点」模式填地址与令牌。"
+        "搭建自建网关的方法请查看启动器安装目录下的说明文档，或访问项目主页。")
 
 
 def _session() -> requests.Session:
@@ -187,8 +236,46 @@ def test_connection(settings: dict) -> str:
     models = data.get("data") or []
     names = [m.get("id") for m in models if isinstance(m, dict) and m.get("id")]
     if names:
-        return f"NewAPI 正常，可用模型 {len(names)} 个，例如 {names[0]}"
-    return "NewAPI 已连通"
+        return f"自定义端点正常，可用模型 {len(names)} 个，例如 {names[0]}"
+    return "自定义端点已连通"
+
+
+def list_models(settings: dict) -> list[str]:
+    """拉取当前端点可用模型 id 列表。
+
+    返回排序去重后的列表；端点没配 / 网络失败 / 返回体不是模型清单时抛
+    AIClientError（前端据此提示并保留手填）。绝不让异常裸抛到 UI 线程。
+    """
+    ep = resolve_endpoint(settings)
+    resp = _session().get(ep["models_url"], headers=ep["headers"], timeout=15)
+    if resp.status_code >= 400:
+        raise AIClientError(_err_text(resp), resp.status_code)
+    try:
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        raise AIClientError("模型列表接口返回的不是 JSON（可能网关未启用该接口）") from exc
+    if not isinstance(data, dict):
+        raise AIClientError("模型列表接口返回格式不对")
+    rows = data.get("data")
+    if rows is None:
+        rows = data.get("models")
+    out: list[str] = []
+    seen: set[str] = set()
+    if isinstance(rows, list):
+        for m in rows:
+            mid = m.get("id") if isinstance(m, dict) else (m if isinstance(m, str) else None)
+            if isinstance(mid, str) and mid.strip() and mid not in seen:
+                seen.add(mid)
+                out.append(mid)
+    else:
+        # 兼容 {models: {"a": {...}, "b": {...}}} 这种 map 形态
+        if isinstance(rows, dict):
+            for mid in rows.keys():
+                if isinstance(mid, str) and mid.strip() and mid not in seen:
+                    seen.add(mid)
+                    out.append(mid)
+    out.sort()
+    return out
 
 
 def _err_text(resp) -> str:
@@ -442,12 +529,70 @@ def _http_error(exc, http_cancel):
     return AIClientError(f"连不上接口: {exc}")
 
 
+def _prepare_messages(settings: dict, messages: list) -> list:
+    """把消息体转成上游能收的形态：图片路径 → 内容块 / 文字说明。
+
+    消息里图片是以 ``images: [路径…]`` 的形式挂着的（agent 侧只存路径，
+    不把 base64 写进会话文件）。这里按当前模型能力决定怎么落地：
+
+    - 支持图片 → 读文件、压缩、编码成 ``image_url`` 内容块；
+    - 不支持   → 剥成一句文字说明。上游收到不认识的 content 块多半直接 400，
+      用户看到的会是「请求格式错误」这种跟图片无关的报错；剥掉后模型至少
+      知道「这里本来有图」，能回一句有意义的解释。
+
+    没有图片的消息原样返回（同一个 dict 对象），纯文本请求路径零开销。
+    """
+    if not messages:
+        return messages
+    if not any(isinstance(m, dict) and m.get("images") for m in messages):
+        return messages
+
+    vision = supports_image(settings)
+    out = []
+    for m in messages:
+        if not isinstance(m, dict) or not m.get("images"):
+            out.append(m)
+            continue
+        paths = [p for p in (m.get("images") or []) if p]
+        m = dict(m)
+        m.pop("images", None)
+        if not paths:
+            out.append(m)
+            continue
+        content = m.get("content")
+        if vision:
+            urls = []
+            failed = []
+            for path in paths[:images.MAX_PER_TURN]:
+                try:
+                    urls.append(images.encode_file(path))
+                except images.ImageError as exc:
+                    failed.append(f"{Path(path).name}：{exc}")
+                except Exception as exc:  # noqa: BLE001
+                    failed.append(f"{Path(path).name}：{str(exc)[:80]}")
+            if urls:
+                m["content"] = images.build_user_content(content, urls)
+            if failed:
+                # 部分图失败不能静默：模型和用户都得知道少看了什么
+                note = "（这些图片没能附上：" + "；".join(failed) + "）"
+                if isinstance(m["content"], list):
+                    m["content"].append({"type": "text", "text": note})
+                else:
+                    m["content"] = f"{m['content']}\n{note}".strip()
+        else:
+            note = (f"（用户附了 {len(paths)} 张图片，但当前模型不支持看图，"
+                    "已省略。如需识别图片，请在设置里换成支持图片的模型。）")
+            m["content"] = f"{content}\n{note}".strip()
+        out.append(m)
+    return out
+
+
 def chat_stream(settings: dict, messages: list, tools: list | None = None,
                 temperature: float = 0.3, http_cancel=None) -> Iterator[dict]:
     ep = resolve_endpoint(settings)
     body = {
         "model": ep["model"],
-        "messages": messages,
+        "messages": _prepare_messages(settings, messages),
         "temperature": temperature,
         "stream": True,
         "max_tokens": max_output_tokens(settings),
@@ -457,7 +602,7 @@ def chat_stream(settings: dict, messages: list, tools: list | None = None,
         body["tool_choice"] = "auto"
     expect_usage = False
     if not ep["public"]:
-        # 公益网关是纯字节转发拿不到 usage；自定义 NewAPI 直连才请求计量
+        # 公益网关是纯字节转发拿不到 usage；自定义 OpenAI 兼容端点直连才请求计量
         body["stream_options"] = {"include_usage": True}
         expect_usage = True
     session = _session()
@@ -486,7 +631,7 @@ def chat_once(settings: dict, messages: list, tools: list | None = None,
     ep = resolve_endpoint(settings)
     body = {
         "model": ep["model"],
-        "messages": messages,
+        "messages": _prepare_messages(settings, messages),
         "temperature": temperature,
         "stream": False,
         "max_tokens": max_output_tokens(settings),

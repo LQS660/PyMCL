@@ -777,8 +777,19 @@ class MainWindow(FluentWindowBase):
                 ensure_theme_surfaces(page)
 
     def _create_task_badge(self):
-        """把任务角标挂到当前侧栏的「下载任务」按钮上（侧栏重建后重挂）。"""
+        """把任务角标挂到当前侧栏的「下载任务」按钮上（侧栏重建后重挂）。
+
+        「下载任务」被布局设置隐藏时 `side.button("tasks")` 返回 None。此时
+        必须**不要**建控件：无父的 QWidget `show()` 出来是一个独立的顶层窗口
+        （实测 isWindow()=True、位置 (0,0)、不随主窗移动/关闭，还会在
+        quitOnLastWindowClosed=True 下阻止应用退出）——屏幕上左上角冒出个
+        游离的红色小方块。所以 target 为 None 就置 None 收场，
+        _update_task_badge / _place_task_badge 首行都得判 None。
+        """
         target = self.side.button("tasks")
+        if target is None:
+            self.task_badge = None
+            return
         self.task_badge = QLabel("0", target)
         self.task_badge.setObjectName("taskBadge")
         self.task_badge.setAlignment(Qt.AlignCenter)
@@ -1536,19 +1547,23 @@ class MainWindow(FluentWindowBase):
                 pass
 
     def _update_task_badge(self, count: int):
-        if count <= 0:
-            self.task_badge.hide()
+        badge = getattr(self, "task_badge", None)
+        if badge is None:
+            # 侧栏没有「下载任务」按钮：没有角标可挂，别 show() 出顶层窗口
             return
-        prev = int(self.task_badge.property("count") or 0)
-        self.task_badge.setText("99+" if count > 99 else str(count))
-        self.task_badge.adjustSize()
-        self.task_badge.setFixedHeight(16)
-        self.task_badge.show()
-        self.task_badge.setProperty("count", int(count))
+        if count <= 0:
+            badge.hide()
+            return
+        prev = int(badge.property("count") or 0)
+        badge.setText("99+" if count > 99 else str(count))
+        badge.adjustSize()
+        badge.setFixedHeight(16)
+        badge.show()
+        badge.setProperty("count", int(count))
         self._place_task_badge()
         if count > prev:
             from .motion import pop
-            pop(self.task_badge)
+            pop(badge)
 
     def _place_task_badge(self):
         side = getattr(self, "side", None)

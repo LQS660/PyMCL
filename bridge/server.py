@@ -76,6 +76,27 @@ def _normalize_origin(origin: str) -> str:
     return f"http://{LOOPBACK_HOST}" + (f":{port}" if port is not None else "")
 
 
+def _token_matches(supplied, expected) -> bool:
+    """常量时间比较令牌，且对非 ASCII 输入返回 False 而不是抛 TypeError。
+
+    审计 #1 P1-1：HTTP 头按 latin-1 解码，任意字节都能变成非 ASCII `str`；
+    `hmac.compare_digest` 对含非 ASCII 的 `str` 抛 TypeError（不是返回 False）。
+    该异常发生在 `_authorize` 内、不在 do_GET/do_POST 的 try 覆盖范围里，
+    客户端收到的是 RemoteDisconnected 而不是 401，服务端每次一份 traceback。
+    """
+    if not supplied or not expected:
+        return False
+    try:
+        a = supplied.encode("utf-8") if isinstance(supplied, str) else bytes(supplied)
+        b = expected.encode("utf-8") if isinstance(expected, str) else bytes(expected)
+    except (UnicodeError, TypeError, ValueError):
+        return False
+    try:
+        return hmac.compare_digest(a, b)
+    except (TypeError, ValueError):
+        return False
+
+
 class BridgeState:
     def __init__(self, api, bus, *, token: str | None = None, allowed_origins=()):
         token = token or secrets.token_urlsafe(32)
@@ -146,9 +167,14 @@ def make_handler(state: BridgeState):
 
             supplied = self.headers.get(TOKEN_HEADER, "")
             if not supplied and allow_sse_query:
-                values = parse_qs(urlparse(self.path).query, keep_blank_values=True).get("token", [])
-                supplied = values[0] if len(values) == 1 else ""
-            if not supplied or not hmac.compare_digest(supplied, state.token):
+                try:
+                    values = parse_qs(urlparse(self.path).query, keep_blank_values=True).get("token", [])
+                    supplied = values[0] if len(values) == 1 else ""
+                except (ValueError, UnicodeError):
+                    supplied = ""
+            # 审计 #1 P1-1：比较走 _token_matches（统一到 bytes + 吞掉编码异常），
+            # 恶意头必须拿到 401，而不是让 TypeError 把连接直接打断。
+            if not _token_matches(supplied, state.token):
                 self._send_json(401, {"error": "authentication required"}, origin=origin)
                 return False, None
             return True, origin
@@ -246,17 +272,22 @@ def make_handler(state: BridgeState):
             self._send_json(200, {"jsonrpc": "2.0", "id": rid, "result": result}, origin=origin)
 
         def _sse(self, origin: str | None):
-            q = state.bus.subscribe()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache, no-store")
-            self.send_header("Connection", "keep-alive")
-            self.send_header("X-Accel-Buffering", "no")
-            if origin:
-                self.send_header("Access-Control-Allow-Origin", origin)
-                self.send_header("Vary", "Origin")
-            self.end_headers()
+            # 审计 #1 P1-2：subscribe() 以前在 try 之外，而 send_response /
+            # end_headers 也在 try 之外 —— 客户端在握手阶段断开时 finally 不执行，
+            # 队列永久留在 EventBus._subs 里（每队列最多 800 个 payload，无界增长）。
+            # 现在从 subscribe 起全部纳入 try/finally。
+            q = None
             try:
+                q = state.bus.subscribe()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache, no-store")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("X-Accel-Buffering", "no")
+                if origin:
+                    self.send_header("Access-Control-Allow-Origin", origin)
+                    self.send_header("Vary", "Origin")
+                self.end_headers()
                 hello = json.dumps({"ok": True}, ensure_ascii=False)
                 self.wfile.write(f"event: hello\ndata: {hello}\n\n".encode("utf-8"))
                 self.wfile.flush()
@@ -274,7 +305,8 @@ def make_handler(state: BridgeState):
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
                 pass
             finally:
-                state.bus.unsubscribe(q)
+                if q is not None:
+                    state.bus.unsubscribe(q)
 
     return Handler
 

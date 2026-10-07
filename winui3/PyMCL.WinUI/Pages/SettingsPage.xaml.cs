@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using PyMCL.Models;
@@ -98,41 +99,112 @@ public sealed partial class SettingsPage : UserControl
         ai_model = string.IsNullOrWhiteSpace(AiModel.Text) ? "deepseek-v4-flash" : AiModel.Text.Trim(),
     };
 
+    /// <summary>
+    /// 提交空串时后端按「沿用旧值 / 回落到默认」处理，本来就不该等于空串的键。
+    /// 对这些键不回读对账，免得把「清空 = 用默认」误报成「没写进去」。
+    /// （bridge/api.py 与 native/src/settings.c 两侧都是这个语义。）
+    /// </summary>
+    private static readonly HashSet<string> EmptyMeansFallback = new(StringComparer.Ordinal)
+    {
+        "ms_client_id", "ai_gateway_url", "ai_model",
+    };
+
+    /// <summary>
+    /// 保存后回读校验。桥（尤其 C 桥）对白名单外的键是「静默忽略 + 返回成功」，
+    /// 前端只看返回值就会弹绿色「已保存」而用户改的东西其实没落盘。这里拿刚提交的值
+    /// 跟 get_settings 回读的结果逐键比，把对不上的键名报给用户，不再假装成功。
+    /// </summary>
+    private async Task<List<string>> VerifyAsync(object sent)
+    {
+        var missed = new List<string>();
+        if (AppServices.Client is null) return missed;
+        var after = await AppServices.Client.CallAsync<Dictionary<string, JsonElement>>("get_settings");
+        if (after is null) return missed;
+        var sentJson = JsonSerializer.SerializeToElement(sent, BridgeClient.JsonOpt);
+        if (sentJson.ValueKind != JsonValueKind.Object) return missed;
+        foreach (var kv in sentJson.EnumerateObject())
+        {
+            if (!after.TryGetValue(kv.Name, out var got)) continue;   // 桥不返回的键无从对账，跳过
+            var want = kv.Value;
+            if (want.ValueKind == JsonValueKind.String
+                && string.IsNullOrEmpty(want.GetString())
+                && EmptyMeansFallback.Contains(kv.Name))
+                continue;
+            var same = want.ValueKind switch
+            {
+                JsonValueKind.Array => ArrayEquals(want, got),
+                JsonValueKind.True or JsonValueKind.False => IsTrue(got) == (want.ValueKind == JsonValueKind.True),
+                JsonValueKind.Number => got.ValueKind == JsonValueKind.Number
+                    ? Math.Abs(got.GetDouble() - want.GetDouble()) < 0.001
+                    : false,
+                JsonValueKind.String => got.ValueKind == JsonValueKind.String
+                    && string.Equals(got.GetString(), want.GetString(), StringComparison.Ordinal),
+                _ => true,
+            };
+            if (!same) missed.Add(kv.Name);
+        }
+        return missed;
+    }
+
+    private static bool ArrayEquals(JsonElement want, JsonElement got)
+    {
+        if (got.ValueKind != JsonValueKind.Array || got.GetArrayLength() != want.GetArrayLength())
+            return false;
+        var a = want.EnumerateArray().ToList();
+        var b = got.EnumerateArray().ToList();
+        for (var i = 0; i < a.Count; i++)
+        {
+            if (a[i].ValueKind == JsonValueKind.Number && b[i].ValueKind == JsonValueKind.Number)
+            {
+                if (Math.Abs(a[i].GetDouble() - b[i].GetDouble()) > 0.001) return false;
+            }
+            else if (a[i].ToString() != b[i].ToString()) return false;
+        }
+        return true;
+    }
+
     private async void Save_Click(object sender, RoutedEventArgs e)
     {
         if (AppServices.Client is null) return;
         try
         {
-            await AppServices.Client.CallAsync("save_settings", new
+            // 键名与 bridge/api.py 的 save_settings 白名单逐键对齐（Python 是权威）；
+            // 桥写不进去的键由下面的回读校验抓出来，不再无条件报「已保存」。
+            var payload = new
             {
-                data = new
-                {
-                    share_libraries = ShareLibs.IsOn,
-                    share_assets = ShareAssets.IsOn,
-                    download_threads = SpinValue(ThreadsSpin, 8),
-                    default_memory_mb = SpinValue(MemorySpin, 4096),
-                    default_resolution = new[] { SpinValue(WidthSpin, 854), SpinValue(HeightSpin, 480) },
-                    ms_client_id = MsClient.Text?.Trim() ?? "",
-                    curseforge_api_key = CurseKey.Password?.Trim() ?? "",
-                    ai_mode = TagOf(AiModeBox, "public"),
-                    ai_gateway_url = AiGateway.Text?.Trim() ?? "",
-                    ai_base_url = AiBase.Text?.Trim() ?? "",
-                    ai_api_key = AiKey.Password?.Trim() ?? "",
-                    ai_model = string.IsNullOrWhiteSpace(AiModel.Text) ? "deepseek-v4-flash" : AiModel.Text.Trim(),
-                    default_isolation = TagOf(IsoBox, "none"),
-                    default_jvm_args = JvmEdit?.Text?.Trim() ?? "",
-                    launcher_visibility = TagOf(VisBox, "keep"),
-                    gc_preset = TagOf(GcBox, "auto"),
-                    download_source = TagOf(SourceBox, "auto"),
-                    download_limit_kbps = SpinValue(LimitSpin, 0),
-                    homepage_mode = TagOf(HomeBox, "news"),
-                    custom_homepage = HomePath?.Text?.Trim() ?? "",
-                    auto_check_update = AutoUpd.IsOn,
-                    ui_fly_animation = FlyAnimSw?.IsOn ?? true,
-                    ui_fly_duration_ms = SpinValue(FlyDurSpin, 620),
-                },
-            });
-            AppServices.Toast?.Invoke("已保存", "设置已写入 config.json", InfoBarSeverity.Success);
+                share_libraries = ShareLibs.IsOn,
+                share_assets = ShareAssets.IsOn,
+                download_threads = SpinValue(ThreadsSpin, 8),
+                default_memory_mb = SpinValue(MemorySpin, 4096),
+                default_resolution = new[] { SpinValue(WidthSpin, 854), SpinValue(HeightSpin, 480) },
+                ms_client_id = MsClient.Text?.Trim() ?? "",
+                curseforge_api_key = CurseKey.Password?.Trim() ?? "",
+                ai_mode = TagOf(AiModeBox, "public"),
+                ai_gateway_url = AiGateway.Text?.Trim() ?? "",
+                ai_base_url = AiBase.Text?.Trim() ?? "",
+                ai_api_key = AiKey.Password?.Trim() ?? "",
+                ai_model = string.IsNullOrWhiteSpace(AiModel.Text) ? "deepseek-v4-flash" : AiModel.Text.Trim(),
+                default_isolation = TagOf(IsoBox, "none"),
+                default_jvm_args = JvmEdit?.Text?.Trim() ?? "",
+                launcher_visibility = TagOf(VisBox, "keep"),
+                gc_preset = TagOf(GcBox, "auto"),
+                download_source = TagOf(SourceBox, "auto"),
+                download_limit_kbps = SpinValue(LimitSpin, 0),
+                homepage_mode = TagOf(HomeBox, "news"),
+                custom_homepage = HomePath?.Text?.Trim() ?? "",
+                auto_check_update = AutoUpd.IsOn,
+                ui_fly_animation = FlyAnimSw?.IsOn ?? true,
+                ui_fly_duration_ms = SpinValue(FlyDurSpin, 620),
+            };
+            await AppServices.Client.CallAsync("save_settings", new { data = payload });
+            var missed = await VerifyAsync(payload);
+            if (missed.Count == 0)
+                AppServices.Toast?.Invoke("已保存", "设置已写入 config.json", InfoBarSeverity.Success);
+            else
+                AppServices.Toast?.Invoke("部分设置未生效",
+                    "后端没有写入这些键：" + string.Join("、", missed)
+                    + "。当前桥可能尚未支持，设置会在重启后回退。",
+                    InfoBarSeverity.Warning);
         }
         catch (Exception ex)
         {
@@ -171,7 +243,9 @@ public sealed partial class SettingsPage : UserControl
         try
         {
             var info = await AppServices.Client.CallAsync<Dictionary<string, object>>("check_update") ?? new();
-            var has = info.TryGetValue("has_update", out var h) && h is bool b && b;
+            // CallAsync<Dictionary<string, object>> 反序列化出来的值是 JsonElement，不是 bool，
+            // `h is bool b` 恒 false → 这里以前永远报「已是最新」、start_self_update 永不触发。
+            var has = info.TryGetValue("has_update", out var h) && IsTrue(h);
             var msg = info.TryGetValue("message", out var m) ? m?.ToString() ?? "" : "";
             if (has)
             {
@@ -182,6 +256,21 @@ public sealed partial class SettingsPage : UserControl
         }
         catch (Exception ex) { AppServices.Toast?.Invoke("检查失败", ex.Message, InfoBarSeverity.Error); }
     }
+
+    /// <summary>JSON 布尔判定：JsonElement（反序列化到 object 的常态）与字符串都认。</summary>
+    private static bool IsTrue(object? v) => v switch
+    {
+        bool b => b,
+        JsonElement je => je.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.String => je.GetString() is { } s && s.Equals("true", StringComparison.OrdinalIgnoreCase),
+            _ => false,
+        },
+        string s => s.Equals("true", StringComparison.OrdinalIgnoreCase),
+        _ => false,
+    };
 
     private async void Clean_Click(object sender, RoutedEventArgs e)
     {

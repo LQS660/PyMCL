@@ -1,3 +1,5 @@
+> 2026-09-30 文档核对轮（分支 `fix-8items` @ `8c3aea7`，工作区 98 项未提交）：本轮不改代码，只把文档拉回与代码一致。**实跑基线 769 passed / 10 skipped / 0 failed**（`python -m pytest tests -q --timeout=300`，77.9s；用例总数 779 收集）。**重写** `android/ANDROID.md`——原文停在 `0.1.0-skeleton`「不能启动游戏」，实际代码已是 `0.2.0-runtime`（`versionCode 2`），有完整 FCLBridge JNI 启动链、83 个 data 模块、29 个 Compose 页面、843 个 JVM 单测；同时补记三项真实缺口：**零文字输入/虚拟键盘**（`pushEventChar`/`InputConnection`/`ImeBridge` 全工程命中 0）、**AI 工具 19 vs 桌面 36**（`scripts/check_tool_parity.py` 实测）、**i18n 词表 1037 vs 桌面 2161**。**修正** `对接说明.md`（原文称 `*_impl` 均为「内存模拟」，实际 1.9 万行真实实现；删除 `instance_page.py`/`modpack_page.py`/`content_page.py`/`run.bat` 等已不存在的文件引用，设置键表按 `config.py` 重校）、`新手教程.md`（文件清单里的 `gui.py` 不存在，改为 `app/`）、`README.md`（Android 条目按实际状态改写）。**未执行**：Android 端未重新编译（无 FoldCraftLauncher 并排源码时配置不起来）；GUI 未做真机/真窗口实拍，仅离屏构造 `MainWindow()` 成功；C 桥未跑完整 RPC 会话。
+
 > 2026-09-23 agent 修复轮（分支 `fix-8items`）：三路并行审查（内核/Qt/WPF+bridge）确认 2 P0 + 6 P1 + ~20 P2/P3 并全部修复。**P0×2**：①checkpoint 目录快照在 MAX_DIR_FILES=20000 截断后仍当完整 known 集合回滚清扫——超 2 万文件实例回滚会把老文件当「新增」整批误删（现截断即整轮拒快照）；②WPF AiPage 构造把 `_usageLabel` 加进两个容器，AI 页构造即抛异常打不开（上轮 WPF 冒烟未复跑漏网）。**P1×6**：幽灵目录（快照时不存在、回滚 unlink 目录静默失败谎报已还原→改 rmtree 整树删+失败计数）；回滚失败操作连同 blob 被清（不可重试→失败 op 留 journal，恢复幂等可重试）；子代理被 MCP 打穿（mcp_schemas 无条件追加+confirm_fn None 把 ASK 当 ALLOW→子代理不连 MCP、无确认通道即拒绝）；hooks 改写入参绕过判权/快照（run_before 提前到 decide 之前）；MCP readline 无超时挂死整回合（看门狗 deadline 杀进程）；WPF ui_changed 刷新清掉进行中回合 + 迟到 ai.done/ai.fail 杀新回合状态（busy 时不重画消息区+chat_id 守卫）。**P2/P3 要点**：rewind 会话日志缺失时不再硬回滚 journal 旧轮（误删未要求撤销的改动）；client.py 工具轮 usage 先于 tool_calls 产出（此前凡调工具必落估算）；压缩后 token 基线重置（防连环误触发 compact）；MCP 最长前缀路由（`a`/`a_b` 串号）+ env 透传 + server 名字符校验；write_mod_config path 带盘符/NTFS 流拒绝（防检查点越界复制任意文件）；write_mod_config content 不再被 strip；审计钩子按 side_effect 判（launch_game 入审计）；usage 每 step 只记一次估算（重试不虚增）；Qt：rewind 三态反馈补全、用量标签随会话刷新、计划卡 wrapper 残留、_send 重入守卫（定时器续发与手速发送撞车）、_STOP 运行期求值（切语言后停止不再误判为错误）；WPF：checkpoint_warn/model_fallback 告警 toast、计划卡持久化恢复（AiPlanDto）、pending_card 断线补画、rewind ok=false 不再谎报已撤回、BridgeClient 字符串型 error 解析崩溃、think after_tools 文案、AbandonRun 静默复位、用量混合来源标注估算；bridge ai.delta/ai.status 补带 chat_id；permission 规则行 behavior_label/scope 走 tr()。回归 `tests/test_ai_fixround_20260923.py` 17 例（含真 ai_chats.json 写穿事故的隔离修复：STORE_FILE 未隔离致 test_root_checks 子进程探针连锁红）。en.json +31 / zh_CN +4 词条。基线 **612 passed / 1 skipped / 0 failed**（+17，offscreen 36.2s）；check_qt_parent 253 构造点 OK；WPF 构建 0 警 0 错。**未执行**：WPF `--smoke` 复跑、确认卡 diff 双端截图证据（本轮改动均有单测/构建覆盖但未做 UI 实拍）；MCP 看门狗只做了代码路径验证、未起真挂死 server 实测。
 
 > 2026-09-22 UI 缺陷修复（分支 `fix-8items`）：按《PyMCL-UI缺陷猎捕清单与提示词.md》复核 `docs/audit/ui-audit-findings-2026-09-19.md` 全部 19 条疑点并出账本 `docs/audit/ui-bugs-2026-09-22.md`（P0:1·P1:1·P2:7·P3:8；P0/P1/P2 关闭率 100%）。上条记录的「并行 agent 留下 13 项未提交改动」已按主题拆 8 个 commit 入库（motion 闭包摘表、launch preflight 异步化、pick_color crc32、tr() 默认参数哨兵、任务取消诚实性/删除确认/版本竞态三组回归）；本轮新修：servers_page 4 处 + settings_page 主目录标签裸中文补 tr()（en.json +5 词条）、冻结 exe 重启 argv 去重，新增页面级 i18n 门禁 `tests/test_ui_text_wrapped.py`（HEAD 旧码 4 处红→修复 0 绿）。复核后修正 3 条旧结论：ai_session_id「共享缓存污染」不成立（get_settings 每次新建 dict）、download_threads 吞 0 属良性（UI 下限 1 + 下载器 max(1,·) 双钳制）、模块级 tr() 属受控设计（init_language 先于 app.* import + 切语言提示重启）。基线 **595 passed / 1 skipped / 0 failed**（+3 用例，offscreen 33.9s）；check_qt_parent 252 构造点 OK 白名单未增。**未执行**：主题矩阵/可访问性遍历/首帧耗时表/WPF 冒烟复跑（清单见账本「待观测与未执行」）；en.json 尚有 93 条历史缺口（翻译债，需裁决）。
@@ -11,8 +13,13 @@
 # PyMCL 构建状态与审计归档
 
 > 快照时间：2026-09-10 · 分支 `claude` · 基线 `4146a5a`
+>
+> ⚠️ **本节（§1–§4）是 2026-09-10 的历史快照，已不代表当前状态。** 分支已从
+> `claude` 切到 `fix-8items`，测试数从 433 涨到 769，WPF 已迁出本仓，`wt-*`
+> 工作树已不在。要当前状态请看文首那条 2026-09-30 记录。保留本节是为了留存
+> 当时可复现的命令与工具链版本。
 
-## 1. 验证结果
+## 1. 验证结果（历史快照 2026-09-10）
 
 下表每一行都是本机实跑出来的，命令原样可复制。
 
@@ -21,9 +28,9 @@
 | Python 测试 | `python -m pytest tests/ -q` | 433 passed + 90 subtests，1 skipped（慢门禁，`PYMCL_SLOW_CHECKS=1` 才跑），2 失败（`test_root_checks[_bg_visual.py]` 与 `test_wpf_i18n`，均为工作区他人未提交 WIP 自带的探针/文案，与 AI 改造无关；排除后 AI 相关用例 0 失败）（2026-09-18 AI 改造六批次后复跑，分支 `fix-8items`；慢门禁全量 434 passed） |
 | 自检脚本 | `python selftest.py` | 全 OK（Mojang 清单 912 个版本，Modrinth API 可用） |
 | eziapp 类型检查 | `cd eziapp && npx tsc --noEmit` | exit 0，零错误 |
-| WPF | `cd wpf && dotnet build PyMCL.Wpf.sln` | 0 错误 0 警告 |
-| WinUI 3 | `cd winui3 && dotnet build PyMCL.WinUI.sln` | 0 错误 0 警告 |
-| C 桥 | `native\build.bat` | 编译通过，10 条 warning，产物 `native/build/pymcl-bridge.exe` 0.67 MB |
+| WPF | `cd wpf && dotnet build PyMCL.Wpf.sln` | 0 错误 0 警告（**已失效**：`wpf/` 于 2026-09-29 迁出本仓，见 §5） |
+| WinUI 3 | `cd winui3 && dotnet build PyMCL.WinUI.sln` | 0 错误 0 警告（路径有效，未复验） |
+| C 桥 | `native\build.bat` | 编译通过，10 条 warning，产物 `native/build/pymcl-bridge.exe` 0.67 MB（未复验） |
 
 工具链版本：Python 3.12.10 / pytest 9.1.1 · Node v22.23.2 · .NET SDK 9.0.317（WinUI 工程 target `net8.0-windows10.0.19041.0`）· gcc 16.1.0（MSYS2 mingw64）。
 
@@ -47,9 +54,18 @@
 - `bridge-protocol-and-gap.md` §2c 的 11 条 bug —— 写完之后被同一批 agent 修掉了，其中的行号引用现在指向无关代码；
 - `feature-parity-matrix.md` §E 的 P0 —— eziapp 编译不过、WPF 跑不起来这两条在 `claude` 上已全部修复（见上表）。审计原文描述的状态在 `wt-sonnet45` 上仍可复现（`tsc` 报 15 个 TS2307，`dotnet build` 报 2 个 CS0234）。
 
-仍然有效的是各报告的**规格/协议部分**（Qt 行为清单、RPC 协议参考）和 §E 的 **P1/P2**，尤其是两条最大功能鸿沟：启动页自由布局画布、侧栏自定义 —— 两套新前端都还没做。
+仍然有效的是各报告的**规格/协议部分**（Qt 行为清单、RPC 协议参考）和 §E 的 **P1/P2**。
 
-## 3. 分支现状
+⚠️ **但这条结论已过期**：原文称「启动页自由布局画布、侧栏自定义 —— 两套新前端都还没做」。
+2026-09-30 核对时，WPF 前端已有 `Pages/Dashboard.cs` 自由画布与完整的 `ui_nav_*` 侧栏编排
+（`Shell/NavModel.cs`），三端（Qt / WPF / eziapp）在这些键上是对齐的。仅 **WinUI3** 仍是
+11 项静态侧栏、无自由画布。审计原文描述的缺口现在只适用于 WinUI3。
+
+## 3. 分支现状（历史快照 2026-09-10，已失效）
+
+> 下表描述的是 09-10 的工作树布局。当前实际只有 `fix-8items` 一个工作树
+> （`git worktree list` 仅 `PyMCL-main/` 一条），`wt-*` 目录仍留在外层磁盘上但
+> 已不是 git 工作树。分支 `claude` 已不存在于本仓，现为 `main` / `fix-8items`。
 
 | 分支 | 工作树 | 说明 |
 |---|---|---|
@@ -62,7 +78,8 @@
 
 ## 4. 刻意留在版本控制之外
 
-- `default/` —— PYMCL_HOME 落在仓库根时生成的 `.minecraft`，5150 个文件 582 MB，已加进 `.gitignore`
+- `.minecraft/` —— PYMCL_HOME 落在仓库根时生成的游戏目录，已加进 `.gitignore`
+  （历史快照里写作 `default/`；当前实测该目录只剩空骨架，`versions/` 里没有任何已装版本）
 - `wpf-ui.json` —— WPF 前端的本地 UI 状态，同上
 - `_rpc_crosscheck.py` —— 一次性探针
 

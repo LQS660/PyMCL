@@ -16,10 +16,9 @@ def local_ips() -> list:
     except OSError:
         pass
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.connect(("223.5.5.5", 80))
-        ip = sock.getsockname()[0]
-        sock.close()
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("223.5.5.5", 80))
+            ip = sock.getsockname()[0]
         if ip and ip not in found and not ip.startswith("127."):
             found.insert(0, ip)
     except OSError:

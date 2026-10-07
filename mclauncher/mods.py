@@ -73,9 +73,10 @@ def install_modrinth_mod(dm: DownloadManager, slug, instance: Instance,
         f = _primary_file(v)
         if not f or not f.get("url"):
             return
-        dest = dest_dir / f["filename"]
+        # 审计 #1 待查第 5 条：filename 来自远端响应，落盘前挡掉 ../ 穿越
+        dest = _download_dest(dest_dir, f.get("filename"))
         if on_progress:
-            on_progress(f"下载模组 {f['filename']}", 0, 1)
+            on_progress(f"下载模组 {dest.name}", 0, 1)
         url = f["url"]
         tried = modrinth_download_urls(url) if use_mirror else [url]
         dm.download(tried[0], dest, sha1=f.get("sha1"), size=f.get("size"),
@@ -146,11 +147,13 @@ def search_mods(dm: DownloadManager, query, limit=30, game_version=None, categor
             data = None
     else:
         raise ModError(f"搜索模组失败（官方+镜像均不可用）: {last_err}")
+    from . import catalog
     return [
         {
             "slug": h.get("slug"),
             "title": h.get("title", h.get("slug")),
-            "description": (h.get("description") or "")[:120],
+            "description": catalog.mod_desc_cn(
+                h.get("slug"), h.get("title"), (h.get("description") or "")[:120]),
             "author": h.get("author", "?"),
             "downloads": h.get("downloads", 0),
             "tags": [str(c) for c in (h.get("display_categories") or h.get("categories") or [])[:6]],
@@ -285,6 +288,7 @@ def search_mods_chinese(dm: DownloadManager, query, limit=30, api_key=None):
 
 def _alias_to_modrinth_hits(dm: DownloadManager, slug, title=None, limit=30):
     """按别名解析出的 Modrinth slug 生成搜索条目。"""
+    from . import catalog
     hits = []
 
     def _add(sl):
@@ -296,7 +300,9 @@ def _alias_to_modrinth_hits(dm: DownloadManager, slug, title=None, limit=30):
                 "title": data.get("title") or title or sl,
                 "author": (data.get("author") or "?"),
                 "downloads": data.get("downloads", 0),
-                "description": (data.get("description") or "")[:120],
+                "description": catalog.mod_desc_cn(
+                    data.get("slug", sl), data.get("title") or title,
+                    (data.get("description") or "")[:120]),
                 "matched_alias": True,
                 "icon_url": data.get("icon_url") or "",
             })
@@ -310,14 +316,19 @@ def _alias_to_cf_hits(dm: DownloadManager, cf_id, title=None, api_key=None):
     """按别名解析出的 CurseForge addonId 生成搜索条目。"""
     try:
         mod = cf_detail(dm, cf_id, api_key=api_key)
+        links = mod.get("links") or {}
         return [{
             "source": "curseforge",
             "id": mod.get("id"),
+            "slug": mod.get("slug"),
             "title": mod.get("name") or title or str(cf_id),
             "author": ", ".join(a.get("name", "") for a in (mod.get("authors") or [])) or "?",
             "downloads": mod.get("downloadCount") or 0,
-            "description": (mod.get("summary") or "")[:120],
+            "description": catalog.mod_desc_cn(
+                mod.get("slug"), mod.get("name") or title, (mod.get("summary") or "")[:120]),
             "matched_alias": True,
+            "icon_url": _cf_logo_url(mod),
+            "website_url": (links.get("websiteUrl") if isinstance(links, dict) else "") or "",
         }]
     except Exception as e:
         utils.log.warning("CurseForge 项目 %s 查询失败: %s", cf_id, e)
@@ -476,11 +487,48 @@ def list_mod_entries_at(mods_dir) -> list:
 
 
 def _mod_file_at(mods_dir, filename: str) -> Path:
-    folder = Path(mods_dir).resolve()
-    p = (folder / filename).resolve()
-    if p.parent != folder:
+    """mods 目录里的一个文件：护栏与权限层必须看到同一个名字。
+
+    审计 05 P1-1：原来只靠 `.resolve()` 后的父目录比较。Windows 把 `a.jar.`
+    归一成 `a.jar`，护栏放行、权限层看到的却是另一个名字（`a.jar.`），于是
+    「护栏允许 + 权限误判」叠加成可执行。这里先用与 `permission._norm_content`
+    同一套的 `utils.norm_path_spelling` 归一文件名，再做拒绝式校验：
+
+    - 归一后必须是非空、不含分隔符的单个名字（挡掉 `sub/a.jar`、`..\\x.jar`）；
+    - 拼接后仍要落在 mods 目录的直接子项（挡掉盘符 / UNC / 残余相对路径）。
+
+    返回的是**未 resolve** 的 `folder / name`（与原来一致：Windows 上 resolve
+    会把 `Administrator` 换成 `ADMINI~1`，直接返回解析结果会让调用方看到的名字
+    悄悄变样）。
+    """
+    folder = Path(mods_dir)
+    raw = str(filename or "").strip()
+    # 归一结果只在「确实做了路径归一」时采用；否则 norm_path_spelling 会 casefold
+    # 掉文件名的原拼写（Linux 上文件名区分大小写，返回值必须保持原样）。
+    name = utils.norm_path_spelling(raw) if utils.looks_like_path_spelling(raw) else raw
+    if not name or name in (".", "..") or "/" in name or "\\" in name or ":" in name:
         raise ModError(f"非法模组路径: {filename}")
-    return p
+    try:
+        resolved_folder = folder.resolve()
+        resolved = (folder / name).resolve()
+    except OSError as exc:  # 非法字符 / 路径过长
+        raise ModError(f"非法模组路径: {filename}") from exc
+    if resolved.parent != resolved_folder:
+        raise ModError(f"非法模组路径: {filename}")
+    return folder / name
+
+
+def _download_dest(folder, filename) -> Path:
+    """远端响应里的 filename 落盘位置：必须正好是 folder 的直接子项。
+
+    审计 #1 待查第 5 条：Modrinth / CurseForge 响应里的 `filename` 直接拼进
+    dest_dir 时没有 `parent != folder` 校验（`delete_content_file` / `_mod_file_at`
+    有）。镜像被污染或上游回归时 `../../x.jar` 就能写到目标目录之外。
+    """
+    name = str(filename or "").strip()
+    if not name:
+        raise ModError("远端未返回文件名")
+    return _mod_file_at(folder, name)
 
 
 def _mod_file(instance: Instance, filename: str) -> Path:
@@ -760,15 +808,29 @@ def search_curseforge(dm: DownloadManager, query=None, limit=30, api_key=None,
     return hits[:limit]
 
 
+def _cf_logo_url(m):
+    """CurseForge 封面：官方是老字段 logo.thumbnailUrl，新响应也可能给 logoUrl。"""
+    logo = m.get("logo")
+    if isinstance(logo, dict):
+        return logo.get("thumbnailUrl") or logo.get("url") or ""
+    return m.get("logoUrl") or ""
+
+
 def _cf_norm(m):
+    from . import catalog
+    title = m.get("name") or m.get("title") or "?"
+    links = m.get("links") or {}
     return {
         "source": "curseforge",
         "id": m.get("id"),
         "slug": m.get("slug"),
-        "title": m.get("name") or m.get("title") or "?",
+        "title": title,
         "author": ", ".join(a.get("name", "") for a in (m.get("authors") or [])) or "?",
         "downloads": m.get("downloadCount") or m.get("downloads") or 0,
-        "summary": (m.get("summary") or "")[:120],
+        "summary": catalog.mod_desc_cn(
+            m.get("slug"), title, (m.get("summary") or "")[:120]),
+        "icon_url": _cf_logo_url(m),
+        "website_url": (links.get("websiteUrl") if isinstance(links, dict) else "") or "",
         "cf_categories": [str((c or {}).get("name") or "").lower()
                           for c in (m.get("categories") or []) if isinstance(c, dict)],
     }
@@ -853,10 +915,21 @@ def _resolve_mods_dir(instance: Instance, mods_dir=None) -> Path:
     return folder
 
 
+# CurseForge 依赖关系：relationType == 3 是 RequiredDependency。
+CF_REL_REQUIRED = 3
+# 递归深度上限：依赖链正常不超过两三层，防止环形/病态依赖把整轮拖死。
+CF_DEP_MAX_DEPTH = 3
+
+
 def install_curseforge_mod(dm: DownloadManager, addon_id, instance: Instance,
                            mc_version=None, loader=None, api_key=None, on_progress=None,
                            file_id=None, mods_dir=None):
-    """安装 CurseForge 模组：自动匹配实例 MC 版本与加载器。"""
+    """安装 CurseForge 模组：自动匹配实例 MC 版本与加载器，含必需依赖。
+
+    CurseForge 的文件对象带 ``dependencies``（relationType==3 为必需前置），
+    这里递归安装必需依赖；依赖装失败只记 warning，不阻断主流程。
+    返回 ``dependencies``：本次随装的前置模组名清单。
+    """
     inst = instance
     inst.ensure_standard_dirs()
     dest_dir = _resolve_mods_dir(inst, mods_dir)
@@ -905,16 +978,36 @@ def install_curseforge_mod(dm: DownloadManager, addon_id, instance: Instance,
         raise ModError("模组文件信息缺失")
     filename = f.get("fileName") or f"mod-{addon_id}-{file_id}.jar"
     download_url = f.get("downloadUrl")  # API 可能返回此字段
-    dest = dest_dir / filename
+    # 审计 #1 待查第 5 条：filename 来自远端响应，落盘前挡掉 ../ 穿越
+    dest = _download_dest(dest_dir, filename)
 
+    _download_cf_file(dm, addon_id, file_id, filename, download_url, dest,
+                      on_progress=on_progress)
+
+    # —— 递归安装必需前置 ——
+    installed = [{"addon_id": addon_id, "title": mod.get("name"), "files": [dest.name]}]
+    seen_addons = {str(addon_id)}
+    dep_names = _install_cf_required_deps(
+        dm, f, dest_dir, mc_version, loader, api_key, on_progress,
+        seen_addons, depth=0)
+    return {
+        "source": "curseforge",
+        "title": mod.get("name"),
+        "files": [dest.name],
+        "dependencies": dep_names,
+        "installed": installed,
+    }
+
+
+def _download_cf_file(dm: DownloadManager, addon_id, file_id, filename, download_url, dest,
+                      on_progress=None):
+    """下载单个 CurseForge 文件：downloadUrl → 带名 CDN → 不带名 CDN 依次试。"""
     last_err = None
-    # 候选 URL：API 返回的 downloadUrl → 带文件名的 CDN 直链 → 不带文件名的通用 URL
     url_sets = []
     if download_url:
         url_sets.append([download_url])
     url_sets.append(_candidate_cf_urls(addon_id, file_id, filename))
     url_sets.append(_candidate_cf_urls(addon_id, file_id, None))
-
     tried = set()
     for urls in url_sets:
         for url in urls:
@@ -925,11 +1018,72 @@ def install_curseforge_mod(dm: DownloadManager, addon_id, instance: Instance,
                 if on_progress:
                     on_progress(f"下载 CurseForge 模组 {filename}", 0, 1)
                 dm.download(url, dest, timeout=900)
-                return {"source": "curseforge", "title": mod.get("name"), "files": [dest.name]}
+                return
             except Exception as e:
                 last_err = e
                 utils.remove_tree(dest)
     raise ModError(f"CurseForge 模组下载失败: {last_err}")
+
+
+def _install_cf_required_deps(dm, file_obj, dest_dir, mc_version, loader, api_key,
+                              on_progress, seen_addons, depth):
+    """递归安装 file_obj 的必需依赖，返回随装的模组名列表。
+
+    - 只认 relationType == 3（RequiredDependency）；
+    - seen_addons 去重防环；
+    - 任一依赖失败只 warning，不抛异常，主模组照装。
+    """
+    if depth >= CF_DEP_MAX_DEPTH:
+        return []
+    names = []
+    for dep in file_obj.get("dependencies") or []:
+        if dep.get("relationType") != CF_REL_REQUIRED:
+            continue
+        dep_addon = dep.get("modId") or dep.get("addonId")
+        if not dep_addon or str(dep_addon) in seen_addons:
+            continue
+        seen_addons.add(str(dep_addon))
+        try:
+            dep_mod = cf_detail(dm, dep_addon, api_key=api_key)
+            dep_file = _pick_cf_file(dep_mod, dep.get("fileId"), mc_version, loader)
+            if not dep_file:
+                utils.log.warning("依赖 %s 没有匹配的文件，跳过", dep_addon)
+                continue
+            dep_fid = dep_file.get("id")
+            if dep_fid is None:
+                continue
+            dep_name = dep_file.get("fileName") or f"mod-{dep_addon}-{dep_fid}.jar"
+            dep_dest = _download_dest(dest_dir, dep_name)
+            _download_cf_file(
+                dm, dep_addon, dep_fid, dep_name, dep_file.get("downloadUrl"), dep_dest,
+                on_progress=on_progress)
+            names.append(dep_mod.get("name") or dep_name)
+            names.extend(_install_cf_required_deps(
+                dm, dep_file, dest_dir, mc_version, loader, api_key,
+                on_progress, seen_addons, depth + 1))
+        except Exception as e:
+            utils.log.warning("安装依赖 %s 失败（不阻断主流程）: %s", dep_addon, e)
+    return names
+
+
+def _pick_cf_file(mod, want_file_id, mc_version, loader):
+    """从 CF 详情里挑文件：优先指定 fileId，否则按 MC 版本/加载器匹配最新。"""
+    files = mod.get("latestFiles") or []
+    if not files:
+        return None
+    if want_file_id:
+        hit = next((x for x in files if str(x.get("id")) == str(want_file_id)), None)
+        if hit:
+            return hit
+    candidates = [f for f in files
+                  if not mc_version or mc_version in (f.get("gameVersions") or [])]
+    if loader:
+        pref = [f for f in candidates
+                if any(loader.lower() in (gv or "").lower()
+                       for gv in (f.get("gameVersions") or []))]
+        if pref:
+            candidates = pref
+    return (candidates or files)[0]
 
 
 def install_cf_mod(dm: DownloadManager, url, instance: Instance, on_progress=None, mods_dir=None):
@@ -1035,13 +1189,15 @@ def search_modrinth_projects(dm: DownloadManager, query, project_type, limit=30,
     if data is None:
         raise ModError(f"搜索 {project_type} 失败: {last_err}")
     rows = []
+    from . import catalog
     for h in data.get("hits") or []:
         cats = h.get("display_categories") or h.get("categories") or []
         rows.append({
             "source": "modrinth",
             "slug": h.get("slug"),
             "title": h.get("title") or h.get("slug"),
-            "description": (h.get("description") or "")[:160],
+            "description": catalog.mod_desc_cn(
+                h.get("slug"), h.get("title"), (h.get("description") or "")[:160]),
             "author": h.get("author") or "?",
             "downloads": h.get("downloads") or 0,
             "tags": [str(c) for c in cats[:6]],
@@ -1091,9 +1247,10 @@ def install_modrinth_content(dm: DownloadManager, slug, instance: Instance, subd
     f = _primary_file(versions[0])
     if not f or not f.get("url"):
         raise ModError(f"{slug} 没有可下载文件")
-    dest = dest_dir / f["filename"]
+    # 审计 #1 待查第 5 条：filename 来自远端响应，落盘前挡掉 ../ 穿越
+    dest = _download_dest(dest_dir, f.get("filename"))
     if on_progress:
-        on_progress(f"下载 {f['filename']}", 0, 1)
+        on_progress(f"下载 {dest.name}", 0, 1)
     tried = modrinth_download_urls(f["url"])
     dm.download(tried[0], dest, sha1=f.get("sha1"), size=f.get("size"),
                 sha512=f.get("sha512"), urls=tried, timeout=900)
@@ -1125,7 +1282,8 @@ def install_cf_content(dm: DownloadManager, addon_id, instance: Instance, subdir
         f = (candidates or files)[0]
     file_id = f.get("id")
     filename = f.get("fileName") or f"file-{addon_id}-{file_id}.zip"
-    dest = dest_dir / filename
+    # 审计 #1 待查第 5 条：filename 来自远端响应，落盘前挡掉 ../ 穿越
+    dest = _download_dest(dest_dir, filename)
     download_url = f.get("downloadUrl")
     last_err = None
     urls = []

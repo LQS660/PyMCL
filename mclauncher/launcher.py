@@ -2,6 +2,7 @@
 """启动游戏：构建 JVM/游戏参数并运行。"""
 import ctypes
 import os
+import shlex
 import subprocess
 import threading
 from pathlib import Path
@@ -427,11 +428,18 @@ def build_launch_command(instance, version_id, account_props, java_exe,
         mine_args_text = ""
     else:
         mine_args_text = resolved.get("minecraftArguments") or ""
-        game_args = [
-            a for a in mine_args_text.split(" ")
-            if a and not utils.has_placeholder(utils.replace_placeholders(a, placeholders))
-        ]
-        game_args = [utils.replace_placeholders(a, placeholders) for a in game_args]
+        # Split the template first: substituted paths may contain spaces or quotes.
+        # Backslashes are literal Windows path separators, not shell escapes.
+        lexer = shlex.shlex(mine_args_text, posix=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        lexer.escape = ""
+        try:
+            raw_game_args = list(lexer)
+        except ValueError:
+            raw_game_args = [a for a in mine_args_text.split(" ") if a]
+        game_args = [utils.replace_placeholders(a, placeholders) for a in raw_game_args]
+        game_args = [a for a in game_args if not utils.has_placeholder(a)]
         jvm_args = [f"-Djava.library.path={natives_dir}", "-cp", classpath]
 
     if any(isinstance(a, str) and a.startswith("-DignoreList=") for a in jvm_args):

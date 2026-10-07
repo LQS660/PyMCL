@@ -393,16 +393,24 @@ function renderCatalog(panel: HTMLElement, category: Exclude<DownloadCategory, '
       results.querySelectorAll<HTMLButtonElement>('[data-del]').forEach((btn) => btn.addEventListener('click', async () => {
         const row = list[Number(btn.dataset.del)];
         const name = row.filename || row.name || String(row);
-        // 对齐 Qt 版：整合包删除 = 删整个实例；存档删除不可恢复，都需明确警告
+        // 对齐 Qt（catalog_page.py 的 delete_modpack 分支）与 WPF（CatalogPage.cs）：
+        // 这里的删除**只清掉「已安装整合包」这条记录**——后端 delete_modpack 的
+        // purge_instance 缺省 False，一个文件都不动。以前文案写「将删除整个实例
+        // 「X」及其文件，不可恢复」，用户以为腾出了空间，实际磁盘占用不变，
+        // 回到版本管理还能看到该实例，会认为删除功能坏了。
         const warn = config.del === 'delete_modpack'
-          ? `将删除整个实例「${instSelect.value}」及其文件，不可恢复。`
+          ? '只清掉「已安装整合包」这条记录，游戏目录里的模组与存档一个不动。\n要腾空间的话，到「版本管理」里逐个卸载版本。'
           : config.del === 'delete_save'
             ? `将永久删除世界「${name}」，其中的建筑与游戏进度都无法恢复。建议先在「存档管理」里备份。`
             : `将删除「${name}」。`;
-        if (!await confirmDialog(config.del === 'delete_modpack' ? '删除整合包实例' : '删除确认', warn)) return;
+        const isModpack = config.del === 'delete_modpack';
+        if (!await confirmDialog(isModpack ? '移除整合包标记' : '删除确认', warn)) return;
         try {
-          await bridge.call(config.del, config.del === 'delete_modpack' ? { instance, filename: name } : { instance, filename: name, name });
-          toast('已删除', 'success');
+          // purge_instance 显式传 false：只清标记，别删实例（与 Qt/WPF 行为一致）
+          await bridge.call(config.del, isModpack
+            ? { instance, filename: name, purge_instance: false }
+            : { instance, filename: name, name });
+          toast(isModpack ? '已移除整合包标记' : '已删除', 'success');
           void paintInstalled();
         } catch (e) { toast(errorMessage(e, '删除失败'), 'error'); }
       }));

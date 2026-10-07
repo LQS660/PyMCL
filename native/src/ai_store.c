@@ -407,12 +407,15 @@ int ai_resolve_endpoint(cJSON *settings, ai_endpoint *ep) {
         char tmp[1024] = "";
         if (py_truthy(b)) py_str(b, tmp, sizeof(tmp));
         strip_copy(tmp, base, sizeof(base));
+        /* 用户没填就用内置公益网关（开箱即用）；填了任意一项就完全按用户填的走。 */
+        if (!base[0]) builtin_gateway_base(base, sizeof(base));
         size_t bl = strlen(base);
         while (bl && base[bl - 1] == '/') base[--bl] = 0;
         if (bl && !(bl >= 3 && !strcmp(base + bl - 3, "/v1"))) strncat(base, "/v1", sizeof(base) - strlen(base) - 1);
         tmp[0] = 0;
         if (py_truthy(k)) py_str(k, tmp, sizeof(tmp));
         strip_copy(tmp, key, sizeof(key));
+        if (!key[0]) builtin_gateway_key(key, sizeof(key));
         if (!base[0]) { pymcl_set_error("请在设置里填写自定义 NewAPI 地址（到 /v1 为止）"); return -1; }
         if (!key[0]) { pymcl_set_error("请在设置里填写 NewAPI 令牌"); return -1; }
         snprintf(ep->url, sizeof(ep->url), "%s/chat/completions", base);
@@ -429,7 +432,8 @@ int ai_resolve_endpoint(cJSON *settings, ai_endpoint *ep) {
     while (gl && gw[gl - 1] == '/') gw[--gl] = 0;
     if (gw[0]) {
         snprintf(ep->url, sizeof(ep->url), "%s/pymcl/chat", gw);
-        snprintf(ep->models_url, sizeof(ep->models_url), "%s/health", gw);
+        /* 老的 /health 只做健康检查、不返回模型清单；模型列表走 /pymcl/models。 */
+        snprintf(ep->models_url, sizeof(ep->models_url), "%s/pymcl/models", gw);
         snprintf(ep->headers, sizeof(ep->headers), "Content-Type: application/json\r\nX-PyMCL-Client: %s", CLIENT_HEADER);
         snprintf(ep->model, sizeof(ep->model), "%s", DEFAULT_MODEL);
         ep->is_public = 1;
@@ -535,6 +539,65 @@ static cJSON *test_connection(cJSON *settings) {
     return cJSON_CreateString(out);
 }
 
+/* client.list_models：拉当前端点模型清单，返回 {ok, models[], error}。
+   失败不返回 NULL（那会被 server.c 当成致命错误），而是 ok=0 + 可读 error，
+   让设置页提示并保留手填，绝不把网络异常裸抛给 UI。 */
+static cJSON *list_models(cJSON *settings) {
+    cJSON *out = cJSON_CreateObject();
+    cJSON_AddItemToObject(out, "models", cJSON_CreateArray());
+    cJSON_AddStringToObject(out, "error", "");
+    cJSON_AddBoolToObject(out, "ok", 0);
+    ai_endpoint ep;
+    if (ai_resolve_endpoint(settings, &ep) != 0) {
+        cJSON_ReplaceItemInObjectCaseSensitive(out, "error", cJSON_CreateString(pymcl_error()));
+        return out;
+    }
+    http_resp r;
+    memset(&r, 0, sizeof(r));
+    if (http_get(ep.models_url, &r, ep.headers, 15) != 0) {
+        cJSON_ReplaceItemInObjectCaseSensitive(out, "error", cJSON_CreateString(pymcl_error()));
+        http_resp_free(&r);
+        return out;
+    }
+    if (r.status >= 400) {
+        char msg[1024];
+        ai_err_text(r.status, r.body, msg, sizeof(msg));
+        http_resp_free(&r);
+        cJSON_ReplaceItemInObjectCaseSensitive(out, "error", cJSON_CreateString(msg));
+        return out;
+    }
+    cJSON *data = r.body ? cJSON_Parse(r.body) : NULL;
+    http_resp_free(&r);
+    if (!data) {
+        cJSON_ReplaceItemInObjectCaseSensitive(out, "error", cJSON_CreateString("模型列表接口返回的不是 JSON"));
+        return out;
+    }
+    cJSON *models = cJSON_GetObjectItemCaseSensitive(data, "data");
+    if (!models) models = cJSON_GetObjectItemCaseSensitive(data, "models");
+    cJSON *arr = cJSON_CreateArray();
+    int seen = 0;
+    cJSON *m;
+    cJSON_ArrayForEach(m, models) {
+        const char *id = NULL;
+        if (cJSON_IsObject(m)) id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(m, "id"));
+        else if (cJSON_IsString(m)) id = m->valuestring;
+        if (!id || !id[0]) continue;
+        int dup = 0, i = 0;
+        cJSON *e;
+        cJSON_ArrayForEach(e, arr) {
+            if (!strcmp(e->valuestring, id)) { dup = 1; break; }
+            i++;
+        }
+        (void)i;
+        if (!dup) { cJSON_AddItemToArray(arr, cJSON_CreateString(id)); seen++; }
+    }
+    cJSON_Delete(data);
+    cJSON_ReplaceItemInObjectCaseSensitive(out, "models", arr);
+    cJSON_ReplaceItemInObjectCaseSensitive(out, "ok", cJSON_CreateBool(seen > 0 ? 1 : 0));
+    if (!seen) cJSON_ReplaceItemInObjectCaseSensitive(out, "error", cJSON_CreateString("接口没有返回任何模型"));
+    return out;
+}
+
 cJSON *rpc_ai_store_call(const char *method, cJSON *params, sse_emit_fn emit, int *handled) {
     *handled = 1;
     if (!strcmp(method, "ai_list_chats")) {
@@ -611,6 +674,14 @@ cJSON *rpc_ai_store_call(const char *method, cJSON *params, sse_emit_fn emit, in
         if (s && !cJSON_IsNull(s)) return test_connection(s);
         cJSON *cur = rpc_get_settings();
         cJSON *r = test_connection(cur);
+        cJSON_Delete(cur);
+        return r;
+    }
+    if (!strcmp(method, "ai_list_models")) {
+        cJSON *s = cJSON_GetObjectItemCaseSensitive(params, "settings");
+        if (s && !cJSON_IsNull(s)) return list_models(s);
+        cJSON *cur = rpc_get_settings();
+        cJSON *r = list_models(cur);
         cJSON_Delete(cur);
         return r;
     }

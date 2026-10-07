@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """启动器全局配置。"""
+from copy import deepcopy
 import threading
 from pathlib import Path
 
@@ -11,6 +12,8 @@ CONFIG_FILE = utils.ROOT / "config.json"
 # 还停在旧出厂值上的老配置会再跟一次；用户自己选过别的档位一律不动。
 ISOLATION_DEFAULTS_VERSION = "2026.09-isolate-all"
 _LEGACY_DEFAULT_ISOLATION = "none"
+# 内置公益网关换过一次接入方式：见 _migrate_ai_gateway_mode
+AI_GATEWAY_DEFAULTS_VERSION = "2026.10-builtin-newapi"
 
 DEFAULT_CONFIG = {
     # 游戏目录（相对于启动器主目录）。与 PCL/HMCL 一样用 .minecraft，
@@ -53,7 +56,9 @@ DEFAULT_CONFIG = {
     # 跟随系统代理（Clash 7897）。关了才强制直连
     "use_system_proxy": True,
     # AI 助手：public=公益网关；custom=用户自己的 NewAPI
-    "ai_mode": "public",
+    # 内置的是标准 NewAPI 服务（只有 /v1/* 是真实接口，其余路径返回 SPA 首页），
+    # 所以默认走 custom + /v1；public 模式要的是自建 ai_gateway/server.py 的 /pymcl/chat。
+    "ai_mode": "custom",
     "ai_gateway_url": "",
     "ai_base_url": "",
     "ai_api_key": "",
@@ -68,6 +73,10 @@ DEFAULT_CONFIG = {
     "ai_context_window": 200000,
     # 单次回复上限：2048 讲排错方案必撞顶，放宽到 8192 并支持截断续写
     "ai_max_tokens": 8192,
+    # 模型能力覆盖表（可选）：{"模型名或正则": {"inputFormat": {"supportsImage": true},
+    # "contextWindow": 128000}}。内置表（mclauncher/ai/model_rules.json，搬自
+    # ZCode）没收录的新模型在这里补一条即可，不必改代码。
+    "ai_model_caps_overrides": {},
     # HMCL 自定义 EasyTier 会合节点（官方 /nodes 表往往不够）
     "terracotta_extra_nodes": [
         "https://terracotta.glavo.site/acebc7d8-1208-47fd-b212-d03ac49e36e0",
@@ -82,6 +91,8 @@ DEFAULT_CONFIG = {
     "default_isolation": "all",
     # 上面那个默认换过一次的标记，见 _migrate_default_isolation
     "isolation_defaults": "",
+    # 内置公益网关换过接入方式的标记，见 _migrate_ai_gateway_mode
+    "ai_gateway_defaults": "",
     "default_jvm_args": "",
     "default_priority": "normal",
     "update_url": "https://pymcl.dev/update.json",
@@ -160,7 +171,7 @@ DEFAULT_CONFIG = {
 
 class Config:
     def __init__(self):
-        self.data = dict(DEFAULT_CONFIG)
+        self.data = deepcopy(DEFAULT_CONFIG)
         # 每次改动 +1。上层（如 app.backend.get_setting）据此判断缓存是否还新鲜，
         # 不用每取一个键就把整份设置字典重建一遍。
         self.revision = 0
@@ -190,11 +201,14 @@ class Config:
                 missing = True
             if self._migrate_default_isolation():
                 missing = True
+            if self._migrate_ai_gateway_mode():
+                missing = True
             if missing:
                 self.save()
         else:
             self._migrate_legacy_instances_dir()
             self._migrate_default_isolation()
+            self._migrate_ai_gateway_mode()
             self.save()
 
     def _migrate_legacy_instances_dir(self) -> bool:
@@ -224,6 +238,24 @@ class Config:
         if str(self.data.get("default_isolation") or "") == _LEGACY_DEFAULT_ISOLATION:
             self.data["default_isolation"] = "all"
         self.data["isolation_defaults"] = ISOLATION_DEFAULTS_VERSION
+        return True
+
+    def _migrate_ai_gateway_mode(self) -> bool:
+        """内置网关从「自建 ai_gateway 的 /pymcl/chat」换成「标准 NewAPI 的 /v1」。
+
+        只迁还停在旧出厂值 public、且三条地址都没自己填过的配置——那样的人才
+        是「从没配过 AI、一直吃出厂值」的用户。挑过模式或填过地址的人不动，
+        免得把人家自建的公益网关改成 custom 反而连不上。标记只做一次。
+        """
+        if self.data.get("ai_gateway_defaults") == AI_GATEWAY_DEFAULTS_VERSION:
+            return False
+        untouched = not any(
+            str(self.data.get(k) or "").strip()
+            for k in ("ai_gateway_url", "ai_base_url", "ai_api_key")
+        )
+        if untouched and str(self.data.get("ai_mode") or "") == "public":
+            self.data["ai_mode"] = "custom"
+        self.data["ai_gateway_defaults"] = AI_GATEWAY_DEFAULTS_VERSION
         return True
 
     def save(self):
@@ -277,7 +309,9 @@ BG_HISTORY_MAX = 20
 def _history_paths(raw) -> list:
     """栈里只认字符串和 Path。别的类型 str() 一下会变出一条看着像路径的假货
     （整个栈被误塞进某一格就是这样），撤销时会当真拿去加载。"""
-    return [str(p) for p in (raw or []) if isinstance(p, (str, Path))]
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(p) for p in raw if isinstance(p, (str, Path))]
 
 
 def background_history() -> tuple:

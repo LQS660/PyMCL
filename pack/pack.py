@@ -41,11 +41,49 @@ def drop_junk(root: Path) -> None:
                 pass
 
 
+def include_docs(root: Path, stage: Path) -> None:
+    """把 AI 网关搭建说明放进载荷，供 AI 报错文案指向。
+
+    默认 stage 只拷 ui/ 与 native/，ai_gateway/README.md 不在其中；client.py 的报错
+    会引导用户看说明文档，文件必须在包里用户才找得到。README.md 不是 .py，不违反
+    「载荷不含 .py」的出包断言。
+    """
+    src = root / "ai_gateway" / "README.md"
+    if not src.is_file():
+        print("[warn] ai_gateway/README.md 不存在，跳过（报错文案会指向项目主页）")
+        return
+    dest = stage / "ai_gateway" / "README.md"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    print("[docs] 已放入 ai_gateway/README.md")
+
+
 def strip_bridge(stage: Path) -> None:
-    """只剥打包目录里 C 桥副本的符号表：native/build.bat 没带 -s，符号表占了 exe 一半多。原件不动。"""
+    """只剥打包目录里 C 桥副本的符号表：native/build.bat 没带 -s，符号表占了 exe 一半多。原件不动。
+
+    strip 缺失只警告不中断：Windows 裸机默认既没有 C:\\msys64\\...\\strip.exe 也没有
+    PATH 上的 strip，旧版 check_call 会在这里抛 FileNotFoundError，让打包在最后一步前失败。
+    """
     exe = stage / "native" / "build" / "pymcl-bridge.exe"
-    if exe.is_file():
-        subprocess.check_call([str(STRIP if STRIP.exists() else "strip"), "-s", str(exe)])
+    if not exe.is_file():
+        return
+    strip = str(STRIP) if STRIP.exists() else shutil.which("strip")
+    if not strip:
+        print("[warn] 找不到 strip（C:\\msys64\\mingw64\\bin\\strip.exe 与 PATH 都没有），跳过符号剥离，"
+              "产物体积会偏大但不影响功能")
+        return
+    # strip 中途失败会在目标目录留下自己的临时文件（GNU strip 的 stXXXXXX），
+    # 而 stage 目录随后整个被打进载荷 —— 不能让它进包。先记录目录内容，失败后清掉新增项。
+    before = set(exe.parent.iterdir())
+    try:
+        subprocess.check_call([strip, "-s", str(exe)])
+    except (OSError, subprocess.CalledProcessError) as e:
+        for p in set(exe.parent.iterdir()) - before:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        print(f"[warn] strip 失败（{type(e).__name__}: {e}），跳过符号剥离，继续打包")
 
 
 def xz_bundle(stage: Path, dest: Path) -> None:
@@ -110,11 +148,16 @@ def main() -> None:
     dist = Path(args.dist)
     dist.mkdir(parents=True, exist_ok=True)
     drop_junk(stage)
+    include_docs(root, stage)
     prune_cultures(stage / "ui")
     strip_bridge(stage)
+    # 临时文件按 stage 名 + 进程 id 区分：_pack_net48.py 与 _pack_pcl_ui.py 的 PACK
+    # 同为 pymcl-pack、stage.parent 相同，旧版固定名 payload.xz / stub.exe 会让两个
+    # 打包并发/交叉执行时互相覆盖载荷，产出「MAGIC 校验能过但内容串台」的 exe。
     work = stage.parent
-    zpath = work / "payload.xz"
-    stub = work / "stub.exe"
+    tag = f"{stage.name}-{os.getpid()}"
+    zpath = work / f"payload-{tag}.xz"
+    stub = work / f"stub-{tag}.exe"
     xz_bundle(stage, zpath)
     build_stub(root, stub)
     append_payload(stub, zpath, dist / "PyMCL.exe")

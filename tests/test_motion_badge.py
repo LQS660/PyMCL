@@ -175,6 +175,33 @@ class TaskBadgePulseTests(_MotionOnTests):
         self.assertTrue(_wait_until(lambda: self.badge.graphicsEffect() is None))
 
 
+class TaskBadgeMissingButtonTests(_MotionOnTests):
+    """侧栏没有「下载任务」按钮时，角标不许变成独立顶层窗口。
+
+    把一级键 tasks 在布局设置里取消勾选，`nav_items_from_config()` 会跳过它，
+    `side.button("tasks")` 返回 None。此时旧代码 `QLabel("0", None)` 建出无父
+    控件，`_update_task_badge` 的 `show()` 让它变成一个 (0,0) 的顶层窗口：屏幕上
+    左上角冒出游离的红色小方块，不随主窗移动/关闭，还会在
+    quitOnLastWindowClosed=True 下阻止应用退出。
+    """
+
+    def test_no_badge_widget_when_tasks_button_absent(self):
+        host = _badge_host_class()(_FakeSide(None))
+        self.assertIsNone(host.task_badge, "没有挂载点就不该建控件")
+        # 这两个方法以前直接 self.task_badge.hide()/show()，None 上必抛 AttributeError
+        host._update_task_badge(3)
+        host._update_task_badge(0)
+        host._place_task_badge()
+
+    def test_no_new_top_level_window_appears(self):
+        before = {w for w in QApplication.topLevelWidgets() if w.isVisible()}
+        host = _badge_host_class()(_FakeSide(None))
+        host._update_task_badge(3)
+        QApplication.processEvents()
+        after = {w for w in QApplication.topLevelWidgets() if w.isVisible()}
+        self.assertEqual(set(), after - before, "角标变成了游离的顶层窗口")
+
+
 class MotionRegistryCleanupTests(_MotionOnTests):
     def setUp(self):
         super().setUp()

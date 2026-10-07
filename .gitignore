@@ -143,3 +143,9 @@ config.json.bak*
 # 迁移前的整包备份 zip 与预览大图
 /_backup_*.zip
 /_*_view.jpg
+
+# 一次性备份副本与 agent 工作区（不入库）
+*.bak*
+/_smoke_root/
+/.zcode-bugfix/
+/.zcode-case/

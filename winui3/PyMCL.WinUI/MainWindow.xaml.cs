@@ -100,10 +100,7 @@ public sealed partial class MainWindow : Window
     {
         try
         {
-            AppServices.Host = await BridgeHost.StartAsync();
-            AppServices.Client = AppServices.Host.Client;
-            AppServices.Client.EventReceived += OnBridgeEvent;
-            AppServices.Client.EventStreamStateChanged += OnEventStreamStateChanged;
+            await ConnectAsync();
             _launch = new LaunchPage();
             _instance = new InstancePage();
             _account = new AccountPage();
@@ -131,6 +128,78 @@ public sealed partial class MainWindow : Window
             };
         }
     }
+
+    private bool _drained;
+    private bool _reconnecting;
+
+    /// <summary>
+    /// 起桥 + 挂事件。重连时会把上一份 host 脱钩释放（<see cref="BridgeHost.Dispose"/> 退掉
+    /// BridgeClient，含 HttpClient 与常驻 SSE 任务并杀掉桥进程），否则每次重连漏一份。
+    /// </summary>
+    private async Task ConnectAsync()
+    {
+        DetachHost();
+        var host = await BridgeHost.StartAsync();
+        AppServices.Host = host;
+        AppServices.Client = host.Client;
+        host.Client.EventReceived += OnBridgeEvent;
+        host.Client.EventStreamStateChanged += OnEventStreamStateChanged;
+        // 桥进程本身死了（崩溃 / 被杀 / taskkill）：SSE 循环重连的是同一个死端口，
+        // 前端会永远停在「重连中」。这里把它变成一次可恢复的重连。
+        host.Exited += (_, _) => AppServices.OnUi(OnBridgeDied);
+    }
+
+    /// <summary>换 host 之前先脱钩 + 释放：事件订阅挂在旧 client 上，不放会一起漏。</summary>
+    private void DetachHost()
+    {
+        var old = AppServices.Host;
+        if (old is null) return;
+        try { old.Client.EventReceived -= OnBridgeEvent; } catch { }
+        try { old.Client.EventStreamStateChanged -= OnEventStreamStateChanged; } catch { }
+        try { old.Dispose(); } catch { }
+        AppServices.Host = null;
+    }
+
+    /// <summary>
+    /// 桥进程死了之后的收尾 + 重建。两种情况下不动作：
+    /// <see cref="_drained"/>（用户主动退出）与 <see cref="_reconnecting"/>
+    /// （重连过程中 DetachHost 会杀掉旧桥，旧桥的 Exited 会再回来一次——那是自家人为的，
+    /// 不能再弹「后端已退出」，也不能再触发一次重连）。
+    /// </summary>
+    private void OnBridgeDied()
+    {
+        if (_drained || _reconnecting) return;
+        ShowToast("后端已退出", "桥进程已退出，正在重连…", InfoBarSeverity.Error);
+        _ = ReconnectAfterDeathAsync();
+    }
+
+    /// <summary>桥进程死了之后重建一条。失败就提示「未连接」，不再自动重试（避免死循环）。</summary>
+    private async Task ReconnectAfterDeathAsync()
+    {
+        if (_reconnecting || _drained) return;
+        _reconnecting = true;
+        try
+        {
+            await Task.Delay(400);          // 让端口先彻底释放，免得刚连上又断
+            await ConnectAsync();
+            ShowToast("已重新连接", "后端已恢复，正在刷新状态", InfoBarSeverity.Success);
+            await ReloadCurrentAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowToast("重连失败", ex.Message, InfoBarSeverity.Error);
+        }
+        finally
+        {
+            _reconnecting = false;
+        }
+    }
+
+    /// <summary>
+    /// 关窗路径上先置位：桥退出事件随后到（Dispose 会杀进程）也不能再触发重连，
+    /// 否则用户点关闭后还会拉起一条新桥，窗口却已经没了。
+    /// </summary>
+    public void MarkDrained() => _drained = true;
 
     private bool _dockSizing;
 
@@ -252,7 +321,9 @@ public sealed partial class MainWindow : Window
             if (tasksItem is null || source is null) return;
             var color = FlyAnim.ParseColor(colorHex, Color.FromArgb(255, 46, 155, 107));
             var letter = string.IsNullOrWhiteSpace(text) ? "↓" : text.Trim()[..1];
-            FlyAnim.FlyTo(FlyLayer, source, tasksItem, letter, color, duration, () =>
+            // FlyTo 改成 Task 后在这里 await：外层 try/catch 能观察到它的异常。
+            // 原来是 async void，动画里抛错直接进 UnhandledException，只写日志不给用户任何提示。
+            await FlyAnim.FlyTo(FlyLayer, source, tasksItem, letter, color, duration, () =>
             {
                 _ = Motion.PulseOnceAsync(TaskBadge);
             });
@@ -436,7 +507,7 @@ public sealed partial class MainWindow : Window
             if (_dockActive.Count == 0)
             {
                 DockTitle.Text = "下载任务";
-                DockStatus.Text = ev.Success ? "✔ 全部完成" : (ev.Message ?? "已结束");
+                DockStatus.Text = ev.Success ? "✔ 全部完成" : (ev.Message ?? "✘ 失败");
                 DockSpeed.Text = "";
                 if (ev.Success) DockProgress.Value = 100;
                 PlaceDock();

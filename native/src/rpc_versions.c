@@ -1,5 +1,7 @@
 #include "pymcl.h"
 #include <ctype.h>
+#include <pthread.h>
+#include <winioctl.h>
 
 /* 版本目录操作与隔离、内容导出：mclauncher/version_ops.py、version_settings.set_isolation、
    content_export.py 的移植。 */
@@ -37,7 +39,73 @@ static int dir_nonempty(const char *p) {
     return n > 0;
 }
 
-/* version_settings._junction：cmd /c mklink /J，与 Python 一样 */
+/* 建 junction 用 Win32 API 直接做，不再经 `cmd /c mklink /J`。
+   旧实现把 link/target 拼进 cmd.exe 的命令行，版本名里的一个 `&` 就能让 cmd 把后半截
+   当新命令执行（sanitize_id 的过滤集不含 &，quote_arg 无空格时也不加引号）——
+   实测 `x&whoami>C:\...\INJ.txt` 真写成了文件。直接调 DeviceIoControl 设
+   FSCTL_SET_REPARSE_POINT（mklink /J 的本质）从根上没有 shell 解析。
+
+   缓冲区按 REPARSE_DATA_BUFFER 的确切字节布局手写（MinGW 的 winioctl.h 里没有
+   MountPointReparseBuffer 分支）。布局与长度语义按真 `mklink /J` 的
+   `fsutil reparsepoint query` 转储反推并逐个组合实测过（native/tests/ 有探针）：
+     0  ULONG  ReparseTag            = IO_REPARSE_TAG_MOUNT_POINT
+     4  USHORT ReparseDataLength     = 8 + print_off + print_len + 2
+     6  USHORT Reserved              = 0
+     8  USHORT SubstituteNameOffset  = 0
+    10  USHORT SubstituteNameLength  = 替身名字节数（不含结尾 NUL）
+    12  USHORT PrintNameOffset       = SubstituteNameLength + 2（替身名自己的 NUL）
+    14  USHORT PrintNameLength       = 印名字节数（不含结尾 NUL）
+    16  WCHAR  PathBuffer[]          = "\??\C:\target" NUL "C:\target" NUL
+   传给 DeviceIoControl 的缓冲总长 = 8 + ReparseDataLength（含头 8 字节）。 */
+#define REPARSE_PATH_OFFSET 16u
+
+static int create_junction(const char *link, const char *target) {
+    wchar_t *wl = pymcl_u8_to_wide(link);
+    wchar_t *wt = pymcl_u8_to_wide(target);
+    if (!wl || !wt) { free(wl); free(wt); return -1; }
+    if (!CreateDirectoryW(wl, NULL)) {
+        DWORD e = GetLastError();
+        if (e != ERROR_ALREADY_EXISTS) { free(wl); free(wt); return -1; }
+    }
+    HANDLE h = CreateFileW(wl, GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (h == INVALID_HANDLE_VALUE) { free(wl); free(wt); return -1; }
+    /* 目标要写成 NT 命名空间路径（\??\C:\...），相对路径按 link 所在目录展开成绝对路径 */
+    wchar_t abs[PYMCL_PATH];
+    DWORD n = GetFullPathNameW(wt, PYMCL_PATH, abs, NULL);
+    if (!n || n >= PYMCL_PATH) { CloseHandle(h); free(wl); free(wt); return -1; }
+    wchar_t sub[PYMCL_PATH + 8];
+    int sn = _snwprintf(sub, PYMCL_PATH + 8, L"\\??\\%s", abs);
+    if (sn < 0 || sn >= PYMCL_PATH + 8) { CloseHandle(h); free(wl); free(wt); return -1; }
+    USHORT sub_len = (USHORT)(wcslen(sub) * sizeof(WCHAR));
+    USHORT print_len = (USHORT)(wcslen(abs) * sizeof(WCHAR));
+    USHORT print_off = (USHORT)(sub_len + sizeof(WCHAR));
+    size_t data_len = 8u + (size_t)print_off + (size_t)print_len + sizeof(WCHAR);
+    size_t buf_len = 8u + data_len;
+    unsigned char *rb = (unsigned char *)calloc(1, buf_len);
+    if (!rb) { CloseHandle(h); free(wl); free(wt); return -1; }
+    ULONG tag = IO_REPARSE_TAG_MOUNT_POINT;
+    USHORT dl = (USHORT)data_len, so = 0;
+    memcpy(rb + 0, &tag, sizeof(tag));
+    memcpy(rb + 4, &dl, sizeof(dl));
+    memcpy(rb + 8, &so, sizeof(so));
+    memcpy(rb + 10, &sub_len, sizeof(sub_len));
+    memcpy(rb + 12, &print_off, sizeof(print_off));
+    memcpy(rb + 14, &print_len, sizeof(print_len));
+    memcpy(rb + REPARSE_PATH_OFFSET, sub, wcslen(sub) * sizeof(WCHAR));
+    memcpy(rb + REPARSE_PATH_OFFSET + print_off, abs, wcslen(abs) * sizeof(WCHAR));
+    DWORD bytes = 0;
+    BOOL ok = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, rb, (DWORD)buf_len, NULL, 0, &bytes, NULL);
+    DWORD err = ok ? 0 : GetLastError();
+    free(rb);
+    CloseHandle(h);
+    free(wl);
+    free(wt);
+    if (!ok) { pymcl_set_error("创建目录链接失败 (%lu): %s", err, link); return -1; }
+    return 0;
+}
+
+/* version_settings._junction：把 link 变成指向 target 的目录链接（junction） */
 static void junction(const char *link, const char *target) {
     if (pymcl_path_exists(link) || is_link(link)) {
         if (pymcl_dir_exists(link) && !is_link(link) && dir_nonempty(link)) return;
@@ -52,8 +120,16 @@ static void junction(const char *link, const char *target) {
     char parent[PYMCL_PATH];
     pymcl_parent(link, parent, sizeof(parent));
     pymcl_ensure_dir(parent);
-    const char *argv[] = {"cmd", "/c", "mklink", "/J", link, target};
-    pymcl_run_process(argv, 6, NULL, NULL, NULL, 30);
+    if (create_junction(link, target) != 0) {
+        /* 极少数文件系统不支持 reparse point：退回符号链接，仍不经 cmd.exe */
+        wchar_t *wl = pymcl_u8_to_wide(link), *wt = pymcl_u8_to_wide(target);
+        if (wl && wt) {
+            DWORD flags = SYMBOLIC_LINK_FLAG_DIRECTORY;
+            if (!CreateSymbolicLinkW(wl, wt, flags))
+                CreateSymbolicLinkW(wl, wt, flags | 0x2 /* ALLOW_UNPRIVILEGED_CREATE */);
+        }
+        free(wl); free(wt);
+    }
 }
 
 static const char *iso_of(cJSON *s) {
@@ -174,7 +250,9 @@ static void copy_tree_into(const char *src, const char *dst) {
     cJSON_Delete(files);
 }
 
-/* version_ops.sanitize_id */
+/* version_ops.sanitize_id。非法字符集在 Python 的 [\\/:*?"<>|\x00-\x1f] 之上补了
+   cmd.exe 元字符 & | < > ^ ( ) % ! —— 路径最终可能进 shell 的地方一律先掐掉，
+   纵深防御（junction 已经不走 cmd.exe 了，但版本名还会拼进其它命令行）。 */
 static int sanitize_id(const char *raw, char *out, size_t n) {
     char t[512], u[512];
     const char *s = raw ? raw : "";
@@ -185,7 +263,7 @@ static int sanitize_id(const char *raw, char *out, size_t n) {
     size_t o = 0;
     for (const char *p = t; *p; p++) {
         unsigned char c = (unsigned char)*p;
-        u[o++] = (c < 32 || strchr("\\/:*?\"<>|", c)) ? '-' : (char)c;
+        u[o++] = (c < 32 || strchr("\\/:*?\"<>|&^()%!", c)) ? '-' : (char)c;
     }
     u[o] = 0;
     o = 0;
@@ -465,16 +543,14 @@ static void thumb_path(const char *url, char *out, size_t n) {
     pymcl_path_join(out, n, dir, fn);
 }
 
-/* 下载失败的 url 冷却 10 分钟（与 Python 一样只在进程内记） */
+/* 下载失败的 url 冷却 10 分钟（与 Python 一样只在进程内记）。
+   旧实现是 CAS 先置标志、再 InitializeCriticalSection：线程 B 落在两步之间时看到
+   标志已是 1，直接 EnterCriticalSection 一个尚未初始化的临界区（UB，可崩可死锁）。
+   改成静态初始化的 pthread 互斥量——没有初始化窗口，也就没有这个竞态。 */
 static cJSON *g_thumb_fail;
-static CRITICAL_SECTION g_thumb_cs;
-static volatile LONG g_thumb_cs_init;
+static pthread_mutex_t g_thumb_mu = PTHREAD_MUTEX_INITIALIZER;
 
-static void thumb_lock(void) {
-    if (InterlockedCompareExchange(&g_thumb_cs_init, 1, 0) == 0) InitializeCriticalSection(&g_thumb_cs);
-    else while (g_thumb_cs_init != 1) Sleep(0);
-    EnterCriticalSection(&g_thumb_cs);
-}
+static void thumb_lock(void) { pthread_mutex_lock(&g_thumb_mu); }
 
 static cJSON *ensure_thumb(const char *url) {
     if (!url || !url[0]) return cJSON_CreateString("");
@@ -487,7 +563,7 @@ static cJSON *ensure_thumb(const char *url) {
     cJSON *stamp = cJSON_GetObjectItemCaseSensitive(g_thumb_fail, url);
     int cooling = stamp && (double)time(NULL) - stamp->valuedouble < 600;
     if (stamp && !cooling) cJSON_DeleteItemFromObjectCaseSensitive(g_thumb_fail, url);
-    LeaveCriticalSection(&g_thumb_cs);
+    pthread_mutex_unlock(&g_thumb_mu);
     if (cooling) return cJSON_CreateString("");
     http_resp r;
     memset(&r, 0, sizeof(r));
@@ -502,7 +578,7 @@ static cJSON *ensure_thumb(const char *url) {
         }
         cJSON_AddNumberToObject(g_thumb_fail, url, (double)time(NULL));
     }
-    LeaveCriticalSection(&g_thumb_cs);
+    pthread_mutex_unlock(&g_thumb_mu);
     return cJSON_CreateString(ok ? local : "");
 }
 

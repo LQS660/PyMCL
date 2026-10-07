@@ -13,6 +13,14 @@ public sealed class BridgeHost : IDisposable
     public string Root { get; }
     public string Python { get; }
 
+    /// <summary>
+    /// 桥进程退出时触发（正常退出与被杀都算）。此前 <c>EnableRaisingEvents</c> 开了却
+    /// 没人订阅 <c>Exited</c>：桥一死，<see cref="BridgeClient"/> 的 SSE 循环只是在重连
+    /// 一个没人监听的端口，前端永远停在「重连中」，用户只能重启启动器。
+    /// 回调在 Process 的事件线程上跑，订阅方自己切 UI 线程（用 <see cref="AppServices.OnUi"/>）。
+    /// </summary>
+    public event EventHandler? Exited;
+
     private BridgeHost(BridgeClient client, Process proc, int port, string root, string python)
     {
         Client = client;
@@ -20,6 +28,9 @@ public sealed class BridgeHost : IDisposable
         Port = port;
         Root = root;
         Python = python;
+        // EnableRaisingEvents 已在 StartAsync 里打开；这里接上唯一缺的那一环。
+        try { proc.Exited += (s, e) => Exited?.Invoke(this, EventArgs.Empty); }
+        catch (InvalidOperationException) { /* 已经退出了，StartAsync 的健康检查会兜住 */ }
     }
 
     public static async Task<BridgeHost> StartAsync(CancellationToken ct = default)
@@ -139,8 +150,9 @@ public sealed class BridgeHost : IDisposable
     public static string FindRoot()
     {
         var env = Environment.GetEnvironmentVariable("PYMCL_HOME");
+        // PYMCL_HOME 手写成 C:\path\ 也归一化：尾分隔符会让 --root 的实参边界出错
         if (!string.IsNullOrWhiteSpace(env))
-            return Path.GetFullPath(env);
+            return NormalizeRoot(Path.GetFullPath(env));
 
         foreach (var start in new[]
                  {
@@ -178,10 +190,24 @@ public sealed class BridgeHost : IDisposable
         catch { return null; }
         while (dir != null)
         {
-            if (LooksLikeRoot(dir.FullName)) return dir.FullName;
+            if (LooksLikeRoot(dir.FullName)) return NormalizeRoot(dir.FullName);
             dir = dir.Parent;
         }
         return null;
+    }
+
+    /// <summary>
+    /// 去掉根路径结尾的目录分隔符。<c>AppContext.BaseDirectory</c> 恒定以分隔符结尾，
+    /// <see cref="DirectoryInfo.FullName"/> 在驱动器根目录时也是（<c>C:\</c>）。
+    /// 驱动器根必须保留 <c>C:\</c>，否则 <c>C:</c> 会退化成「当前目录」语义。
+    /// </summary>
+    internal static string NormalizeRoot(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return path;
+        var trimmed = path.TrimEnd('\\', '/');
+        if (trimmed.Length == 0) return path;                       // "\" 或 "/"：盘符相对根，原样留着
+        if (trimmed.Length == 2 && trimmed[1] == ':') return trimmed + Path.DirectorySeparatorChar;
+        return trimmed;
     }
 
     public static string? FindNativeBridge(string root)

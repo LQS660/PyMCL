@@ -150,6 +150,31 @@ class SidebarEditorDialog(MessageBoxBase):
     def _hidden_now(self) -> set:
         return {k for k, cb in self._boxes.items() if not cb.isChecked()}
 
+    def _ensure_visible(self, hidden: set) -> set:
+        """至少留一项，否则侧栏空了没法导航（返回修正后的 hidden）。
+
+        两条保存路径都要过这里：以前只有精简档那条有护栏，分组档那条
+        （accept() 里 style == GROUPED 的分支）直接写 `sorted(self._hidden_now())`。
+        实测（offscreen）：分组档 + 全部一级项取消勾选 + 逐个「取消固定」→
+        `ui_nav_hidden` 收进全部一级键、`ui_nav_pinned` 写 None，
+        `nav_items_from_config()` 的 item 数 = 0 —— 侧栏一个入口都不剩，
+        连「设置」都点不到，只能手改 config.json。这里按**最终可见项**兜底：
+        一级键全隐藏时把排序里第一个放出来；它之外还有固定子页的话也算有入口。
+        """
+        visible = [k for k in self._order if k not in hidden]
+        if visible:
+            return hidden
+        pinned = [k for k in (self._pinned or []) if k]
+        if pinned:
+            # 还有固定子页撑着侧栏：一级项全隐藏是允许的
+            return hidden
+        first = self._order[0]
+        hidden.discard(first)
+        box = self._boxes.get(first)
+        if box is not None:
+            box.setChecked(True)
+        return hidden
+
     def _rebuild_pin_rows(self):
         lay = self._pin_host.layout()
         while lay.count():
@@ -233,8 +258,9 @@ class SidebarEditorDialog(MessageBoxBase):
                     for _title, keys in groups:
                         keys[:] = [k for k in keys if k not in dropped]
                     save_grouped_layout(groups)
-            CONFIG.set("ui_nav_hidden", sorted(self._hidden_now()))
+            CONFIG.set("ui_nav_hidden", sorted(self._ensure_visible(self._hidden_now())))
             CONFIG.set("ui_sidebar_width", int(self.width_spin.value()))
+            CONFIG.set("ui_nav_pinned", list(self._pinned) or None)
             CONFIG.save()
             self.win._rebuild_sections()
             self.win._rebuild_sidebar()
@@ -257,13 +283,7 @@ class SidebarEditorDialog(MessageBoxBase):
             self.win._rebuild_sidebar()
             super().accept()
             return
-        hidden = self._hidden_now()
-        visible = [k for k in self._order if k not in hidden]
-        if not visible:
-            # 至少留一项，否则侧栏空了没法导航
-            first = self._order[0]
-            hidden.discard(first)
-            self._boxes[first].setChecked(True)
+        hidden = self._ensure_visible(self._hidden_now())
         # 写回混合序列：一级键换成对话框的新顺序，固定子页保持它们
         # 当前在侧栏里的相对位置（不把用户拖出来的混排压扁）
         from ..main_window import _ALL_SUB_KEYS
